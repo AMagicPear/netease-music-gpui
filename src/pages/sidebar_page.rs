@@ -1,7 +1,7 @@
 use gpui::prelude::{FluentBuilder, StatefulInteractiveElement};
 use gpui::*;
 
-use crate::components::{WindowDragArea, WindowDragState};
+use crate::components::{WindowDragState, window_drag_region};
 use crate::theme::{IconSize, Theme};
 
 /// 主内容区可切换的页面，侧边栏里的每一个导航项都对应其中一个。
@@ -91,7 +91,6 @@ pub(super) struct SidebarChanged;
 pub(super) struct SidebarPage {
     theme: Theme,
     active_page: ContentPage,
-    /// 窗口拖动的中间状态，由 [`WindowDragState`] 统一读写。
     window_move_pending: bool,
     /// 假数据，格式是 `(歌单名, 封面路径)`。
     playlists: Vec<(&'static str, &'static str)>,
@@ -131,8 +130,7 @@ impl SidebarPage {
 
 /// 顶部 logo 区域，同时充当窗口拖动手柄。
 fn page_header(theme: Theme, cx: &mut Context<SidebarPage>) -> impl IntoElement {
-    div()
-        .id("left-page-header")
+    window_drag_region("left-page-header", cx)
         .h(px(72.))
         .w_full()
         .px(px(18.))
@@ -169,7 +167,6 @@ fn page_header(theme: Theme, cx: &mut Context<SidebarPage>) -> impl IntoElement 
                         .text_color(theme.black1),
                 ),
         )
-        .window_drag(cx)
 }
 
 /// 侧边栏每一行的公共样式：撑满宽度、固定高度、内部水平排列。

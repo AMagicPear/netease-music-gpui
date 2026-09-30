@@ -4,12 +4,15 @@ use gpui::prelude::StatefulInteractiveElement;
 use gpui::*;
 
 use super::sidebar_page::{SidebarChanged, SidebarPage};
-use crate::components::{WindowDragArea, WindowDragState};
+use crate::components::{WindowDragState, window_drag_region};
 use crate::theme::Theme;
 use gpui_kit::base::input::{Input, InputState};
 
 const MIN_SIDEBAR_WIDTH: Pixels = px(204.);
 const MAX_SIDEBAR_WIDTH: Pixels = px(627.);
+const HEADER_HEIGHT: Pixels = px(72.);
+const HEADER_TOP_PADDING: Pixels = px(34.);
+const HEADER_SIDE_GUTTER: Pixels = px(40.);
 
 pub struct MainContent {
     theme: Theme,
@@ -26,8 +29,7 @@ impl MainContent {
         let sidebar_subscription = cx.subscribe(&sidebar, |_, _, _: &SidebarChanged, cx| {
             cx.notify();
         });
-        let search_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("搜索音乐、视频、歌词、电台"));
+        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("搜索音乐"));
 
         Self {
             theme,
@@ -57,12 +59,12 @@ fn search_box(input: Entity<InputState>, theme: Theme) -> impl IntoElement {
         .border_1()
         .border_color(theme.black10)
         .rounded_lg()
-        .text_size(px(13.))
+        .text_size(px(14.))
         .text_color(theme.black1)
         .child(
             svg()
                 .path("icons/search.svg")
-                .size(px(14.))
+                .size(px(20.))
                 .flex_none()
                 .text_color(theme.black5),
         )
@@ -77,17 +79,32 @@ fn page_header(
 ) -> impl IntoElement {
     div()
         .id(id)
-        .h(px(72.))
+        .h(HEADER_HEIGHT)
         .w_full()
         .flex_none()
-        .px_10()
-        .pt(px(34.))
+        .relative()
+        .pt(HEADER_TOP_PADDING)
+        .child(
+            window_drag_region("right-header-top-drag-region", cx)
+                .absolute()
+                .top_0()
+                .left_0()
+                .w_full()
+                .h(HEADER_TOP_PADDING),
+        )
         .child(
             div()
                 .w_full()
+                .h(HEADER_HEIGHT - HEADER_TOP_PADDING)
                 .flex()
                 .justify_between()
                 .items_center()
+                .child(
+                    window_drag_region("right-header-left-drag-region", cx)
+                        .w(HEADER_SIDE_GUTTER)
+                        .h_full()
+                        .flex_none(),
+                )
                 .child(
                     div()
                         .h_9()
@@ -113,9 +130,19 @@ fn page_header(
                         // 搜索框
                         .child(search_box(search_input, theme)),
                 )
-                .child(div().child("right")),
+                .child(
+                    window_drag_region("right-header-drag-region", cx)
+                        .flex_1()
+                        .h_full(),
+                )
+                .child(div().child("right"))
+                .child(
+                    window_drag_region("right-header-right-drag-region", cx)
+                        .w(HEADER_SIDE_GUTTER)
+                        .h_full()
+                        .flex_none(),
+                ),
         )
-        .window_drag(cx)
 }
 
 impl Render for MainContent {
