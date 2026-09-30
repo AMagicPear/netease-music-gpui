@@ -71,6 +71,7 @@ pub(super) struct SidebarPage {
     theme: Theme,
     active_page: ContentPage,
     window_move_pending: bool,
+    playlists: Vec<(&'static str, &'static str)>,
 }
 
 impl EventEmitter<SidebarChanged> for SidebarPage {}
@@ -81,6 +82,16 @@ impl SidebarPage {
             theme,
             active_page: ContentPage::Recommend,
             window_move_pending: false,
+            playlists: vec![
+                (
+                    "would u wanna ride with me",
+                    "/Users/amagicpear/Pictures/Perry Origin Character/ChatGPT Image 2026年9月29日 15_39_30.png",
+                ),
+                (
+                    "回声之境 | Echoesphere",
+                    "/Users/amagicpear/Pictures/Perry Origin Character/ChatGPT Image 2026年9月20日 22_25_55.png",
+                ),
+            ],
         }
     }
 
@@ -157,15 +168,8 @@ fn page_nav_item(
 ) -> impl IntoElement {
     let active = page == active_page;
 
-    div()
-        .id(page.id())
-        .w_full()
-        .h(px(36.))
-        .flex()
-        .items_center()
-        .gap(px(8.))
+    sidebar_row(page.id(), px(36.))
         .p(px(8.))
-        .rounded(px(8.))
         .text_size(px(14.))
         .text_color(if active { theme.white1 } else { theme.black1 })
         .when(active, |this| {
@@ -196,6 +200,18 @@ fn page_nav_item(
             cx.notify();
             cx.emit(SidebarChanged);
         }))
+}
+
+fn sidebar_row(id: impl Into<ElementId>, height: Pixels) -> Stateful<Div> {
+    div()
+        .id(id)
+        .w_full()
+        .h(height)
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .px(px(8.))
+        .rounded(px(8.))
 }
 
 fn main_navigation(
@@ -240,7 +256,7 @@ fn library_navigation(
                 .items_center()
                 .px(px(8.))
                 .text_size(px(12.))
-                .text_color(rgba(0x28324866))
+                .text_color(theme.black5)
                 .child("我的"),
         )
         .child(page_nav_item(
@@ -264,6 +280,40 @@ fn library_navigation(
         ))
 }
 
+fn created_playlist(title: &'static str, cover: &'static str, theme: Theme) -> impl IntoElement {
+    sidebar_row(title, px(42.))
+        .hover(|style| style.bg(theme.sidebar_subtle))
+        .child(img(cover).size(px(32.)).rounded(px(4.)).flex_none())
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .text_size(px(12.))
+                .line_height(px(16.))
+                .text_color(theme.black3)
+                .child(title),
+        )
+}
+
+fn created_playlists(playlists: &[(&'static str, &'static str)], theme: Theme) -> impl IntoElement {
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .child(
+            sidebar_row("created-playlists-heading", px(36.))
+                .text_size(px(12.))
+                .text_color(theme.black5)
+                .child("创建的歌单 25"),
+        )
+        .children(
+            playlists
+                .iter()
+                .map(|(title, cover)| created_playlist(title, cover, theme)),
+        )
+}
+
 impl Render for SidebarPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
@@ -280,24 +330,17 @@ impl Render for SidebarPage {
                     .flex_1()
                     .min_h(px(0.))
                     .overflow_y_scroll()
-                    .flex()
-                    .flex_col()
-                    .p(px(18.))
-                    .child(main_navigation(self.active_page, theme, cx))
                     .child(
                         div()
                             .w_full()
-                            .h(px(1.))
-                            .my(px(12.))
-                            .bg(theme.sidebar_subtle),
-                    )
-                    .child(library_navigation(self.active_page, theme, cx))
-                    .child(
-                        div()
-                            .w_full()
-                            .h(px(1.))
-                            .my(px(12.))
-                            .bg(theme.sidebar_subtle),
+                            .flex()
+                            .flex_col()
+                            .p(px(18.))
+                            .child(main_navigation(self.active_page, theme, cx))
+                            .child(div().w_full().h(px(1.)).my(px(12.)).bg(theme.black10))
+                            .child(library_navigation(self.active_page, theme, cx))
+                            .child(div().w_full().h(px(1.)).my(px(12.)).bg(theme.black10))
+                            .child(created_playlists(&self.playlists, theme)),
                     ),
             )
     }
