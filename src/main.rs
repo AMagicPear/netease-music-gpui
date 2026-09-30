@@ -1,13 +1,15 @@
 mod assets;
 mod components;
+mod pages;
 mod state;
 mod theme;
 
 use std::path::PathBuf;
 
 use assets::Assets;
-use components::{MainContent, PlayerBar};
+use components::PlayerBar;
 use gpui::*;
+use pages::MainContent;
 use state::playback::{PlaybackState, Song};
 use std::time::Duration;
 
@@ -58,7 +60,7 @@ fn main() {
                         position: Duration::from_secs(74),
                         is_playing: false,
                     });
-                    let main_content = cx.new(|_| MainContent::new(theme));
+                    let main_content = cx.new(|cx| MainContent::new(theme, cx));
                     let player_bar = cx.new(|cx| PlayerBar::new(theme, playback, cx));
                     cx.new(|_| MainWindow {
                         theme,

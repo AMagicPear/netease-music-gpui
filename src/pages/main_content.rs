@@ -1,48 +1,34 @@
 use std::{cell::Cell, rc::Rc};
 
-use gpui::prelude::{FluentBuilder, StatefulInteractiveElement};
+use gpui::prelude::StatefulInteractiveElement;
 use gpui::*;
 
+use super::sidebar_page::{SidebarChanged, SidebarPage};
 use crate::theme::Theme;
 
 const MIN_SIDEBAR_WIDTH: Pixels = px(204.);
 const MAX_SIDEBAR_WIDTH: Pixels = px(627.);
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ContentPage {
-    Discover,
-    Playlists,
-}
-
-impl ContentPage {
-    fn id(self) -> &'static str {
-        match self {
-            Self::Discover => "discover",
-            Self::Playlists => "playlists",
-        }
-    }
-
-    fn title(self) -> &'static str {
-        match self {
-            Self::Discover => "发现音乐",
-            Self::Playlists => "我的歌单",
-        }
-    }
-}
-
 pub struct MainContent {
     theme: Theme,
     sidebar_width: Pixels,
-    active_page: ContentPage,
+    sidebar: Entity<SidebarPage>,
+    _sidebar_subscription: Subscription,
     window_move_pending: bool,
 }
 
 impl MainContent {
-    pub fn new(theme: Theme) -> Self {
+    pub fn new(theme: Theme, cx: &mut Context<Self>) -> Self {
+        let sidebar = cx.new(|_| SidebarPage::new(theme));
+        let sidebar_subscription = cx.subscribe(&sidebar, |_, _, _: &SidebarChanged, cx| {
+            cx.notify();
+        });
+
         Self {
             theme,
             sidebar_width: MIN_SIDEBAR_WIDTH,
-            active_page: ContentPage::Discover,
+            sidebar,
+            _sidebar_subscription: sidebar_subscription,
             window_move_pending: false,
         }
     }
@@ -75,40 +61,10 @@ fn page_header(id: &'static str, cx: &mut Context<MainContent>) -> impl IntoElem
         }))
 }
 
-fn page_nav_item(
-    page: ContentPage,
-    active_page: ContentPage,
-    theme: Theme,
-    cx: &mut Context<MainContent>,
-) -> impl IntoElement {
-    div()
-        .id(page.id())
-        .w_full()
-        .h(px(40.))
-        .flex()
-        .items_center()
-        .px(px(12.))
-        .rounded(px(4.))
-        .text_size(px(14.))
-        .text_color(if page == active_page {
-            theme.primary
-        } else {
-            theme.black5
-        })
-        .when(page == active_page, |this| this.bg(rgba(0xfc3d491a)))
-        .when(page != active_page, |this| {
-            this.hover(|style| style.bg(theme.black10))
-        })
-        .on_click(cx.listener(move |this, _, _, cx| {
-            this.active_page = page;
-            cx.notify();
-        }))
-        .child(page.title())
-}
-
 impl Render for MainContent {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
+        let active_page = self.sidebar.read(cx).active_page();
         let drag_offset = Rc::new(Cell::new(px(0.)));
 
         div()
@@ -120,34 +76,9 @@ impl Render for MainContent {
             .child(
                 div()
                     .w(self.sidebar_width)
+                    .h_full()
                     .flex_none()
-                    .flex()
-                    .flex_col()
-                    .bg(rgba(0x28324808))
-                    .child(page_header("left-page-header", cx))
-                    .child(
-                        div()
-                            .id("left-page-content")
-                            .flex_1()
-                            .min_h(px(0.))
-                            .overflow_y_scroll()
-                            .flex()
-                            .flex_col()
-                            .gap(px(4.))
-                            .p(px(12.))
-                            .child(page_nav_item(
-                                ContentPage::Discover,
-                                self.active_page,
-                                theme,
-                                cx,
-                            ))
-                            .child(page_nav_item(
-                                ContentPage::Playlists,
-                                self.active_page,
-                                theme,
-                                cx,
-                            )),
-                    ),
+                    .child(self.sidebar.clone()),
             )
             .child(
                 div()
@@ -166,7 +97,7 @@ impl Render for MainContent {
                             .text_size(px(24.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.black1)
-                            .child(self.active_page.title()),
+                            .child(active_page.title()),
                     ),
             )
             .child(

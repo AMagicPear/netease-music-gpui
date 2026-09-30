@@ -30,6 +30,7 @@ pub struct Theme {
     pub black3: Rgba,
     pub black5: Rgba,
     pub black10: Rgba,
+    pub sidebar_subtle: Rgba,
     pub primary: Rgba,
     pub white1: Rgba,
 }
@@ -43,6 +44,12 @@ impl Theme {
             black3: rgba(0x283248cc),
             black5: rgba(0x28324899),
             black10: rgba(0x2832481a),
+            sidebar_subtle: Rgba {
+                r: 40. / 255.,
+                g: 50. / 255.,
+                b: 72. / 255.,
+                a: 0.06,
+            },
             primary: rgb(0xfc3d49),
             white1: rgb(0xffffff),
         }

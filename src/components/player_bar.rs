@@ -54,6 +54,7 @@ fn interaction_count(
                 .bg(theme.player_bar_background)
                 .text_color(color)
                 .text_size(px(8.))
+                .font_family("Trebuchet MS")
                 .font_weight(FontWeight::SEMIBOLD)
                 .line_height(px(10.))
                 .child(count),
