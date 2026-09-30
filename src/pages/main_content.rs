@@ -4,6 +4,7 @@ use gpui::prelude::StatefulInteractiveElement;
 use gpui::*;
 
 use super::sidebar_page::{SidebarChanged, SidebarPage};
+use crate::components::{WindowDragArea, WindowDragState};
 use crate::theme::Theme;
 
 const MIN_SIDEBAR_WIDTH: Pixels = px(204.);
@@ -34,31 +35,14 @@ impl MainContent {
     }
 }
 
+impl WindowDragState for MainContent {
+    fn window_move_pending_mut(&mut self) -> &mut bool {
+        &mut self.window_move_pending
+    }
+}
+
 fn page_header(id: &'static str, cx: &mut Context<MainContent>) -> impl IntoElement {
-    div()
-        .id(id)
-        .h(px(72.))
-        .w_full()
-        .flex_none()
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|this, _, _, _| this.window_move_pending = true),
-        )
-        .on_mouse_up(
-            MouseButton::Left,
-            cx.listener(|this, _, _, _| this.window_move_pending = false),
-        )
-        .on_mouse_up_out(
-            MouseButton::Left,
-            cx.listener(|this, _, _, _| this.window_move_pending = false),
-        )
-        .on_mouse_down_out(cx.listener(|this, _, _, _| this.window_move_pending = false))
-        .on_mouse_move(cx.listener(|this, _, window, _| {
-            if this.window_move_pending {
-                this.window_move_pending = false;
-                window.start_window_move();
-            }
-        }))
+    div().id(id).h(px(72.)).w_full().flex_none().window_drag(cx)
 }
 
 impl Render for MainContent {

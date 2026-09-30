@@ -1,6 +1,7 @@
 use gpui::prelude::{FluentBuilder, StatefulInteractiveElement};
 use gpui::*;
 
+use crate::components::{WindowDragArea, WindowDragState};
 use crate::theme::{IconSize, Theme};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -76,6 +77,12 @@ pub(super) struct SidebarPage {
 
 impl EventEmitter<SidebarChanged> for SidebarPage {}
 
+impl WindowDragState for SidebarPage {
+    fn window_move_pending_mut(&mut self) -> &mut bool {
+        &mut self.window_move_pending
+    }
+}
+
 impl SidebarPage {
     pub(super) fn new(theme: Theme) -> Self {
         Self {
@@ -139,25 +146,7 @@ fn page_header(theme: Theme, cx: &mut Context<SidebarPage>) -> impl IntoElement 
                         .text_color(theme.black1),
                 ),
         )
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|this, _, _, _| this.window_move_pending = true),
-        )
-        .on_mouse_up(
-            MouseButton::Left,
-            cx.listener(|this, _, _, _| this.window_move_pending = false),
-        )
-        .on_mouse_up_out(
-            MouseButton::Left,
-            cx.listener(|this, _, _, _| this.window_move_pending = false),
-        )
-        .on_mouse_down_out(cx.listener(|this, _, _, _| this.window_move_pending = false))
-        .on_mouse_move(cx.listener(|this, _, window, _| {
-            if this.window_move_pending {
-                this.window_move_pending = false;
-                window.start_window_move();
-            }
-        }))
+        .window_drag(cx)
 }
 
 fn page_nav_item(
