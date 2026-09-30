@@ -33,13 +33,14 @@ impl Render for MainWindow {
 }
 
 fn main() {
-    gpui_platform::application()
+    gpui_kit::application()
         .with_assets(Assets {
             base: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets"),
         })
         .run(|cx: &mut App| {
+            gpui_kit::init(cx);
             let bounds = Bounds::centered(None, size(px(1060.), px(720.)), cx);
-            cx.open_window(
+            gpui_kit::open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     app_owns_titlebar_drag: true,
@@ -49,7 +50,8 @@ fn main() {
                     }),
                     ..Default::default()
                 },
-                |_, cx| {
+                cx,
+                |window, cx| {
                     let theme = theme::Theme::netease();
                     let playback = cx.new(|_| PlaybackState {
                         current_song: Some(Song {
@@ -60,7 +62,7 @@ fn main() {
                         position: Duration::from_secs(74),
                         is_playing: false,
                     });
-                    let main_content = cx.new(|cx| MainContent::new(theme, cx));
+                    let main_content = cx.new(|cx| MainContent::new(theme, window, cx));
                     let player_bar = cx.new(|cx| PlayerBar::new(theme, playback, cx));
                     cx.new(|_| MainWindow {
                         theme,

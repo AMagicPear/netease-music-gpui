@@ -141,7 +141,7 @@ fn page_header(theme: Theme, cx: &mut Context<SidebarPage>) -> impl IntoElement 
                 .flex()
                 .items_center()
                 .gap(px(8.))
-                .top_10()
+                .pt_10()
                 .left_1()
                 .child(
                     div()

@@ -43,7 +43,12 @@ impl Theme {
             black1: rgb(0x283248),
             black3: rgba(0x283248cc),
             black5: rgba(0x28324899),
-            black10: rgba(0x2832481a),
+            black10: Rgba {
+                r: 40. / 255.,
+                g: 50. / 255.,
+                b: 72. / 255.,
+                a: 0.1,
+            },
             sidebar_subtle: Rgba {
                 r: 40. / 255.,
                 g: 50. / 255.,

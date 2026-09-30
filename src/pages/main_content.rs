@@ -6,6 +6,7 @@ use gpui::*;
 use super::sidebar_page::{SidebarChanged, SidebarPage};
 use crate::components::{WindowDragArea, WindowDragState};
 use crate::theme::Theme;
+use gpui_kit::base::input::{Input, InputState};
 
 const MIN_SIDEBAR_WIDTH: Pixels = px(204.);
 const MAX_SIDEBAR_WIDTH: Pixels = px(627.);
@@ -14,21 +15,25 @@ pub struct MainContent {
     theme: Theme,
     sidebar_width: Pixels,
     sidebar: Entity<SidebarPage>,
+    search_input: Entity<InputState>,
     _sidebar_subscription: Subscription,
     window_move_pending: bool,
 }
 
 impl MainContent {
-    pub fn new(theme: Theme, cx: &mut Context<Self>) -> Self {
+    pub fn new(theme: Theme, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let sidebar = cx.new(|_| SidebarPage::new(theme));
         let sidebar_subscription = cx.subscribe(&sidebar, |_, _, _: &SidebarChanged, cx| {
             cx.notify();
         });
+        let search_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("搜索音乐、视频、歌词、电台"));
 
         Self {
             theme,
             sidebar_width: MIN_SIDEBAR_WIDTH,
             sidebar,
+            search_input,
             _sidebar_subscription: sidebar_subscription,
             window_move_pending: false,
         }
@@ -41,8 +46,76 @@ impl WindowDragState for MainContent {
     }
 }
 
-fn page_header(id: &'static str, cx: &mut Context<MainContent>) -> impl IntoElement {
-    div().id(id).h(px(72.)).w_full().flex_none().window_drag(cx)
+/// 搜索框：左边放大镜图标，右边文本输入框。
+fn search_box(input: Entity<InputState>, theme: Theme) -> impl IntoElement {
+    div()
+        .w(px(258.))
+        .flex()
+        .items_center()
+        .gap_1()
+        .px_2()
+        .border_1()
+        .border_color(theme.black10)
+        .rounded_lg()
+        .text_size(px(13.))
+        .text_color(theme.black1)
+        .child(
+            svg()
+                .path("icons/search.svg")
+                .size(px(14.))
+                .flex_none()
+                .text_color(theme.black5),
+        )
+        .child(Input::new(&input))
+}
+
+fn page_header(
+    id: &'static str,
+    theme: Theme,
+    search_input: Entity<InputState>,
+    cx: &mut Context<MainContent>,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .h(px(72.))
+        .w_full()
+        .flex_none()
+        .px_10()
+        .pt(px(34.))
+        .child(
+            div()
+                .w_full()
+                .flex()
+                .justify_between()
+                .items_center()
+                .child(
+                    div()
+                        .h_9()
+                        .flex()
+                        .gap_2()
+                        // 返回按钮
+                        .child(
+                            div()
+                                .w_7()
+                                .border_1()
+                                .border_color(theme.black10)
+                                .rounded_lg()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    svg()
+                                        .path("icons/backward.svg")
+                                        .size(px(11.))
+                                        .text_color(theme.black3),
+                                ),
+                        )
+                        // 搜索框
+                        .child(search_box(search_input, theme)),
+                )
+                .child(div().child("right")),
+        )
+        .window_drag(cx)
 }
 
 impl Render for MainContent {
@@ -70,7 +143,12 @@ impl Render for MainContent {
                     .min_w(px(0.))
                     .flex()
                     .flex_col()
-                    .child(page_header("right-page-header", cx))
+                    .child(page_header(
+                        "right-page-header",
+                        theme,
+                        self.search_input.clone(),
+                        cx,
+                    ))
                     .child(
                         div()
                             .id("right-page-content")
