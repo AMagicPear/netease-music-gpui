@@ -4,6 +4,7 @@ use gpui::*;
 use crate::components::{WindowDragArea, WindowDragState};
 use crate::theme::{IconSize, Theme};
 
+/// 主内容区可切换的页面，侧边栏里的每一个导航项都对应其中一个。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum ContentPage {
     Recommend,
@@ -17,7 +18,25 @@ pub(super) enum ContentPage {
     MyCollection,
 }
 
+/// 顶部导航分组：推荐、精选、播客、漫游、关注。
+const MAIN_PAGES: [ContentPage; 5] = [
+    ContentPage::Recommend,
+    ContentPage::Featured,
+    ContentPage::Podcast,
+    ContentPage::Roaming,
+    ContentPage::Following,
+];
+
+/// 「我的音乐库」分组，展示在分隔线下方。
+const LIBRARY_PAGES: [ContentPage; 4] = [
+    ContentPage::FavoriteMusic,
+    ContentPage::Recent,
+    ContentPage::MyPodcast,
+    ContentPage::MyCollection,
+];
+
 impl ContentPage {
+    /// 同时作为元素 id，GPUI 靠它来匹配状态与事件。
     fn id(self) -> &'static str {
         match self {
             Self::Recommend => "recommend",
@@ -66,12 +85,15 @@ impl ContentPage {
     }
 }
 
+/// 选中项变化时发出的事件，`MainContent` 订阅它来重新渲染右侧内容。
 pub(super) struct SidebarChanged;
 
 pub(super) struct SidebarPage {
     theme: Theme,
     active_page: ContentPage,
+    /// 窗口拖动的中间状态，由 [`WindowDragState`] 统一读写。
     window_move_pending: bool,
+    /// 假数据，格式是 `(歌单名, 封面路径)`。
     playlists: Vec<(&'static str, &'static str)>,
 }
 
@@ -107,6 +129,7 @@ impl SidebarPage {
     }
 }
 
+/// 顶部 logo 区域，同时充当窗口拖动手柄。
 fn page_header(theme: Theme, cx: &mut Context<SidebarPage>) -> impl IntoElement {
     div()
         .id("left-page-header")
@@ -149,6 +172,33 @@ fn page_header(theme: Theme, cx: &mut Context<SidebarPage>) -> impl IntoElement 
         .window_drag(cx)
 }
 
+/// 侧边栏每一行的公共样式：撑满宽度、固定高度、内部水平排列。
+fn sidebar_row(id: impl Into<ElementId>, height: Pixels) -> Stateful<Div> {
+    div()
+        .id(id)
+        .w_full()
+        .h(height)
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .px(px(8.))
+        .rounded(px(8.))
+}
+
+/// 分组标题，例如「我的」「创建的歌单 25」。
+fn section_heading(id: impl Into<ElementId>, text: &'static str, theme: Theme) -> impl IntoElement {
+    sidebar_row(id, px(36.))
+        .text_size(px(12.))
+        .text_color(theme.black5)
+        .child(text)
+}
+
+/// 分组之间的分隔线。
+fn divider(theme: Theme) -> impl IntoElement {
+    div().w_full().h(px(1.)).my(px(12.)).bg(theme.black10)
+}
+
+/// 单个导航项：选中时用主题色高亮，未选中时悬停才显示背景。
 fn page_nav_item(
     page: ContentPage,
     active_page: ContentPage,
@@ -191,16 +241,20 @@ fn page_nav_item(
         }))
 }
 
-fn sidebar_row(id: impl Into<ElementId>, height: Pixels) -> Stateful<Div> {
-    div()
-        .id(id)
-        .w_full()
-        .h(height)
-        .flex()
-        .items_center()
-        .gap(px(8.))
-        .px(px(8.))
-        .rounded(px(8.))
+/// 按顺序渲染一组导航项。
+fn navigation(
+    pages: &[ContentPage],
+    active_page: ContentPage,
+    theme: Theme,
+    cx: &mut Context<SidebarPage>,
+) -> impl IntoElement {
+    // 用循环而不是 `.children(pages.iter().map(...))`：闭包里借用 cx 会
+    // 让返回的匿名类型带上 cx 的生命周期，无法从 FnMut 闭包中逃出去。
+    let mut group = div().flex().flex_col().gap(px(4.));
+    for page in pages {
+        group = group.child(page_nav_item(*page, active_page, theme, cx));
+    }
+    group
 }
 
 fn main_navigation(
@@ -208,25 +262,7 @@ fn main_navigation(
     theme: Theme,
     cx: &mut Context<SidebarPage>,
 ) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(4.))
-        .child(page_nav_item(
-            ContentPage::Recommend,
-            active_page,
-            theme,
-            cx,
-        ))
-        .child(page_nav_item(ContentPage::Featured, active_page, theme, cx))
-        .child(page_nav_item(ContentPage::Podcast, active_page, theme, cx))
-        .child(page_nav_item(ContentPage::Roaming, active_page, theme, cx))
-        .child(page_nav_item(
-            ContentPage::Following,
-            active_page,
-            theme,
-            cx,
-        ))
+    navigation(&MAIN_PAGES, active_page, theme, cx)
 }
 
 fn library_navigation(
@@ -234,39 +270,15 @@ fn library_navigation(
     theme: Theme,
     cx: &mut Context<SidebarPage>,
 ) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(4.))
-        .child(
-            div()
-                .h(px(36.))
-                .flex()
-                .items_center()
-                .px(px(8.))
-                .text_size(px(12.))
-                .text_color(theme.black5)
-                .child("我的"),
-        )
-        .child(page_nav_item(
-            ContentPage::FavoriteMusic,
-            active_page,
-            theme,
-            cx,
-        ))
-        .child(page_nav_item(ContentPage::Recent, active_page, theme, cx))
-        .child(page_nav_item(
-            ContentPage::MyPodcast,
-            active_page,
-            theme,
-            cx,
-        ))
-        .child(page_nav_item(
-            ContentPage::MyCollection,
-            active_page,
-            theme,
-            cx,
-        ))
+    let mut group = div().flex().flex_col().gap(px(4.)).child(section_heading(
+        "library-heading",
+        "我的",
+        theme,
+    ));
+    for page in LIBRARY_PAGES {
+        group = group.child(page_nav_item(page, active_page, theme, cx));
+    }
+    group
 }
 
 fn created_playlist(title: &'static str, cover: &'static str, theme: Theme) -> impl IntoElement {
@@ -276,6 +288,7 @@ fn created_playlist(title: &'static str, cover: &'static str, theme: Theme) -> i
         .child(
             div()
                 .flex_1()
+                // 配合 flex_1 让长歌单名截断而不是把行撑宽
                 .min_w(px(0.))
                 .text_size(px(12.))
                 .line_height(px(16.))
@@ -290,12 +303,11 @@ fn created_playlists(playlists: &[(&'static str, &'static str)], theme: Theme) -
         .flex()
         .flex_col()
         .gap(px(4.))
-        .child(
-            sidebar_row("created-playlists-heading", px(36.))
-                .text_size(px(12.))
-                .text_color(theme.black5)
-                .child("创建的歌单 25"),
-        )
+        .child(section_heading(
+            "created-playlists-heading",
+            "创建的歌单 25",
+            theme,
+        ))
         .children(
             playlists
                 .iter()
@@ -313,6 +325,8 @@ impl Render for SidebarPage {
             .flex_col()
             .bg(rgba(0x28324808))
             .child(page_header(theme, cx))
+            // 头部固定，剩下的是唯一可滚动的区域；
+            // min_h(0) 是 flex 子项能正确触发滚动的关键。
             .child(
                 div()
                     .id("left-page-content")
@@ -326,9 +340,9 @@ impl Render for SidebarPage {
                             .flex_col()
                             .p(px(18.))
                             .child(main_navigation(self.active_page, theme, cx))
-                            .child(div().w_full().h(px(1.)).my(px(12.)).bg(theme.black10))
+                            .child(divider(theme))
                             .child(library_navigation(self.active_page, theme, cx))
-                            .child(div().w_full().h(px(1.)).my(px(12.)).bg(theme.black10))
+                            .child(divider(theme))
                             .child(created_playlists(&self.playlists, theme)),
                     ),
             )
