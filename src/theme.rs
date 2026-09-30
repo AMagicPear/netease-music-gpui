@@ -1,4 +1,26 @@
-use gpui::{Rgba, rgb, rgba};
+use gpui::{Pixels, Rgba, px, rgb, rgba};
+use std::time::Duration;
+
+#[derive(Clone, Copy)]
+pub enum IconSize {
+    #[allow(dead_code)]
+    Small,
+    Middle,
+    Large,
+}
+
+impl IconSize {
+    pub const fn pixels(self) -> Pixels {
+        match self {
+            Self::Small => px(20.),
+            Self::Middle => px(22.),
+            Self::Large => px(24.),
+        }
+    }
+}
+
+/// 动画时长
+pub const ANIMATION_DURATION: Duration = Duration::from_millis(130);
 
 #[derive(Clone, Copy)]
 pub struct Theme {
@@ -8,8 +30,7 @@ pub struct Theme {
     pub black3: Rgba,
     pub black5: Rgba,
     pub black10: Rgba,
-    pub secondary1_1: Rgba,
-    pub secondary1_2: Rgba,
+    pub primary: Rgba,
     pub white1: Rgba,
 }
 
@@ -22,8 +43,7 @@ impl Theme {
             black3: rgba(0x283248cc),
             black5: rgba(0x28324899),
             black10: rgba(0x2832481a),
-            secondary1_1: rgb(0xfc3b5b),
-            secondary1_2: rgb(0xfc3d49),
+            primary: rgb(0xfc3d49),
             white1: rgb(0xffffff),
         }
     }

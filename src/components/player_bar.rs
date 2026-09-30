@@ -2,7 +2,7 @@ use gpui::*;
 
 use super::progress_bar::ProgressBar;
 use crate::state::playback::PlaybackState;
-use crate::theme::Theme;
+use crate::theme::{IconSize, Theme};
 
 pub struct PlayerBar {
     theme: Theme,
@@ -24,6 +24,42 @@ impl PlayerBar {
     }
 }
 
+fn interaction_count(
+    icon_path: &'static str,
+    count: &'static str,
+    color: Rgba,
+    theme: Theme,
+) -> impl IntoElement {
+    div()
+        .ml_0p5()
+        .w(px(28.))
+        .h(px(24.))
+        .flex_none()
+        .child(
+            svg()
+                .path(icon_path)
+                .absolute()
+                .left_0()
+                .bottom_0()
+                .size(IconSize::Large.pixels())
+                .text_color(color),
+        )
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .left(px(16.))
+                .px(px(2.))
+                .rounded_full()
+                .bg(theme.player_bar_background)
+                .text_color(color)
+                .text_size(px(8.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .line_height(px(10.))
+                .child(count),
+        )
+}
+
 impl Render for PlayerBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
@@ -35,23 +71,16 @@ impl Render for PlayerBar {
                 .map(|song| (song.title.clone(), song.artist.clone(), playback.is_playing))
                 .unwrap_or_else(|| (String::new(), String::new(), playback.is_playing))
         };
-        let play_gradient = linear_gradient(
-            270.,
-            linear_color_stop(theme.secondary1_2, 0.),
-            linear_color_stop(theme.secondary1_1, 1.),
-        );
         let play_pause_icon = if is_playing {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(4.))
-                .child(div().w(px(4.)).h(px(16.)).rounded_sm().bg(theme.white1))
-                .child(div().w(px(4.)).h(px(16.)).rounded_sm().bg(theme.white1))
+            svg()
+                .path("icons/pause.svg")
+                .size(IconSize::Large.pixels())
+                .text_color(theme.white1)
                 .into_any_element()
         } else {
             svg()
                 .path("icons/play.svg")
-                .size(px(20.))
+                .size(IconSize::Large.pixels())
                 .text_color(theme.white1)
                 .into_any_element()
         };
@@ -66,115 +95,92 @@ impl Render for PlayerBar {
             .border_t_1()
             .border_color(theme.black10)
             .relative()
-            .child(self.progress_bar.clone())
+            // 进度条覆盖渲染
+            .child(deferred(self.progress_bar.clone()).with_priority(1))
+            // 主控件栏
             .child(
                 div()
                     .flex_1()
                     .flex()
                     .items_center()
-                    .justify_between()
-                    .px(px(28.))
+                    .px(px(30.))
                     // 左侧：封面、歌曲信息和互动数据
                     .child(
                         div()
-                            .w(px(325.))
-                            .flex_none()
+                            .flex_1()
+                            .overflow_hidden()
                             .flex()
                             .items_center()
-                            .gap(px(14.))
-                            .child(
-                                div()
-                                    .size(px(54.))
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_full()
-                                    .bg(theme.black1)
-                                    .text_color(theme.white1)
-                                    .text_size(px(23.))
-                                    .child("♫"),
-                            )
+                            .gap(px(10.))
+                            // 旋转黑胶封面
+                            .child(img("images/miniVinyl.png").size(px(60.)).flex_none())
                             .child(
                                 div()
                                     .flex()
                                     .flex_col()
-                                    .gap(px(4.))
+                                    .max_w(px(200.))
+                                    .flex_shrink()
+                                    .overflow_hidden()
+                                    // 歌曲标题
                                     .child(
                                         div()
                                             .text_color(theme.black1)
-                                            .text_size(px(15.))
+                                            .text_size(px(16.))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .truncate()
                                             .child(title),
                                     )
+                                    // 歌手/制作人
                                     .child(
                                         div()
                                             .text_color(theme.black5)
                                             .text_size(px(13.))
+                                            .truncate()
                                             .child(artist),
                                     ),
                             )
-                            .child(
-                                div()
-                                    .ml(px(8.))
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(4.))
-                                    .text_color(theme.secondary1_1)
-                                    .text_size(px(11.))
-                                    .child(
-                                        svg()
-                                            .path("icons/like.svg")
-                                            .size(px(20.))
-                                            .text_color(theme.secondary1_1),
-                                    )
-                                    .child("10w+"),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(4.))
-                                    .text_color(theme.black5)
-                                    .text_size(px(11.))
-                                    .child(
-                                        svg()
-                                            .path("icons/comment.svg")
-                                            .size(px(20.))
-                                            .text_color(theme.black5),
-                                    )
-                                    .child("999+"),
-                            ),
+                            .child(interaction_count(
+                                "icons/like.svg",
+                                "10w+",
+                                theme.primary,
+                                theme,
+                            ))
+                            .child(interaction_count(
+                                "icons/comment.svg",
+                                "999+",
+                                theme.black5,
+                                theme,
+                            )),
                     )
                     // 中间：收藏与播放控制
                     .child(
                         div()
-                            .flex_1()
+                            .flex_none()
                             .flex()
                             .items_center()
-                            .justify_center()
-                            .gap(px(27.))
+                            .gap(px(20.))
                             .text_color(theme.black1)
                             .child(
                                 svg()
-                                    .path("icons/collect.svg")
-                                    .size(px(21.))
+                                    .path("icons/播放顺序/顺序.svg")
+                                    .size(IconSize::Large.pixels())
                                     .text_color(theme.black5),
                             )
                             .child(
                                 svg()
                                     .path("icons/pre.svg")
-                                    .size(px(22.))
+                                    .size(IconSize::Large.pixels())
                                     .text_color(theme.black3),
                             )
                             .child(
                                 div()
                                     .id("play-pause-button")
-                                    .size(px(46.))
+                                    .size(px(40.))
                                     .flex()
                                     .items_center()
                                     .justify_center()
                                     .rounded_full()
-                                    .bg(play_gradient)
+                                    .bg(theme.primary)
                                     .text_color(theme.white1)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.playback.update(cx, |playback, cx| {
@@ -187,21 +193,20 @@ impl Render for PlayerBar {
                             .child(
                                 svg()
                                     .path("icons/next.svg")
-                                    .size(px(22.))
+                                    .size(IconSize::Large.pixels())
                                     .text_color(theme.black3),
                             )
                             .child(
                                 svg()
                                     .path("icons/playlist.svg")
-                                    .size(px(22.))
+                                    .size(IconSize::Large.pixels())
                                     .text_color(theme.black5),
                             ),
                     )
                     // 右侧：音质、设备、音量等工具
                     .child(
                         div()
-                            .w(px(205.))
-                            .flex_none()
+                            .flex_1()
                             .flex()
                             .items_center()
                             .justify_end()
@@ -210,31 +215,25 @@ impl Render for PlayerBar {
                             .child(
                                 svg()
                                     .path("icons/sq.svg")
-                                    .size(px(34.))
+                                    .size(IconSize::Middle.pixels())
                                     .text_color(theme.black5),
                             )
                             .child(
                                 svg()
-                                    .path("icons/sidebar_add.svg")
-                                    .size(px(22.))
-                                    .text_color(theme.black5),
-                            )
-                            .child(
-                                svg()
-                                    .path("icons/xpoint.svg")
-                                    .size(px(22.))
+                                    .path("icons/collect.svg")
+                                    .size(IconSize::Middle.pixels())
                                     .text_color(theme.black5),
                             )
                             .child(
                                 svg()
                                     .path("icons/volume.svg")
-                                    .size(px(22.))
+                                    .size(IconSize::Middle.pixels())
                                     .text_color(theme.black5),
                             )
                             .child(
                                 svg()
-                                    .path("icons/morefunctions.svg")
-                                    .size(px(22.))
+                                    .path("icons/xpoint.svg")
+                                    .size(IconSize::Middle.pixels())
                                     .text_color(theme.black5),
                             ),
                     ),
