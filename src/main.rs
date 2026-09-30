@@ -1,16 +1,19 @@
 mod assets;
 mod components;
+mod state;
 mod theme;
 
 use std::path::PathBuf;
 
 use assets::Assets;
-use components::{PlayerBar, ProgressBar};
+use components::PlayerBar;
 use gpui::*;
+use state::playback::{PlaybackState, Song};
+use std::time::Duration;
 
 struct MainWindow {
     theme: theme::Theme,
-    progress_bar: Entity<ProgressBar>,
+    player_bar: Entity<PlayerBar>,
 }
 
 impl Render for MainWindow {
@@ -22,10 +25,7 @@ impl Render for MainWindow {
             .flex_col()
             .bg(theme.app_background)
             .child(div().flex_1())
-            .child(PlayerBar {
-                theme,
-                progress_bar: self.progress_bar.clone(),
-            })
+            .child(self.player_bar.clone())
     }
 }
 
@@ -47,11 +47,17 @@ fn main() {
                 },
                 |_, cx| {
                     let theme = theme::Theme::netease();
-                    let progress_bar = cx.new(|_| ProgressBar::new(theme));
-                    cx.new(|_| MainWindow {
-                        theme,
-                        progress_bar,
-                    })
+                    let playback = cx.new(|_| PlaybackState {
+                        current_song: Some(Song {
+                            title: "Run Away With Me".into(),
+                            artist: "Carly Rae Jepsen".into(),
+                            duration: Duration::from_secs(210),
+                        }),
+                        position: Duration::from_secs(74),
+                        is_playing: false,
+                    });
+                    let player_bar = cx.new(|cx| PlayerBar::new(theme, playback, cx));
+                    cx.new(|_| MainWindow { theme, player_bar })
                 },
             )
             .unwrap();
