@@ -92,12 +92,14 @@ impl Render for ProgressBar {
                                                 .size(px(HANDLE_SIZE * t))
                                                 .rounded_full()
                                                 .bg(theme.white1)
-                                                .shadow(vec![BoxShadow {
-                                                    color: hsla(0., 0., 0., 0.25),
-                                                    offset: point(px(0.), px(1.)),
-                                                    blur_radius: px(1.),
-                                                    spread_radius: px(0.),
-                                                }]),
+                                                .shadow(vec![
+                                                    BoxShadow::new(
+                                                        px(0.),
+                                                        px(1.),
+                                                        hsla(0., 0., 0., 0.25),
+                                                    )
+                                                    .blur_radius(px(1.)),
+                                                ]),
                                         ),
                                 )
                         },

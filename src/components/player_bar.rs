@@ -119,7 +119,7 @@ impl Render for PlayerBar {
                                     .flex()
                                     .flex_col()
                                     .max_w(px(200.))
-                                    .flex_shrink()
+                                    .flex_shrink_1()
                                     .overflow_hidden()
                                     // 歌曲标题
                                     .child(
@@ -203,7 +203,7 @@ impl Render for PlayerBar {
                                     .text_color(theme.black5),
                             ),
                     )
-                    // 右侧：音质、设备、音量等工具
+                    // 右侧：收藏、音量等工具
                     .child(
                         div()
                             .flex_1()

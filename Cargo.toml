@@ -4,4 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-gpui = { version = "*" }
+gpui = { git = "https://github.com/zed-industries/zed.git", rev = "bcf6582ce3500df93a8a39366640173e6786cea6" }
+gpui_platform = { git = "https://github.com/zed-industries/zed.git", features = [
+    "font-kit",
+    "wayland",
+    "x11",
+], rev = "bcf6582ce3500df93a8a39366640173e6786cea6" }

@@ -6,13 +6,14 @@ mod theme;
 use std::path::PathBuf;
 
 use assets::Assets;
-use components::PlayerBar;
+use components::{MainContent, PlayerBar};
 use gpui::*;
 use state::playback::{PlaybackState, Song};
 use std::time::Duration;
 
 struct MainWindow {
     theme: theme::Theme,
+    main_content: Entity<MainContent>,
     player_bar: Entity<PlayerBar>,
 }
 
@@ -24,13 +25,13 @@ impl Render for MainWindow {
             .flex()
             .flex_col()
             .bg(theme.app_background)
-            .child(div().flex_1())
+            .child(self.main_content.clone())
             .child(self.player_bar.clone())
     }
 }
 
 fn main() {
-    Application::new()
+    gpui_platform::application()
         .with_assets(Assets {
             base: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets"),
         })
@@ -39,6 +40,7 @@ fn main() {
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    app_owns_titlebar_drag: true,
                     titlebar: Some(TitlebarOptions {
                         appears_transparent: true,
                         ..Default::default()
@@ -56,8 +58,13 @@ fn main() {
                         position: Duration::from_secs(74),
                         is_playing: false,
                     });
+                    let main_content = cx.new(|_| MainContent::new(theme));
                     let player_bar = cx.new(|cx| PlayerBar::new(theme, playback, cx));
-                    cx.new(|_| MainWindow { theme, player_bar })
+                    cx.new(|_| MainWindow {
+                        theme,
+                        main_content,
+                        player_bar,
+                    })
                 },
             )
             .unwrap();
