@@ -1,5 +1,5 @@
 use gpui::*;
-use gpui_kit::base::{Button, ColorTokens, Theme as BaseTheme};
+use gpui_kit::base::{Button, ColorTokens, Theme};
 
 use super::progress_bar::ProgressBar;
 use crate::state::playback::PlaybackState;
@@ -66,7 +66,7 @@ fn interaction_count(
 
 impl Render for PlayerBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = BaseTheme::global(cx).tokens.colors;
+        let colors = Theme::global(cx).tokens.colors;
         let play_button_enlarged = self.play_button_hovered && !self.play_button_pressed;
         let play_button_size = if play_button_enlarged {
             px(42.)

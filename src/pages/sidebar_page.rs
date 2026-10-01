@@ -1,90 +1,10 @@
 use gpui::prelude::{FluentBuilder, StatefulInteractiveElement};
 use gpui::*;
-use gpui_kit::base::{Button, ColorTokens, Theme as BaseTheme};
+use gpui_kit::base::{Button, ColorTokens, Theme};
 
+use super::{ContentPage, LIBRARY_PAGES, MAIN_PAGES};
 use crate::components::{WindowDragState, window_drag_region};
 use crate::theme::IconSize;
-
-/// 主内容区可切换的页面，侧边栏里的每一个导航项都对应其中一个。
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum ContentPage {
-    Recommend,
-    Featured,
-    Podcast,
-    Roaming,
-    Following,
-    FavoriteMusic,
-    Recent,
-    MyPodcast,
-    MyCollection,
-}
-
-/// 顶部导航分组：推荐、精选、播客、漫游、关注。
-const MAIN_PAGES: [ContentPage; 5] = [
-    ContentPage::Recommend,
-    ContentPage::Featured,
-    ContentPage::Podcast,
-    ContentPage::Roaming,
-    ContentPage::Following,
-];
-
-/// 「我的音乐库」分组，展示在分隔线下方。
-const LIBRARY_PAGES: [ContentPage; 4] = [
-    ContentPage::FavoriteMusic,
-    ContentPage::Recent,
-    ContentPage::MyPodcast,
-    ContentPage::MyCollection,
-];
-
-impl ContentPage {
-    /// 同时作为元素 id，GPUI 靠它来匹配状态与事件。
-    fn id(self) -> &'static str {
-        match self {
-            Self::Recommend => "recommend",
-            Self::Featured => "featured",
-            Self::Podcast => "podcast",
-            Self::Roaming => "roaming",
-            Self::Following => "following",
-            Self::FavoriteMusic => "favorite-music",
-            Self::Recent => "recent",
-            Self::MyPodcast => "my-podcast",
-            Self::MyCollection => "my-collection",
-        }
-    }
-
-    pub(super) fn title(self) -> &'static str {
-        match self {
-            Self::Recommend => "推荐",
-            Self::Featured => "精选",
-            Self::Podcast => "播客",
-            Self::Roaming => "漫游",
-            Self::Following => "关注",
-            Self::FavoriteMusic => "我喜欢的音乐",
-            Self::Recent => "最近播放",
-            Self::MyPodcast => "我的播客",
-            Self::MyCollection => "我的收藏",
-        }
-    }
-
-    fn icon(self) -> &'static str {
-        match self {
-            Self::Recommend => "icons/sidebar_home.svg",
-            Self::Featured => "icons/sidebar_featured.svg",
-            Self::Podcast => "icons/sidebar_podcast.svg",
-            Self::Roaming => "icons/sidebar_fm.svg",
-            Self::Following => "icons/sidebar_community.svg",
-            Self::FavoriteMusic => "icons/sidebar_like.svg",
-            Self::Recent => "icons/sidebar_history.svg",
-            Self::MyPodcast => "icons/sidebar_my_podcast.svg",
-            Self::MyCollection => "icons/sidebar_favourite.svg",
-        }
-    }
-
-    /// TODO: 如果有通知的话，会在右边显示个小红点
-    fn has_notification(self) -> bool {
-        matches!(self, Self::Following | Self::MyPodcast)
-    }
-}
 
 /// 选中项变化时发出的事件，`MainContent` 订阅它来重新渲染右侧内容。
 pub(super) struct SidebarChanged;
@@ -339,7 +259,7 @@ fn created_playlists(
 
 impl Render for SidebarPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = BaseTheme::global(cx).tokens.colors;
+        let colors = Theme::global(cx).tokens.colors;
 
         div()
             .size_full()

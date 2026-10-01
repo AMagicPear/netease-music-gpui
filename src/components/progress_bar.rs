@@ -1,5 +1,5 @@
 use gpui::*;
-use gpui_kit::base::{ColorTokens, Theme as BaseTheme};
+use gpui_kit::base::{ColorTokens, Theme};
 
 use crate::state::playback::PlaybackState;
 use crate::theme::ANIMATION_DURATION;
@@ -34,7 +34,7 @@ impl ProgressBar {
 
 impl Render for ProgressBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors: ColorTokens = BaseTheme::global(cx).tokens.colors;
+        let colors: ColorTokens = Theme::global(cx).tokens.colors;
         let progress = self.playback.read(cx).progress();
         let hovered = self.hovered;
         let generation = self.animation_generation;

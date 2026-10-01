@@ -10,7 +10,10 @@ use assets::Assets;
 use components::PlayerBar;
 use gpui::*;
 use pages::MainContent;
-use state::playback::{PlaybackState, Song};
+use state::{
+    playback::{PlaybackState, Song},
+    user::UserProfile,
+};
 use std::time::Duration;
 
 struct MainWindow {
@@ -61,7 +64,11 @@ fn main() {
                         position: Duration::from_secs(74),
                         is_playing: false,
                     });
-                    let main_content = cx.new(|cx| MainContent::new(window, cx));
+                    let user_profile = cx.new(|_| UserProfile {
+                        name: "一只会魔法的梨".into(),
+                        avatar_path: "/Users/amagicpear/Pictures/Perry Origin Character/IMG_20240601_133150.jpeg".into(),
+                    });
+                    let main_content = cx.new(|cx| MainContent::new(window, user_profile, cx));
                     let player_bar = cx.new(|cx| PlayerBar::new(playback, cx));
                     cx.new(|_| MainWindow {
                         main_content,

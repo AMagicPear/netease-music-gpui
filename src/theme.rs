@@ -1,5 +1,5 @@
 use gpui::{App, Hsla, Pixels, px, rgb};
-use gpui_kit::base::Theme as BaseTheme;
+use gpui_kit::base::Theme;
 use std::time::Duration;
 
 #[derive(Clone, Copy)]
@@ -24,7 +24,7 @@ impl IconSize {
 pub const ANIMATION_DURATION: Duration = Duration::from_millis(130);
 
 pub fn init(cx: &mut App) {
-    let colors = &mut BaseTheme::global_mut(cx).tokens.colors;
+    let colors = &mut Theme::global_mut(cx).tokens.colors;
     let ink = Hsla::from(rgb(0x283248));
 
     colors.background = rgb(0xf7f9fc).into();

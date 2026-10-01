@@ -1,13 +1,15 @@
-use std::{cell::Cell, rc::Rc};
+use std::{cell::Cell, collections::HashMap, rc::Rc};
 
 use gpui::prelude::StatefulInteractiveElement;
 use gpui::*;
 
+use super::ContentPage;
 use super::sidebar_page::{SidebarChanged, SidebarPage};
 use crate::components::{WindowDragState, window_drag_region};
+use crate::state::user::UserProfile;
 use crate::theme::IconSize;
 use gpui_kit::base::input::{Input, InputState};
-use gpui_kit::base::{Button, ColorTokens, Theme as BaseTheme};
+use gpui_kit::base::{Button, ColorTokens, Theme};
 
 const MIN_SIDEBAR_WIDTH: Pixels = px(204.);
 const MAX_SIDEBAR_WIDTH: Pixels = px(627.);
@@ -19,12 +21,20 @@ pub struct MainContent {
     sidebar_width: Pixels,
     sidebar: Entity<SidebarPage>,
     search_input: Entity<InputState>,
+    user_profile: Entity<UserProfile>,
+    /// 每个导航项对应一个页面 View，一次创建后长期持有。
+    pages: HashMap<ContentPage, AnyView>,
     _sidebar_subscription: Subscription,
+    _user_profile_subscription: Subscription,
     window_move_pending: bool,
 }
 
 impl MainContent {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        window: &mut Window,
+        user_profile: Entity<UserProfile>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let sidebar = cx.new(|_| SidebarPage::new());
         let sidebar_subscription = cx.subscribe(&sidebar, |_, _, _: &SidebarChanged, cx| {
             cx.notify();
@@ -32,17 +42,26 @@ impl MainContent {
         let search_input = cx.new(|cx| {
             let mut state = InputState::new(window, cx).placeholder("搜索音乐");
             state.set_editor_style(gpui_kit::base::input::InputEditorStyle {
-                selection: BaseTheme::global(cx).tokens.colors.selection,
+                selection: Theme::global(cx).tokens.colors.selection,
                 ..Default::default()
             });
             state
         });
 
+        // 页面在这里全部建好；切走再切回仍是同一个 View 实例。
+        let pages = ContentPage::all()
+            .map(|page| (page, page.build(user_profile.clone(), cx)))
+            .collect();
+        let user_profile_subscription = cx.observe(&user_profile, |_, _, cx| cx.notify());
+
         Self {
             sidebar_width: MIN_SIDEBAR_WIDTH,
             sidebar,
             search_input,
+            user_profile,
+            pages,
             _sidebar_subscription: sidebar_subscription,
+            _user_profile_subscription: user_profile_subscription,
             window_move_pending: false,
         }
     }
@@ -81,6 +100,8 @@ fn page_header(
     id: &'static str,
     colors: ColorTokens,
     search_input: Entity<InputState>,
+    user_name: String,
+    avatar_path: String,
     cx: &mut Context<MainContent>,
 ) -> impl IntoElement {
     div()
@@ -152,19 +173,9 @@ fn page_header(
                                 .gap(px(4.))
                                 .text_size(px(13.))
                                 .text_color(colors.foreground.alpha(0.7))
-                                .child(
-                                    img("/Users/amagicpear/Pictures/Perry Origin Character/IMG_20240601_133150.jpeg")
-                                        .size(px(28.))
-                                        .rounded_full()
-                                        .flex_none(),
-                                )
-                                .child("一只会魔法的梨")
-                                .child(
-                                    img("icons/vip-level.svg")
-                                        .w(px(48.))
-                                        .h(px(16.))
-                                        .flex_none(),
-                                )
+                                .child(img(avatar_path).size(px(28.)).rounded_full().flex_none())
+                                .child(user_name)
+                                .child(img("icons/vip-level.svg").w(px(48.)).h(px(16.)).flex_none())
                                 .child(
                                     svg()
                                         .path("icons/unfold.svg")
@@ -206,7 +217,8 @@ fn page_header(
 
 impl Render for MainContent {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = BaseTheme::global(cx).tokens.colors;
+        let colors = Theme::global(cx).tokens.colors;
+        let user_profile = self.user_profile.read(cx);
         let active_page = self.sidebar.read(cx).active_page();
         let drag_offset = Rc::new(Cell::new(px(0.)));
 
@@ -233,19 +245,19 @@ impl Render for MainContent {
                         "right-page-header",
                         colors,
                         self.search_input.clone(),
+                        user_profile.name.clone(),
+                        user_profile.avatar_path.clone(),
                         cx,
                     ))
+                    // 右侧具体页面
                     .child(
                         div()
                             .id("right-page-content")
                             .flex_1()
-                            .min_h(px(0.))
+                            .px(px(40.))
+                            .py(px(18.))
                             .overflow_y_scroll()
-                            .p(px(24.))
-                            .text_size(px(24.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(colors.foreground)
-                            .child(active_page.title()),
+                            .children(self.pages.get(&active_page).cloned()),
                     ),
             )
             .child(
