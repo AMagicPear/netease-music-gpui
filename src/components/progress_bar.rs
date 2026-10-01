@@ -1,7 +1,8 @@
 use gpui::*;
+use gpui_kit::base::{ColorTokens, Theme as BaseTheme};
 
 use crate::state::playback::PlaybackState;
-use crate::theme::{ANIMATION_DURATION, Theme};
+use crate::theme::ANIMATION_DURATION;
 
 /// 轨道静止 / 悬浮时的高度
 const REST_HEIGHT: f32 = 2.;
@@ -11,7 +12,6 @@ const HOVER_HEIGHT: f32 = 6.;
 const HANDLE_SIZE: f32 = 16.;
 
 pub struct ProgressBar {
-    theme: Theme,
     playback: Entity<PlaybackState>,
     hovered: bool,
     /// 悬浮状态每切换一次就 +1。
@@ -21,10 +21,9 @@ pub struct ProgressBar {
 }
 
 impl ProgressBar {
-    pub fn new(theme: Theme, playback: Entity<PlaybackState>, cx: &mut Context<Self>) -> Self {
+    pub fn new(playback: Entity<PlaybackState>, cx: &mut Context<Self>) -> Self {
         let playback_subscription = cx.observe(&playback, |_, _, cx| cx.notify());
         Self {
-            theme,
             playback,
             hovered: false,
             animation_generation: 0,
@@ -35,7 +34,7 @@ impl ProgressBar {
 
 impl Render for ProgressBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = self.theme;
+        let colors: ColorTokens = BaseTheme::global(cx).tokens.colors;
         let progress = self.playback.read(cx).progress();
         let hovered = self.hovered;
         let generation = self.animation_generation;
@@ -60,7 +59,7 @@ impl Render for ProgressBar {
                     .absolute()
                     .left_0()
                     .right_0()
-                    .bg(theme.black10)
+                    .bg(colors.border)
                     .with_animation(
                         ElementId::NamedInteger("player-progress-track".into(), generation),
                         Animation::new(ANIMATION_DURATION).with_easing(ease_out_quint()),
@@ -81,7 +80,7 @@ impl Render for ProgressBar {
                                         .relative()
                                         .h_full()
                                         .w(relative(progress))
-                                        .bg(theme.primary)
+                                        .bg(colors.primary)
                                         // 播放头上的白色圆点：直径随 t 一起长大，
                                         // 水平方向骑在进度填充的右边缘上，垂直方向与轨道中心线对齐
                                         .child(
@@ -91,7 +90,7 @@ impl Render for ProgressBar {
                                                 .right(px(-HANDLE_SIZE * t / 2.))
                                                 .size(px(HANDLE_SIZE * t))
                                                 .rounded_full()
-                                                .bg(theme.white1)
+                                                .bg(colors.primary_foreground)
                                                 .shadow(vec![
                                                     BoxShadow::new(
                                                         px(0.),

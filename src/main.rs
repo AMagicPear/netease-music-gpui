@@ -14,19 +14,18 @@ use state::playback::{PlaybackState, Song};
 use std::time::Duration;
 
 struct MainWindow {
-    theme: theme::Theme,
     main_content: Entity<MainContent>,
     player_bar: Entity<PlayerBar>,
 }
 
 impl Render for MainWindow {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = self.theme;
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = gpui_kit::base::Theme::global(cx).tokens.colors;
         div()
             .size_full()
             .flex()
             .flex_col()
-            .bg(theme.app_background)
+            .bg(colors.background)
             .child(self.main_content.clone())
             .child(self.player_bar.clone())
     }
@@ -39,6 +38,7 @@ fn main() {
         })
         .run(|cx: &mut App| {
             gpui_kit::init(cx);
+            theme::init(cx);
             let bounds = Bounds::centered(None, size(px(1060.), px(720.)), cx);
             gpui_kit::open_window(
                 WindowOptions {
@@ -52,7 +52,6 @@ fn main() {
                 },
                 cx,
                 |window, cx| {
-                    let theme = theme::Theme::netease();
                     let playback = cx.new(|_| PlaybackState {
                         current_song: Some(Song {
                             title: "Run Away With Me".into(),
@@ -62,10 +61,9 @@ fn main() {
                         position: Duration::from_secs(74),
                         is_playing: false,
                     });
-                    let main_content = cx.new(|cx| MainContent::new(theme, window, cx));
-                    let player_bar = cx.new(|cx| PlayerBar::new(theme, playback, cx));
+                    let main_content = cx.new(|cx| MainContent::new(window, cx));
+                    let player_bar = cx.new(|cx| PlayerBar::new(playback, cx));
                     cx.new(|_| MainWindow {
-                        theme,
                         main_content,
                         player_bar,
                     })

@@ -1,4 +1,5 @@
-use gpui::{Pixels, Rgba, px, rgb, rgba};
+use gpui::{App, Hsla, Pixels, px, rgb};
+use gpui_kit::base::Theme as BaseTheme;
 use std::time::Duration;
 
 #[derive(Clone, Copy)]
@@ -22,41 +23,19 @@ impl IconSize {
 /// 动画时长
 pub const ANIMATION_DURATION: Duration = Duration::from_millis(130);
 
-#[derive(Clone, Copy)]
-pub struct Theme {
-    pub app_background: Rgba,
-    pub player_bar_background: Rgba,
-    pub black1: Rgba,
-    pub black3: Rgba,
-    pub black5: Rgba,
-    pub black10: Rgba,
-    pub sidebar_subtle: Rgba,
-    pub primary: Rgba,
-    pub white1: Rgba,
-}
+pub fn init(cx: &mut App) {
+    let colors = &mut BaseTheme::global_mut(cx).tokens.colors;
+    let ink = Hsla::from(rgb(0x283248));
 
-impl Theme {
-    pub fn netease() -> Self {
-        Self {
-            app_background: rgb(0xf7f9fc),
-            player_bar_background: rgb(0xfafafa),
-            black1: rgb(0x283248),
-            black3: rgba(0x283248cc),
-            black5: rgba(0x28324899),
-            black10: Rgba {
-                r: 40. / 255.,
-                g: 50. / 255.,
-                b: 72. / 255.,
-                a: 0.1,
-            },
-            sidebar_subtle: Rgba {
-                r: 40. / 255.,
-                g: 50. / 255.,
-                b: 72. / 255.,
-                a: 0.06,
-            },
-            primary: rgb(0xfc3d49),
-            white1: rgb(0xffffff),
-        }
-    }
+    colors.background = rgb(0xf7f9fc).into();
+    colors.surface = rgb(0xfafafa).into();
+    colors.foreground = ink;
+    colors.secondary_foreground = ink.alpha(0.8);
+    colors.muted_foreground = ink.alpha(0.6);
+    colors.border = ink.alpha(0.1);
+    colors.muted = ink.alpha(0.06);
+    colors.accent = ink.alpha(0.06);
+    colors.primary = rgb(0xfc3d49).into();
+    colors.primary_foreground = rgb(0xffffff).into();
+    colors.selection = colors.primary.alpha(0.3);
 }

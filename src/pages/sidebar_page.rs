@@ -1,8 +1,9 @@
 use gpui::prelude::{FluentBuilder, StatefulInteractiveElement};
 use gpui::*;
+use gpui_kit::base::{ColorTokens, Theme as BaseTheme};
 
 use crate::components::{WindowDragState, window_drag_region};
-use crate::theme::{IconSize, Theme};
+use crate::theme::IconSize;
 
 /// 主内容区可切换的页面，侧边栏里的每一个导航项都对应其中一个。
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -89,7 +90,6 @@ impl ContentPage {
 pub(super) struct SidebarChanged;
 
 pub(super) struct SidebarPage {
-    theme: Theme,
     active_page: ContentPage,
     window_move_pending: bool,
     /// 假数据，格式是 `(歌单名, 封面路径)`。
@@ -105,9 +105,8 @@ impl WindowDragState for SidebarPage {
 }
 
 impl SidebarPage {
-    pub(super) fn new(theme: Theme) -> Self {
+    pub(super) fn new() -> Self {
         Self {
-            theme,
             active_page: ContentPage::Recommend,
             window_move_pending: false,
             playlists: vec![
@@ -129,7 +128,7 @@ impl SidebarPage {
 }
 
 /// 顶部 logo 区域，同时充当窗口拖动手柄。
-fn page_header(theme: Theme, cx: &mut Context<SidebarPage>) -> impl IntoElement {
+fn page_header(colors: ColorTokens, cx: &mut Context<SidebarPage>) -> impl IntoElement {
     window_drag_region("left-page-header", cx)
         .h(px(72.))
         .w_full()
@@ -149,14 +148,14 @@ fn page_header(theme: Theme, cx: &mut Context<SidebarPage>) -> impl IntoElement 
                         .items_center()
                         .justify_center()
                         .rounded_full()
-                        .bg(theme.primary)
-                        .text_color(theme.white1)
+                        .bg(colors.primary)
+                        .text_color(colors.primary_foreground)
                         .child(
                             svg()
                                 .path("icons/logo/logo.svg")
                                 .size(px(27.))
                                 .flex_none()
-                                .text_color(theme.white1),
+                                .text_color(colors.primary_foreground),
                         ),
                 )
                 .child(
@@ -164,7 +163,7 @@ fn page_header(theme: Theme, cx: &mut Context<SidebarPage>) -> impl IntoElement 
                         .path("icons/logo/logo_text.svg")
                         .w(px(101.))
                         .h(px(19.))
-                        .text_color(theme.black1),
+                        .text_color(colors.foreground),
                 ),
         )
 }
@@ -183,23 +182,27 @@ fn sidebar_row(id: impl Into<ElementId>, height: Pixels) -> Stateful<Div> {
 }
 
 /// 分组标题，例如「我的」「创建的歌单 25」。
-fn section_heading(id: impl Into<ElementId>, text: &'static str, theme: Theme) -> impl IntoElement {
+fn section_heading(
+    id: impl Into<ElementId>,
+    text: &'static str,
+    colors: ColorTokens,
+) -> impl IntoElement {
     sidebar_row(id, px(36.))
         .text_size(px(12.))
-        .text_color(theme.black5)
+        .text_color(colors.muted_foreground)
         .child(text)
 }
 
 /// 分组之间的分隔线。
-fn divider(theme: Theme) -> impl IntoElement {
-    div().w_full().h(px(1.)).my(px(12.)).bg(theme.black10)
+fn divider(colors: ColorTokens) -> impl IntoElement {
+    div().w_full().h(px(1.)).my(px(12.)).bg(colors.border)
 }
 
 /// 单个导航项：选中时用主题色高亮，未选中时悬停才显示背景。
 fn page_nav_item(
     page: ContentPage,
     active_page: ContentPage,
-    theme: Theme,
+    colors: ColorTokens,
     cx: &mut Context<SidebarPage>,
 ) -> impl IntoElement {
     let active = page == active_page;
@@ -207,19 +210,25 @@ fn page_nav_item(
     sidebar_row(page.id(), px(36.))
         .p(px(8.))
         .text_size(px(14.))
-        .text_color(if active { theme.white1 } else { theme.black1 })
+        .text_color(if active {
+            colors.primary_foreground
+        } else {
+            colors.foreground
+        })
         .when(active, |this| {
-            this.bg(theme.primary).font_weight(FontWeight::MEDIUM)
+            this.bg(colors.primary).font_weight(FontWeight::MEDIUM)
         })
-        .when(!active, |this| {
-            this.hover(|style| style.bg(theme.sidebar_subtle))
-        })
+        .when(!active, |this| this.hover(|style| style.bg(colors.accent)))
         .child(
             svg()
                 .path(page.icon())
                 .size(IconSize::Small.pixels())
                 .flex_none()
-                .text_color(if active { theme.white1 } else { theme.black5 }),
+                .text_color(if active {
+                    colors.primary_foreground
+                } else {
+                    colors.muted_foreground
+                }),
         )
         .child(page.title())
         .when(page.has_notification(), |this| {
@@ -227,7 +236,7 @@ fn page_nav_item(
                 div()
                     .size(px(5.))
                     .rounded_full()
-                    .bg(theme.primary)
+                    .bg(colors.primary)
                     .flex_none(),
             )
         })
@@ -242,45 +251,49 @@ fn page_nav_item(
 fn navigation(
     pages: &[ContentPage],
     active_page: ContentPage,
-    theme: Theme,
+    colors: ColorTokens,
     cx: &mut Context<SidebarPage>,
 ) -> impl IntoElement {
     // 用循环而不是 `.children(pages.iter().map(...))`：闭包里借用 cx 会
     // 让返回的匿名类型带上 cx 的生命周期，无法从 FnMut 闭包中逃出去。
     let mut group = div().flex().flex_col().gap(px(4.));
     for page in pages {
-        group = group.child(page_nav_item(*page, active_page, theme, cx));
+        group = group.child(page_nav_item(*page, active_page, colors, cx));
     }
     group
 }
 
 fn main_navigation(
     active_page: ContentPage,
-    theme: Theme,
+    colors: ColorTokens,
     cx: &mut Context<SidebarPage>,
 ) -> impl IntoElement {
-    navigation(&MAIN_PAGES, active_page, theme, cx)
+    navigation(&MAIN_PAGES, active_page, colors, cx)
 }
 
 fn library_navigation(
     active_page: ContentPage,
-    theme: Theme,
+    colors: ColorTokens,
     cx: &mut Context<SidebarPage>,
 ) -> impl IntoElement {
     let mut group = div().flex().flex_col().gap(px(4.)).child(section_heading(
         "library-heading",
         "我的",
-        theme,
+        colors,
     ));
     for page in LIBRARY_PAGES {
-        group = group.child(page_nav_item(page, active_page, theme, cx));
+        group = group.child(page_nav_item(page, active_page, colors, cx));
     }
     group
 }
 
-fn created_playlist(title: &'static str, cover: &'static str, theme: Theme) -> impl IntoElement {
+fn created_playlist(
+    title: &'static str,
+    cover: &'static str,
+    colors: ColorTokens,
+) -> impl IntoElement {
     sidebar_row(title, px(42.))
-        .hover(|style| style.bg(theme.sidebar_subtle))
+        .hover(|style| style.bg(colors.accent))
         .child(img(cover).size(px(32.)).rounded(px(4.)).flex_none())
         .child(
             div()
@@ -289,12 +302,15 @@ fn created_playlist(title: &'static str, cover: &'static str, theme: Theme) -> i
                 .min_w(px(0.))
                 .text_size(px(12.))
                 .line_height(px(16.))
-                .text_color(theme.black3)
+                .text_color(colors.secondary_foreground)
                 .child(title),
         )
 }
 
-fn created_playlists(playlists: &[(&'static str, &'static str)], theme: Theme) -> impl IntoElement {
+fn created_playlists(
+    playlists: &[(&'static str, &'static str)],
+    colors: ColorTokens,
+) -> impl IntoElement {
     div()
         .w_full()
         .flex()
@@ -303,25 +319,25 @@ fn created_playlists(playlists: &[(&'static str, &'static str)], theme: Theme) -
         .child(section_heading(
             "created-playlists-heading",
             "创建的歌单 25",
-            theme,
+            colors,
         ))
         .children(
             playlists
                 .iter()
-                .map(|(title, cover)| created_playlist(title, cover, theme)),
+                .map(|(title, cover)| created_playlist(title, cover, colors)),
         )
 }
 
 impl Render for SidebarPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = self.theme;
+        let colors = BaseTheme::global(cx).tokens.colors;
 
         div()
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgba(0x28324808))
-            .child(page_header(theme, cx))
+            .bg(colors.foreground.alpha(0.03))
+            .child(page_header(colors, cx))
             // 头部固定，剩下的是唯一可滚动的区域；
             // min_h(0) 是 flex 子项能正确触发滚动的关键。
             .child(
@@ -336,11 +352,11 @@ impl Render for SidebarPage {
                             .flex()
                             .flex_col()
                             .p(px(18.))
-                            .child(main_navigation(self.active_page, theme, cx))
-                            .child(divider(theme))
-                            .child(library_navigation(self.active_page, theme, cx))
-                            .child(divider(theme))
-                            .child(created_playlists(&self.playlists, theme)),
+                            .child(main_navigation(self.active_page, colors, cx))
+                            .child(divider(colors))
+                            .child(library_navigation(self.active_page, colors, cx))
+                            .child(divider(colors))
+                            .child(created_playlists(&self.playlists, colors)),
                     ),
             )
     }

@@ -5,8 +5,8 @@ use gpui::*;
 
 use super::sidebar_page::{SidebarChanged, SidebarPage};
 use crate::components::{WindowDragState, window_drag_region};
-use crate::theme::Theme;
 use gpui_kit::base::input::{Input, InputState};
+use gpui_kit::base::{ColorTokens, Theme as BaseTheme};
 
 const MIN_SIDEBAR_WIDTH: Pixels = px(204.);
 const MAX_SIDEBAR_WIDTH: Pixels = px(627.);
@@ -15,7 +15,6 @@ const HEADER_TOP_PADDING: Pixels = px(34.);
 const HEADER_SIDE_GUTTER: Pixels = px(40.);
 
 pub struct MainContent {
-    theme: Theme,
     sidebar_width: Pixels,
     sidebar: Entity<SidebarPage>,
     search_input: Entity<InputState>,
@@ -24,15 +23,21 @@ pub struct MainContent {
 }
 
 impl MainContent {
-    pub fn new(theme: Theme, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let sidebar = cx.new(|_| SidebarPage::new(theme));
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let sidebar = cx.new(|_| SidebarPage::new());
         let sidebar_subscription = cx.subscribe(&sidebar, |_, _, _: &SidebarChanged, cx| {
             cx.notify();
         });
-        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("搜索音乐"));
+        let search_input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx).placeholder("搜索音乐");
+            state.set_editor_style(gpui_kit::base::input::InputEditorStyle {
+                selection: BaseTheme::global(cx).tokens.colors.selection,
+                ..Default::default()
+            });
+            state
+        });
 
         Self {
-            theme,
             sidebar_width: MIN_SIDEBAR_WIDTH,
             sidebar,
             search_input,
@@ -49,7 +54,7 @@ impl WindowDragState for MainContent {
 }
 
 /// 搜索框：左边放大镜图标，右边文本输入框。
-fn search_box(input: Entity<InputState>, theme: Theme) -> impl IntoElement {
+fn search_box(input: Entity<InputState>, colors: ColorTokens) -> impl IntoElement {
     div()
         .w(px(258.))
         .flex()
@@ -57,23 +62,23 @@ fn search_box(input: Entity<InputState>, theme: Theme) -> impl IntoElement {
         .gap_1()
         .px_2()
         .border_1()
-        .border_color(theme.black10)
+        .border_color(colors.border)
         .rounded_lg()
         .text_size(px(14.))
-        .text_color(theme.black1)
+        .text_color(colors.foreground)
         .child(
             svg()
                 .path("icons/search.svg")
                 .size(px(20.))
                 .flex_none()
-                .text_color(theme.black5),
+                .text_color(colors.muted_foreground),
         )
         .child(Input::new(&input))
 }
 
 fn page_header(
     id: &'static str,
-    theme: Theme,
+    colors: ColorTokens,
     search_input: Entity<InputState>,
     cx: &mut Context<MainContent>,
 ) -> impl IntoElement {
@@ -115,7 +120,7 @@ fn page_header(
                             div()
                                 .w_7()
                                 .border_1()
-                                .border_color(theme.black10)
+                                .border_color(colors.border)
                                 .rounded_lg()
                                 .flex()
                                 .items_center()
@@ -124,11 +129,11 @@ fn page_header(
                                     svg()
                                         .path("icons/backward.svg")
                                         .size(px(11.))
-                                        .text_color(theme.black3),
+                                        .text_color(colors.secondary_foreground),
                                 ),
                         )
                         // 搜索框
-                        .child(search_box(search_input, theme)),
+                        .child(search_box(search_input, colors)),
                 )
                 .child(
                     window_drag_region("right-header-drag-region", cx)
@@ -147,7 +152,7 @@ fn page_header(
 
 impl Render for MainContent {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = self.theme;
+        let colors = BaseTheme::global(cx).tokens.colors;
         let active_page = self.sidebar.read(cx).active_page();
         let drag_offset = Rc::new(Cell::new(px(0.)));
 
@@ -172,7 +177,7 @@ impl Render for MainContent {
                     .flex_col()
                     .child(page_header(
                         "right-page-header",
-                        theme,
+                        colors,
                         self.search_input.clone(),
                         cx,
                     ))
@@ -185,7 +190,7 @@ impl Render for MainContent {
                             .p(px(24.))
                             .text_size(px(24.))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.black1)
+                            .text_color(colors.foreground)
                             .child(active_page.title()),
                     ),
             )
