@@ -57,7 +57,7 @@ fn interaction_count(
                 .bg(colors.surface)
                 .text_color(color)
                 .text_size(px(8.))
-                .font_family("Trebuchet MS")
+                .font_family("dolphin")
                 .font_weight(FontWeight::SEMIBOLD)
                 .line_height(px(10.))
                 .child(count),

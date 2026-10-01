@@ -188,7 +188,7 @@ impl Render for FavoriteMusicPage {
                                     )
                                     .text_color(colors.primary_foreground)
                                     .text_size(px(14.))
-                                    .font_family("Trebuchet MS")
+                                    .font_family("dolphin")
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(7735.to_string()),
                             )
