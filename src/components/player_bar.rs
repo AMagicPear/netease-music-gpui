@@ -8,6 +8,8 @@ use crate::theme::IconSize;
 pub struct PlayerBar {
     playback: Entity<PlaybackState>,
     progress_bar: Entity<ProgressBar>,
+    play_button_hovered: bool,
+    play_button_pressed: bool,
     _playback_subscription: Subscription,
 }
 
@@ -18,6 +20,8 @@ impl PlayerBar {
         Self {
             playback,
             progress_bar,
+            play_button_hovered: false,
+            play_button_pressed: false,
             _playback_subscription: playback_subscription,
         }
     }
@@ -63,6 +67,17 @@ fn interaction_count(
 impl Render for PlayerBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = BaseTheme::global(cx).tokens.colors;
+        let play_button_enlarged = self.play_button_hovered && !self.play_button_pressed;
+        let play_button_size = if play_button_enlarged {
+            px(42.)
+        } else {
+            px(40.)
+        };
+        let play_pause_icon_size = if play_button_enlarged {
+            px(25.44)
+        } else {
+            IconSize::Large.pixels()
+        };
         let (title, artist, is_playing) = {
             let playback = self.playback.read(cx);
             playback
@@ -71,19 +86,16 @@ impl Render for PlayerBar {
                 .map(|song| (song.title.clone(), song.artist.clone(), playback.is_playing))
                 .unwrap_or_else(|| (String::new(), String::new(), playback.is_playing))
         };
-        let play_pause_icon = if is_playing {
-            svg()
-                .path("icons/pause.svg")
-                .size(IconSize::Large.pixels())
-                .text_color(colors.primary_foreground)
-                .into_any_element()
+        let play_pause_icon_path = if is_playing {
+            "icons/pause.svg"
         } else {
-            svg()
-                .path("icons/play.svg")
-                .size(IconSize::Large.pixels())
-                .text_color(colors.primary_foreground)
-                .into_any_element()
+            "icons/play.svg"
         };
+        let play_pause_icon = svg()
+            .path(play_pause_icon_path)
+            .size(play_pause_icon_size)
+            .text_color(colors.primary_foreground)
+            .into_any_element();
 
         div()
             .w_full()
@@ -173,20 +185,51 @@ impl Render for PlayerBar {
                                     .text_color(colors.secondary_foreground),
                             )
                             .child(
-                                Button::new("play-pause-button")
+                                div()
+                                    .id("play-pause-hover-region")
                                     .size(px(40.))
-                                    .rounded_full()
-                                    .bg(colors.primary)
-                                    .text_color(colors.primary_foreground)
-                                    .hover(|style| style.opacity(0.9))
-                                    .active(|style| style.opacity(0.8))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.playback.update(cx, |playback, cx| {
-                                            playback.is_playing = !playback.is_playing;
+                                    .flex_none()
+                                    .relative()
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.play_button_pressed = true;
                                             cx.notify();
-                                        });
+                                        }),
+                                    )
+                                    .on_mouse_up(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.play_button_pressed = false;
+                                            cx.notify();
+                                        }),
+                                    )
+                                    .on_hover(cx.listener(|this, hovered, _, cx| {
+                                        if this.play_button_hovered == *hovered {
+                                            return;
+                                        }
+                                        this.play_button_hovered = *hovered;
+                                        cx.notify();
                                     }))
-                                    .child(play_pause_icon),
+                                    .child(
+                                        Button::new("play-pause-button")
+                                            .absolute()
+                                            .left(px(if play_button_enlarged { -1. } else { 0. }))
+                                            .top(px(if play_button_enlarged { -1. } else { 0. }))
+                                            .size(play_button_size)
+                                            .rounded_full()
+                                            .bg(colors.primary)
+                                            .text_color(colors.primary_foreground)
+                                            .hover(|style| style.opacity(0.9))
+                                            .active(|style| style.size(px(40.)).opacity(0.8))
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.playback.update(cx, |playback, cx| {
+                                                    playback.is_playing = !playback.is_playing;
+                                                    cx.notify();
+                                                });
+                                            }))
+                                            .child(play_pause_icon),
+                                    ),
                             )
                             .child(
                                 svg()
