@@ -80,8 +80,10 @@ impl WindowDragState for MainContent {
 /// 搜索框：左边放大镜图标，右边文本输入框，宽度可被压缩
 fn search_box(input: Entity<InputState>, colors: ColorTokens) -> impl IntoElement {
     div()
+        .h_9()
         .w(SEARCH_BOX_WIDTH)
         .min_w(SEARCH_BOX_MIN_WIDTH)
+        .ml_2()
         .mr_2()
         .flex_shrink(1.)
         .flex()
@@ -98,7 +100,9 @@ fn search_box(input: Entity<InputState>, colors: ColorTokens) -> impl IntoElemen
                 .path("icons/search.svg")
                 .size(px(20.))
                 .flex_none()
-                .text_color(colors.muted_foreground),
+                .text_color(colors.muted_foreground)
+                .hover(|style| style.text_color(colors.foreground))
+                .id("search-box-icon"),
         )
         .child(Input::new(&input))
 }
@@ -107,6 +111,7 @@ fn hover_icon(id: &'static str, path: &'static str, colors: ColorTokens) -> impl
     svg()
         .path(path)
         .size(IconSize::Small.pixels())
+        .ml(px(10.))
         .flex_none()
         .text_color(colors.foreground.alpha(0.6))
         .hover(|style| style.text_color(colors.foreground))
@@ -141,95 +146,78 @@ fn page_header(
                 .w_full()
                 .h(HEADER_HEIGHT - HEADER_TOP_PADDING)
                 .flex()
-                .justify_between()
                 .items_center()
+                .min_w(px(0.))
                 .child(
                     window_drag_region("right-header-left-drag-region", cx)
                         .w(HEADER_SIDE_GUTTER)
                         .h_full()
                         .flex_none(),
                 )
-                // 左侧组
                 .child(
-                    div()
+                    Button::new("back-button")
                         .h_9()
-                        .flex()
-                        .gap_2()
-                        .min_w(px(0.))
-                        // 返回按钮
+                        .w_7()
+                        .flex_none()
+                        .border_1()
+                        .border_color(colors.border)
+                        .rounded_lg()
+                        .hover(|style| style.bg(colors.accent))
                         .child(
-                            Button::new("back-button")
-                                .w_7()
-                                .flex_none()
-                                .border_1()
-                                .border_color(colors.border)
-                                .rounded_lg()
-                                .hover(|style| style.bg(colors.accent))
-                                .child(
-                                    svg()
-                                        .path("icons/backward.svg")
-                                        .size(px(11.))
-                                        .text_color(colors.secondary_foreground),
-                                ),
-                        )
-                        // 搜索框
-                        .child(search_box(search_input, colors)),
+                            svg()
+                                .path("icons/backward.svg")
+                                .size(px(11.))
+                                .text_color(colors.secondary_foreground),
+                        ),
                 )
+                .child(search_box(search_input, colors))
                 .child(
                     window_drag_region("right-header-drag-region", cx)
                         .flex_1()
                         .h_full(),
                 )
-                // 右侧的头像名称和按钮
+                .child(
+                    div().id("header-avatar").flex_none().child(
+                        Avatar::new()
+                            .size(px(28.))
+                            .flex_none()
+                            .overflow_hidden()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(colors.border)
+                            .image(AvatarImage::new(avatar_path).size_full().rounded_full()),
+                    ),
+                )
                 .child(
                     div()
+                        .id("header-profile-menu")
+                        .ml(px(4.))
                         .flex()
                         .items_center()
-                        .gap(px(10.))
-                        .flex_shrink(0.2)
+                        .gap(px(4.))
+                        .text_size(px(13.))
+                        .text_color(colors.foreground.alpha(0.7))
+                        .child(user_name)
+                        .child(img("icons/vip-level.svg").w(px(48.)).h(px(16.)).flex_none())
                         .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(4.))
-                                .text_size(px(13.))
-                                .text_color(colors.foreground.alpha(0.7))
-                                .child(
-                                    Avatar::new()
-                                        .size(px(28.))
-                                        .flex_none()
-                                        .overflow_hidden()
-                                        .rounded_full()
-                                        .border_1()
-                                        .border_color(colors.border)
-                                        .image(
-                                            AvatarImage::new(avatar_path)
-                                                .size_full()
-                                                .rounded_full(),
-                                        ),
-                                )
-                                .child(user_name)
-                                .child(img("icons/vip-level.svg").w(px(48.)).h(px(16.)).flex_none())
-                                .child(
-                                    svg()
-                                        .path("icons/unfold.svg")
-                                        .size(px(20.))
-                                        .flex_none()
-                                        .text_color(colors.foreground.alpha(0.6)),
-                                ),
-                        )
-                        .child(hover_icon(
-                            "header-message-button",
-                            "icons/message.svg",
-                            colors,
-                        ))
-                        .child(hover_icon(
-                            "header-setting-button",
-                            "icons/setting.svg",
-                            colors,
-                        ))
-                        .child(hover_icon("header-skin-button", "icons/skin.svg", colors)),
+                            svg()
+                                .path("icons/unfold.svg")
+                                .size(px(20.))
+                                .flex_none()
+                                .text_color(colors.foreground.alpha(0.6)),
+                        ),
                 )
+                .child(hover_icon(
+                    "header-message-button",
+                    "icons/message.svg",
+                    colors,
+                ))
+                .child(hover_icon(
+                    "header-setting-button",
+                    "icons/setting.svg",
+                    colors,
+                ))
+                .child(hover_icon("header-skin-button", "icons/skin.svg", colors))
                 .child(
                     window_drag_region("right-header-right-drag-region", cx)
                         .w(HEADER_SIDE_GUTTER)
