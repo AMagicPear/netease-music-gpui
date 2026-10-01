@@ -9,7 +9,9 @@ use crate::components::{WindowDragState, window_drag_region};
 use crate::state::user::UserProfile;
 use crate::theme::IconSize;
 use gpui_kit::base::input::{Input, InputState};
-use gpui_kit::base::{Avatar, AvatarImage, Button, ColorTokens, Theme};
+use gpui_kit::base::{Button, ColorTokens, Theme};
+use gpui_kit::component::Sizable;
+use gpui_kit::component::avatar::Avatar;
 
 const MIN_SIDEBAR_WIDTH: Pixels = px(204.);
 const MAX_SIDEBAR_WIDTH: Pixels = px(627.);
@@ -179,13 +181,9 @@ fn page_header(
                 .child(
                     div().id("header-avatar").flex_none().child(
                         Avatar::new()
-                            .size(px(28.))
+                            .with_size(px(28.))
                             .flex_none()
-                            .overflow_hidden()
-                            .rounded_full()
-                            .border_1()
-                            .border_color(colors.border)
-                            .image(AvatarImage::new(avatar_path).size_full().rounded_full()),
+                            .src(avatar_path),
                     ),
                 )
                 .child(

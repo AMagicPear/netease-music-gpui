@@ -1,5 +1,8 @@
 use gpui::*;
-use gpui_kit::base::{Avatar, AvatarImage, Button, ColorTokens, Theme};
+use gpui_kit::base::{Button, ColorTokens, Theme};
+use gpui_kit::component::Sizable;
+use gpui_kit::component::avatar::Avatar;
+use gpui_kit::component::native_menu::NativeMenu;
 
 /// 操作按钮的统一高度
 const ACTION_BUTTON_HEIGHT: Pixels = px(36.);
@@ -10,6 +13,14 @@ use super::ContentPage;
 use crate::components::{TabBar, TabChanged, TabItem};
 use crate::state::user::UserProfile;
 use crate::theme::{DOLPHIN_FAMILY, PRESSED_OPACITY};
+
+// 「更多」菜单里的三个命令。
+//
+// `NativeMenu` 的每一项都挂一个 GPUI `Action`，选中后由 `Window::dispatch_action`
+// 派发 —— 和系统菜单栏、快捷键走的是同一套机制，所以将来只要在某个视图上
+// `on_action(...)` 就能接住，不必改菜单代码。现在还没有任何监听者，
+// 选中即派发到空处，等于什么都不做。
+actions!(favorite_music, [Share, BatchOperation, AddAllToPlaylist]);
 
 #[derive(Clone, Copy)]
 enum FavoriteMusicTab {
@@ -178,17 +189,9 @@ impl Render for FavoriteMusicPage {
                                             .gap_2()
                                             .child(
                                                 Avatar::new()
-                                                    .size(px(26.))
+                                                    .with_size(px(26.))
                                                     .flex_none()
-                                                    .overflow_hidden()
-                                                    .rounded_full()
-                                                    .image(
-                                                        AvatarImage::new(
-                                                            user_profile.avatar_path.clone(),
-                                                        )
-                                                        .size_full()
-                                                        .rounded_full(),
-                                                    ),
+                                                    .src(user_profile.avatar_path.clone()),
                                             )
                                             .child(
                                                 div()
@@ -259,6 +262,17 @@ impl Render for FavoriteMusicPage {
                                             .bg(colors.foreground.alpha(0.03))
                                             .hover(|style| style.bg(colors.foreground.alpha(0.08)))
                                             .active(|style| style.opacity(PRESSED_OPACITY))
+                                            // 弹出系统原生菜单
+                                            .on_click(|event, window, cx| {
+                                                NativeMenu::new()
+                                                    .menu("分享…", Box::new(Share))
+                                                    .menu("批量操作", Box::new(BatchOperation))
+                                                    .menu(
+                                                        "添加全部至播放列表",
+                                                        Box::new(AddAllToPlaylist),
+                                                    )
+                                                    .show(event.position(), window, cx);
+                                            })
                                             .child(
                                                 svg()
                                                     .path("icons/xpoint.svg")
