@@ -23,6 +23,13 @@ impl IconSize {
 /// 动画时长
 pub const ANIMATION_DURATION: Duration = Duration::from_millis(130);
 
+/// 按钮按下（active）时的整体透明度。
+///
+/// 这是交互反馈而不是配色：它走元素级的 `opacity`（作用于按钮本身及其所有子元素），
+/// 所以不放进 `ColorTokens`、不随主题变化，全站按钮统一一个值。
+/// hover 一律只改颜色、不改透明度，两者分工明确。
+pub const PRESSED_OPACITY: f32 = 0.8;
+
 pub fn init(cx: &mut App) {
     let colors = &mut Theme::global_mut(cx).tokens.colors;
     let ink = Hsla::from(rgb(0x283248));

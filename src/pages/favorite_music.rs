@@ -8,6 +8,7 @@ const ACTION_BUTTON_PADDING: Pixels = px(12.);
 
 use super::ContentPage;
 use crate::state::user::UserProfile;
+use crate::theme::PRESSED_OPACITY;
 
 /// 我喜欢的音乐
 pub struct FavoriteMusicPage {
@@ -41,7 +42,9 @@ fn play_all_button(colors: ColorTokens) -> Button {
         .px(ACTION_BUTTON_PADDING)
         .rounded_lg()
         .bg(colors.primary)
+        // hover 只改颜色（向背景靠一档），按下统一降整体透明度
         .hover(|style| style.bg(colors.primary.alpha(0.88)))
+        .active(|style| style.opacity(PRESSED_OPACITY))
         .text_size(px(13.))
         .text_color(colors.primary_foreground)
         .child(
@@ -177,8 +180,8 @@ impl Render for FavoriteMusicPage {
                                     .items_center()
                                     .gap(px(12.))
                                     .child(play_all_button(colors))
-                                    // 下载：宽度自适应，浅灰填充 + 中灰文字，
-                                    // 描边与 header 的搜索框、返回键一致
+                                    // 下载：宽度自适应，比 muted 更浅的底 + 比 muted 更浅的描边，
+                                    // 文字/图标用比 muted_foreground 深一档的灰保证可读
                                     .child(
                                         Button::new("favorite-download-button")
                                             .h(ACTION_BUTTON_HEIGHT)
@@ -189,22 +192,24 @@ impl Render for FavoriteMusicPage {
                                             .gap(px(4.))
                                             .px(ACTION_BUTTON_PADDING)
                                             .border_1()
-                                            .border_color(colors.border)
+                                            .border_color(colors.foreground.alpha(0.06))
                                             .rounded_lg()
-                                            .bg(colors.muted)
-                                            // 主题里 accent 和 muted 都是 ink 6%，
-                                            // 叠 accent 看不出变化，hover 用略深一档的灰
+                                            .bg(colors.foreground.alpha(0.03))
+                                            // 底色本身已有 3%，hover 只抬到 8%（+5 个点），
+                                            // 观感与 header 返回键的 0 → accent(6%) 接近；
+                                            // 按下不再换更深的颜色，统一降整体透明度
                                             .hover(|style| {
-                                                style.bg(colors.foreground.alpha(0.12))
+                                                style.bg(colors.foreground.alpha(0.08))
                                             })
+                                            .active(|style| style.opacity(PRESSED_OPACITY))
                                             .text_size(px(13.))
-                                            .text_color(colors.muted_foreground)
+                                            .text_color(colors.secondary_foreground)
                                             .child(
                                                 svg()
                                                     .path("icons/download.svg")
                                                     .size(px(18.))
                                                     .flex_none()
-                                                    .text_color(colors.muted_foreground),
+                                                    .text_color(colors.secondary_foreground),
                                             )
                                             .child("下载"),
                                     )
@@ -217,18 +222,19 @@ impl Render for FavoriteMusicPage {
                                             .items_center()
                                             .justify_center()
                                             .border_1()
-                                            .border_color(colors.border)
+                                            .border_color(colors.foreground.alpha(0.06))
                                             .rounded_lg()
-                                            .bg(colors.muted)
+                                            .bg(colors.foreground.alpha(0.03))
                                             .hover(|style| {
-                                                style.bg(colors.foreground.alpha(0.12))
+                                                style.bg(colors.foreground.alpha(0.08))
                                             })
+                                            .active(|style| style.opacity(PRESSED_OPACITY))
                                             .child(
                                                 svg()
                                                     .path("icons/xpoint.svg")
                                                     .size(px(16.))
                                                     .flex_none()
-                                                    .text_color(colors.muted_foreground),
+                                                    .text_color(colors.secondary_foreground),
                                             ),
                                     ),
                             ),

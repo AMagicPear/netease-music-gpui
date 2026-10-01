@@ -3,7 +3,7 @@ use gpui_kit::base::{Button, ColorTokens, Theme};
 
 use super::progress_bar::ProgressBar;
 use crate::state::playback::PlaybackState;
-use crate::theme::IconSize;
+use crate::theme::{IconSize, PRESSED_OPACITY};
 
 pub struct PlayerBar {
     playback: Entity<PlaybackState>,
@@ -238,8 +238,10 @@ impl Render for PlayerBar {
                                             .rounded_full()
                                             .bg(colors.primary)
                                             .text_color(colors.primary_foreground)
-                                            .hover(|style| style.opacity(0.9))
-                                            .active(|style| style.size(px(40.)).opacity(0.8))
+                                            // hover 的反馈交给外层区域的放大（40 → 42），
+                                            // 这里不动透明度；按下统一降整体透明度
+                                            .hover(|style| style.bg(colors.primary.alpha(0.88)))
+                                            .active(|style| style.opacity(PRESSED_OPACITY))
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 this.playback.update(cx, |playback, cx| {
                                                     playback.is_playing = !playback.is_playing;
