@@ -7,7 +7,7 @@ use super::sidebar_page::{SidebarChanged, SidebarPage};
 use crate::components::{WindowDragState, window_drag_region};
 use crate::theme::IconSize;
 use gpui_kit::base::input::{Input, InputState};
-use gpui_kit::base::{ColorTokens, Theme as BaseTheme};
+use gpui_kit::base::{Button, ColorTokens, Theme as BaseTheme};
 
 const MIN_SIDEBAR_WIDTH: Pixels = px(204.);
 const MAX_SIDEBAR_WIDTH: Pixels = px(627.);
@@ -118,14 +118,12 @@ fn page_header(
                         .gap_2()
                         // 返回按钮
                         .child(
-                            div()
+                            Button::new("back-button")
                                 .w_7()
                                 .border_1()
                                 .border_color(colors.border)
                                 .rounded_lg()
-                                .flex()
-                                .items_center()
-                                .justify_center()
+                                .hover(|style| style.bg(colors.accent))
                                 .child(
                                     svg()
                                         .path("icons/backward.svg")

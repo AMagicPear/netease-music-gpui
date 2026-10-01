@@ -1,5 +1,5 @@
 use gpui::*;
-use gpui_kit::base::{ColorTokens, Theme as BaseTheme};
+use gpui_kit::base::{Button, ColorTokens, Theme as BaseTheme};
 
 use super::progress_bar::ProgressBar;
 use crate::state::playback::PlaybackState;
@@ -173,15 +173,13 @@ impl Render for PlayerBar {
                                     .text_color(colors.secondary_foreground),
                             )
                             .child(
-                                div()
-                                    .id("play-pause-button")
+                                Button::new("play-pause-button")
                                     .size(px(40.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
                                     .rounded_full()
                                     .bg(colors.primary)
                                     .text_color(colors.primary_foreground)
+                                    .hover(|style| style.opacity(0.9))
+                                    .active(|style| style.opacity(0.8))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.playback.update(cx, |playback, cx| {
                                             playback.is_playing = !playback.is_playing;

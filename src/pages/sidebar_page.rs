@@ -1,6 +1,6 @@
 use gpui::prelude::{FluentBuilder, StatefulInteractiveElement};
 use gpui::*;
-use gpui_kit::base::{ColorTokens, Theme as BaseTheme};
+use gpui_kit::base::{Button, ColorTokens, Theme as BaseTheme};
 
 use crate::components::{WindowDragState, window_drag_region};
 use crate::theme::IconSize;
@@ -207,16 +207,25 @@ fn page_nav_item(
 ) -> impl IntoElement {
     let active = page == active_page;
 
-    sidebar_row(page.id(), px(36.))
+    Button::new(page.id())
+        .w_full()
+        .h(px(36.))
+        .gap(px(8.))
         .p(px(8.))
+        .rounded(px(8.))
+        // Button 默认把内容居中，导航项需要图标 + 文字左对齐，所以显式覆盖。
+        .justify_start()
         .text_size(px(14.))
-        .text_color(if active {
-            colors.primary_foreground
-        } else {
-            colors.foreground
-        })
-        .when(active, |this| {
-            this.bg(colors.primary).font_weight(FontWeight::MEDIUM)
+        .text_color(colors.foreground)
+        // 选中态交给 Button 的语义状态，而不是手工叠背景色。
+        .selected(active)
+        .styles(|styles| {
+            styles.selected(|style| {
+                style
+                    .bg(colors.primary)
+                    .text_color(colors.primary_foreground)
+                    .font_weight(FontWeight::MEDIUM)
+            })
         })
         .when(!active, |this| this.hover(|style| style.bg(colors.accent)))
         .child(
