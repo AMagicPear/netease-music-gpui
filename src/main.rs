@@ -40,6 +40,7 @@ fn main() {
             base: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets"),
         })
         .run(|cx: &mut App| {
+            theme::load_fonts(cx);
             gpui_kit::init(cx);
             theme::init(cx);
             let bounds = Bounds::centered(None, size(px(1060.), px(720.)), cx);

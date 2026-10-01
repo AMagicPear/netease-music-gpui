@@ -3,7 +3,7 @@ use gpui_kit::base::{Button, ColorTokens, Theme};
 
 use super::progress_bar::ProgressBar;
 use crate::state::playback::PlaybackState;
-use crate::theme::{IconSize, PRESSED_OPACITY};
+use crate::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_OPACITY};
 
 pub struct PlayerBar {
     playback: Entity<PlaybackState>,
@@ -56,8 +56,8 @@ fn interaction_count(
                 .rounded_full()
                 .bg(colors.surface)
                 .text_color(color)
-                .text_size(px(8.))
-                .font_family("dolphin")
+                .text_size(px(9.))
+                .font_family(DOLPHIN_FAMILY)
                 .font_weight(FontWeight::SEMIBOLD)
                 .line_height(px(10.))
                 .child(count),

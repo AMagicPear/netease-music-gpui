@@ -9,7 +9,7 @@ const ACTION_BUTTON_PADDING: Pixels = px(12.);
 use super::ContentPage;
 use crate::components::{TabBar, TabChanged, TabItem};
 use crate::state::user::UserProfile;
-use crate::theme::PRESSED_OPACITY;
+use crate::theme::{DOLPHIN_FAMILY, PRESSED_OPACITY};
 
 #[derive(Clone, Copy)]
 enum FavoriteMusicTab {
@@ -134,9 +134,8 @@ impl Render for FavoriteMusicPage {
                                             .text_color(colors.primary_foreground),
                                     )
                                     .text_color(colors.primary_foreground)
-                                    .text_size(px(14.))
-                                    .font_family("dolphin")
-                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_size(px(15.))
+                                    .font_family(DOLPHIN_FAMILY)
                                     .child(7735.to_string()),
                             )
                             // 正中间的爱心图标，仅「我喜欢的音乐」有

@@ -1,5 +1,17 @@
+use std::borrow::Cow;
+
 use gpui::{App, Hsla, Pixels, px, rgb};
 use gpui_kit::base::Theme;
+
+/// Dolphin 字体在 .ttf **内部**声明的 family 名称。
+///
+/// 文本系统按这个名字查找字体，与文件名无关；文件名是 `dolphin.ttf`，
+/// 但内部的 family 是 `Dolphin`，而且匹配是大小写敏感的，写错就静默回退到系统字体。
+pub const DOLPHIN_FAMILY: &str = "Dolphin";
+
+/// 编译期把字体字节打进二进制，运行时零拷贝地交给文本系统。
+const DOLPHIN_MEDIUM: &[u8] = include_bytes!("../assets/font/dolphin.ttf");
+const DOLPHIN_BOLD: &[u8] = include_bytes!("../assets/font/dolphin_bold.ttf");
 
 #[derive(Clone, Copy)]
 pub enum IconSize {
@@ -25,6 +37,19 @@ impl IconSize {
 /// 所以不放进 `ColorTokens`、不随主题变化，全站按钮统一一个值。
 /// hover 一律只改颜色、不改透明度，两者分工明确。
 pub const PRESSED_OPACITY: f32 = 0.8;
+
+/// 注册打包字体。
+///
+/// 必须早于任何文字测量与 `open_window`：`add_fonts` 之后首次布局才会用上新字体，
+/// 之后再注册则还要 `cx.refresh_windows()` 才能重新排版已显示的窗口。
+pub fn load_fonts(cx: &mut App) {
+    cx.text_system()
+        .add_fonts(vec![
+            Cow::Borrowed(DOLPHIN_MEDIUM),
+            Cow::Borrowed(DOLPHIN_BOLD),
+        ])
+        .expect("failed to load dolphin fonts");
+}
 
 pub fn init(cx: &mut App) {
     let colors = &mut Theme::global_mut(cx).tokens.colors;

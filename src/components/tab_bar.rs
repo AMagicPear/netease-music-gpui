@@ -7,6 +7,8 @@ use gpui::{
 };
 use gpui_kit::base::{Button, Theme};
 
+use crate::theme::DOLPHIN_FAMILY;
+
 const INDICATOR_DURATION: Duration = Duration::from_millis(200);
 const INDICATOR_WIDTH: Pixels = px(16.);
 const INDICATOR_HEIGHT: Pixels = px(3.);
@@ -208,9 +210,10 @@ impl Render for TabBar {
                             .when_some(item.count.clone(), |this, count| {
                                 this.child(
                                     div()
-                                        .ml(px(2.))
+                                        .ml(px(1.))
                                         .text_size(px(13.))
-                                        .font_weight(FontWeight::MEDIUM)
+                                        .font_weight(FontWeight::BOLD)
+                                        .font_family(DOLPHIN_FAMILY)
                                         .child(count),
                                 )
                             }),
