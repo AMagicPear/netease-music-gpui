@@ -1,9 +1,9 @@
 use gpui::prelude::{FluentBuilder, StatefulInteractiveElement};
 use gpui::*;
 use gpui_kit::base::{Button, ColorTokens, Theme};
+use gpui_kit::component::TitleBar;
 
 use super::{ContentPage, LIBRARY_PAGES, MAIN_PAGES};
-use crate::components::{WindowDragState, window_drag_region};
 use crate::theme::IconSize;
 
 /// 选中项变化时发出的事件，`MainContent` 订阅它来重新渲染右侧内容。
@@ -11,24 +11,16 @@ pub(super) struct SidebarChanged;
 
 pub(super) struct SidebarPage {
     active_page: ContentPage,
-    window_move_pending: bool,
     /// 假数据，格式是 `(歌单名, 封面路径)`。
     playlists: Vec<(&'static str, &'static str)>,
 }
 
 impl EventEmitter<SidebarChanged> for SidebarPage {}
 
-impl WindowDragState for SidebarPage {
-    fn window_move_pending_mut(&mut self) -> &mut bool {
-        &mut self.window_move_pending
-    }
-}
-
 impl SidebarPage {
     pub(super) fn new() -> Self {
         Self {
             active_page: ContentPage::Recommend,
-            window_move_pending: false,
             playlists: vec![
                 (
                     "would u wanna ride with me",
@@ -48,43 +40,47 @@ impl SidebarPage {
 }
 
 /// 顶部 logo 区域，同时充当窗口拖动手柄。
-fn page_header(colors: ColorTokens, cx: &mut Context<SidebarPage>) -> impl IntoElement {
-    window_drag_region("left-page-header", cx)
+fn page_header(colors: ColorTokens) -> impl IntoElement {
+    TitleBar::new()
         .h(px(72.))
         .w_full()
-        .px(px(18.))
+        .pl(px(0.))
+        .border_b_0()
+        .bg(rgba(0x00000000))
         .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .pt_10()
-                .left_1()
-                .child(
-                    div()
-                        .size(px(24.))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded_full()
-                        .bg(colors.primary)
-                        .text_color(colors.primary_foreground)
-                        .child(
-                            svg()
-                                .path("icons/logo/logo.svg")
-                                .size(px(27.))
-                                .flex_none()
-                                .text_color(colors.primary_foreground),
-                        ),
-                )
-                .child(
-                    svg()
-                        .path("icons/logo/logo_text.svg")
-                        .w(px(101.))
-                        .h(px(19.))
-                        .text_color(colors.foreground),
-                ),
+            div().size_full().px(px(18.)).child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .pt_10()
+                    .left_1()
+                    .child(
+                        div()
+                            .size(px(24.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .bg(colors.primary)
+                            .text_color(colors.primary_foreground)
+                            .child(
+                                svg()
+                                    .path("icons/logo/logo.svg")
+                                    .size(px(27.))
+                                    .flex_none()
+                                    .text_color(colors.primary_foreground),
+                            ),
+                    )
+                    .child(
+                        svg()
+                            .path("icons/logo/logo_text.svg")
+                            .w(px(101.))
+                            .h(px(19.))
+                            .text_color(colors.foreground),
+                    ),
+            ),
         )
 }
 
@@ -266,7 +262,7 @@ impl Render for SidebarPage {
             .flex()
             .flex_col()
             .bg(colors.foreground.alpha(0.03))
-            .child(page_header(colors, cx))
+            .child(page_header(colors))
             // 头部固定，剩下的是唯一可滚动的区域；
             // min_h(0) 是 flex 子项能正确触发滚动的关键。
             .child(

@@ -5,19 +5,15 @@ use gpui::*;
 
 use super::ContentPage;
 use super::sidebar_page::{SidebarChanged, SidebarPage};
-use crate::components::{WindowDragState, window_drag_region};
 use crate::state::user::UserProfile;
 use crate::theme::IconSize;
 use gpui_kit::base::input::{Input, InputState};
 use gpui_kit::base::{Button, ColorTokens, Theme};
-use gpui_kit::component::Sizable;
 use gpui_kit::component::avatar::Avatar;
+use gpui_kit::component::{Sizable, TitleBar};
 
 const MIN_SIDEBAR_WIDTH: Pixels = px(204.);
 const MAX_SIDEBAR_WIDTH: Pixels = px(627.);
-const HEADER_HEIGHT: Pixels = px(72.);
-const HEADER_TOP_PADDING: Pixels = px(30.);
-const HEADER_SIDE_GUTTER: Pixels = px(40.);
 /// 搜索框的理想宽度
 const SEARCH_BOX_WIDTH: Pixels = px(258.);
 /// 搜索框的压缩下限
@@ -32,7 +28,6 @@ pub struct MainContent {
     pages: HashMap<ContentPage, AnyView>,
     _sidebar_subscription: Subscription,
     _user_profile_subscription: Subscription,
-    window_move_pending: bool,
 }
 
 impl MainContent {
@@ -68,20 +63,14 @@ impl MainContent {
             pages,
             _sidebar_subscription: sidebar_subscription,
             _user_profile_subscription: user_profile_subscription,
-            window_move_pending: false,
         }
-    }
-}
-
-impl WindowDragState for MainContent {
-    fn window_move_pending_mut(&mut self) -> &mut bool {
-        &mut self.window_move_pending
     }
 }
 
 /// 搜索框：左边放大镜图标，右边文本输入框，宽度可被压缩
 fn search_box(input: Entity<InputState>, colors: ColorTokens) -> impl IntoElement {
     div()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .h_9()
         .w(SEARCH_BOX_WIDTH)
         .min_w(SEARCH_BOX_MIN_WIDTH)
@@ -118,46 +107,32 @@ fn hover_icon(id: &'static str, path: &'static str, colors: ColorTokens) -> impl
         .text_color(colors.foreground.alpha(0.6))
         .hover(|style| style.text_color(colors.foreground))
         .id(id)
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
 }
 
 fn page_header(
-    id: &'static str,
     colors: ColorTokens,
     search_input: Entity<InputState>,
     user_name: String,
     avatar_path: String,
-    cx: &mut Context<MainContent>,
 ) -> impl IntoElement {
-    div()
-        .id(id)
-        .h(HEADER_HEIGHT)
+    TitleBar::new()
+        .h(px(72.))
         .w_full()
-        .flex_none()
-        .relative()
-        .pt(HEADER_TOP_PADDING)
-        .child(
-            window_drag_region("right-header-top-drag-region", cx)
-                .absolute()
-                .top_0()
-                .left_0()
-                .w_full()
-                .h(HEADER_TOP_PADDING),
-        )
+        .pl(px(0.))
+        .border_b_0()
+        .bg(colors.background)
         .child(
             div()
-                .w_full()
-                .h(HEADER_HEIGHT - HEADER_TOP_PADDING)
+                .size_full()
+                .pt(px(30.))
+                .px(px(40.))
                 .flex()
                 .items_center()
                 .min_w(px(0.))
                 .child(
-                    window_drag_region("right-header-left-drag-region", cx)
-                        .w(HEADER_SIDE_GUTTER)
-                        .h_full()
-                        .flex_none(),
-                )
-                .child(
                     Button::new("back-button")
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .h_9()
                         .w_7()
                         .flex_none()
@@ -174,21 +149,22 @@ fn page_header(
                 )
                 .child(search_box(search_input, colors))
                 .child(
-                    window_drag_region("right-header-drag-region", cx)
-                        .flex_1()
-                        .h_full(),
-                )
-                .child(
-                    div().id("header-avatar").flex_none().child(
-                        Avatar::new()
-                            .with_size(px(28.))
-                            .flex_none()
-                            .src(avatar_path),
-                    ),
+                    div()
+                        .id("header-avatar")
+                        .ml_auto()
+                        .flex_none()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(
+                            Avatar::new()
+                                .with_size(px(28.))
+                                .flex_none()
+                                .src(avatar_path),
+                        ),
                 )
                 .child(
                     div()
                         .id("header-profile-menu")
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .ml(px(4.))
                         .flex()
                         .items_center()
@@ -215,13 +191,7 @@ fn page_header(
                     "icons/setting.svg",
                     colors,
                 ))
-                .child(hover_icon("header-skin-button", "icons/skin.svg", colors))
-                .child(
-                    window_drag_region("right-header-right-drag-region", cx)
-                        .w(HEADER_SIDE_GUTTER)
-                        .h_full()
-                        .flex_none(),
-                ),
+                .child(hover_icon("header-skin-button", "icons/skin.svg", colors)),
         )
 }
 
@@ -252,12 +222,10 @@ impl Render for MainContent {
                     .flex()
                     .flex_col()
                     .child(page_header(
-                        "right-page-header",
                         colors,
                         self.search_input.clone(),
                         user_profile.name.clone(),
                         user_profile.avatar_path.clone(),
-                        cx,
                     ))
                     // 右侧具体页面
                     .child(
