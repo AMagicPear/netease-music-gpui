@@ -70,7 +70,7 @@ fn main() {
                         avatar_path: "/Users/amagicpear/Pictures/Perry Origin Character/IMG_20240601_133150.jpeg".into(),
                     });
                     let main_content = cx.new(|cx| MainContent::new(window, user_profile, cx));
-                    let player_bar = cx.new(|cx| PlayerBar::new(playback, cx));
+                    let player_bar = cx.new(|cx| PlayerBar::new(playback, window, cx));
                     cx.new(|_| MainWindow {
                         main_content,
                         player_bar,

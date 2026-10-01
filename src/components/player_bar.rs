@@ -14,8 +14,12 @@ pub struct PlayerBar {
 }
 
 impl PlayerBar {
-    pub fn new(playback: Entity<PlaybackState>, cx: &mut Context<Self>) -> Self {
-        let progress_bar = cx.new(|cx| ProgressBar::new(playback.clone(), cx));
+    pub fn new(
+        playback: Entity<PlaybackState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let progress_bar = cx.new(|cx| ProgressBar::new(playback.clone(), window, cx));
         let playback_subscription = cx.observe(&playback, |_, _, cx| cx.notify());
         Self {
             playback,
@@ -220,6 +224,15 @@ impl Render for PlayerBar {
                                         cx.listener(|this, _, _, cx| {
                                             this.play_button_pressed = false;
                                             cx.notify();
+                                        }),
+                                    )
+                                    .on_mouse_up_out(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            if this.play_button_pressed {
+                                                this.play_button_pressed = false;
+                                                cx.notify();
+                                            }
                                         }),
                                     )
                                     .on_hover(cx.listener(|this, hovered, _, cx| {

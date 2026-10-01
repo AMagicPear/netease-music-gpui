@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use gpui::{App, Hsla, Pixels, px, rgb};
-use gpui_kit::base::Theme;
+use gpui_kit::component::Theme;
 
 /// Dolphin 字体在 .ttf **内部**声明的 family 名称。
 ///
@@ -52,18 +52,27 @@ pub fn load_fonts(cx: &mut App) {
 }
 
 pub fn init(cx: &mut App) {
-    let colors = &mut Theme::global_mut(cx).tokens.colors;
     let ink = Hsla::from(rgb(0x283248));
-
-    colors.background = rgb(0xf7f9fc).into();
-    colors.surface = rgb(0xfafafa).into();
-    colors.foreground = ink;
-    colors.secondary_foreground = ink.alpha(0.8);
-    colors.muted_foreground = ink.alpha(0.6);
-    colors.border = ink.alpha(0.1);
-    colors.muted = ink.alpha(0.06);
-    colors.accent = ink.alpha(0.06);
-    colors.primary = rgb(0xfc3d49).into();
-    colors.primary_foreground = rgb(0xffffff).into();
-    colors.selection = colors.primary.alpha(0.3);
+    // Component 是主题来源；update 会同步颜色 token 和 Base 的主题投影。
+    Theme::update(cx, |theme| {
+        let colors = &mut theme.colors;
+        colors.background = rgb(0xf7f9fc).into();
+        // Base 的 surface 对应 Component 的 popover。
+        colors.popover = rgb(0xfafafa).into();
+        colors.foreground = ink;
+        colors.secondary_foreground = ink.alpha(0.8);
+        colors.muted_foreground = ink.alpha(0.6);
+        colors.border = ink.alpha(0.1);
+        colors.muted = ink.alpha(0.06);
+        colors.accent = ink.alpha(0.06);
+        colors.primary = rgb(0xfc3d49).into();
+        colors.primary_foreground = rgb(0xffffff).into();
+        colors.selection = colors.primary.alpha(0.3);
+        colors.progress_bar = colors.primary;
+    });
+    debug_assert_eq!(
+        gpui_kit::base::Theme::global(cx).tokens.colors,
+        Theme::global(cx).color_tokens(),
+        "Component and Base themes must stay synchronized",
+    );
 }

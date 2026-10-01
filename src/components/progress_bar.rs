@@ -1,7 +1,10 @@
 use std::time::Duration;
 
 use gpui::*;
-use gpui_kit::base::{ColorTokens, Theme};
+use gpui_kit::base::{
+    Slider, SliderIndicator, SliderThumb, SliderTrack, Theme, Transition, transition,
+};
+use gpui_kit::component::slider::{SliderEvent, SliderState};
 
 use crate::state::playback::PlaybackState;
 
@@ -11,98 +14,175 @@ const HOVER_HEIGHT: f32 = 6.;
 
 /// 悬浮时显示在播放头上的白色圆点直径
 const HANDLE_SIZE: f32 = 16.;
+/// 向上覆盖页面边缘的命中区域，视觉轨道仍留在播放栏原来的位置。
+const HIT_SLOP_TOP: f32 = 6.;
 
 pub struct ProgressBar {
     playback: Entity<PlaybackState>,
+    slider: Entity<SliderState>,
     hovered: bool,
-    /// 悬浮状态每切换一次就 +1。
-    /// `AnimationElement` 的播放进度是按 ElementId 缓存的，换一个 id 就等于让它从头重新播一遍。
-    animation_generation: u64,
+    dragging: bool,
     _playback_subscription: Subscription,
+    _slider_subscription: Subscription,
 }
 
 impl ProgressBar {
-    pub fn new(playback: Entity<PlaybackState>, cx: &mut Context<Self>) -> Self {
-        let playback_subscription = cx.observe(&playback, |_, _, cx| cx.notify());
+    pub fn new(
+        playback: Entity<PlaybackState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let progress = playback.read(cx).progress();
+        let slider = cx.new(|_| {
+            SliderState::new()
+                .min(0.)
+                .max(1.)
+                .step(0.0001)
+                .default_value(progress)
+        });
+        let playback_subscription =
+            cx.observe_in(&playback, window, |this, playback, window, cx| {
+                // 播放时钟只更新非拖动状态，避免覆盖用户正在预览的位置。
+                if !this.dragging {
+                    let progress = playback.read(cx).progress();
+                    if this.slider.read(cx).value().end() != progress {
+                        this.slider
+                            .update(cx, |slider, cx| slider.set_value(progress, window, cx));
+                    }
+                }
+                cx.notify();
+            });
+        let slider_subscription = cx.subscribe_in(&slider, window, |this, _, event, _, cx| {
+            match event {
+                SliderEvent::Change(_) => this.dragging = true,
+                SliderEvent::Release(value) => {
+                    this.dragging = false;
+                    this.playback.update(cx, |playback, cx| {
+                        playback.seek_to_progress(value.end());
+                        cx.notify();
+                    });
+                }
+            }
+            cx.notify();
+        });
         Self {
             playback,
+            slider,
             hovered: false,
-            animation_generation: 0,
+            dragging: false,
             _playback_subscription: playback_subscription,
+            _slider_subscription: slider_subscription,
         }
     }
 }
 
 impl Render for ProgressBar {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors: ColorTokens = Theme::global(cx).tokens.colors;
-        let progress = self.playback.read(cx).progress();
-        let hovered = self.hovered;
-        let generation = self.animation_generation;
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = Theme::global(cx).tokens.colors;
+        let progress = self.slider.read(cx).percentage().end;
+        let enabled = self
+            .playback
+            .read(cx)
+            .current_song
+            .as_ref()
+            .is_some_and(|song| !song.duration.is_zero());
+        // 稳定 ID 的 transition 从当前采样值反向，并由库处理 reduced motion。
+        let t = transition(
+            "player-progress-hover",
+            if self.hovered || self.dragging {
+                1.
+            } else {
+                0.
+            },
+            Transition::new(Duration::from_millis(130)).ease(ease_out_quint()),
+            window,
+            cx,
+        );
+        let height = REST_HEIGHT + (HOVER_HEIGHT - REST_HEIGHT) * t;
 
         div()
             .id("player-progress-bar")
             .absolute()
-            .top_0()
+            .top(px(-HIT_SLOP_TOP))
             .left_0()
             .right_0()
-            .h(px(12.))
+            .h(px(12. + HIT_SLOP_TOP))
+            .occlude()
             .on_hover(cx.listener(|this, hovered, _, cx| {
                 if this.hovered == *hovered {
                     return;
                 }
                 this.hovered = *hovered;
-                this.animation_generation += 1;
                 cx.notify();
             }))
             .child(
-                div()
+                Slider::new(&self.slider)
+                    .disabled(!enabled)
                     .absolute()
                     .left_0()
                     .right_0()
-                    .bg(colors.border)
-                    .with_animation(
-                        ElementId::NamedInteger("player-progress-track".into(), generation),
-                        Animation::new(Duration::from_millis(130)).with_easing(ease_out_quint()),
-                        move |this, delta| {
-                            // generation 为 0 表示还没发生过悬浮切换，直接停在静止状态，
-                            // 避免首次渲染时莫名播一段入场动画。
-                            let t = match generation {
-                                0 => 0.,
-                                _ if hovered => delta, // 展开：0 → 1
-                                _ => 1. - delta,       // 收起：1 → 0
-                            };
-                            let height = REST_HEIGHT + (HOVER_HEIGHT - REST_HEIGHT) * t;
-                            // 上移增长量的一半，让轨道的水平中心线始终不动
-                            this.h(px(height))
-                                .top(px((REST_HEIGHT - height) / 2.))
-                                .child(
-                                    div()
-                                        .relative()
-                                        .h_full()
-                                        .w(relative(progress))
-                                        .bg(colors.primary)
-                                        // 播放头上的白色圆点：直径随 t 一起长大，
-                                        // 水平方向骑在进度填充的右边缘上，垂直方向与轨道中心线对齐
-                                        .child(
-                                            div()
-                                                .absolute()
-                                                .top(px((height - HANDLE_SIZE * t) / 2.))
-                                                .right(px(-HANDLE_SIZE * t / 2.))
-                                                .size(px(HANDLE_SIZE * t))
-                                                .rounded_full()
-                                                .bg(colors.primary_foreground)
-                                                .shadow(vec![
-                                                    BoxShadow::new(
-                                                        px(0.),
-                                                        px(1.),
-                                                        hsla(0., 0., 0., 0.25),
-                                                    )
-                                                    .blur_radius(px(1.)),
-                                                ]),
-                                        ),
-                                )
-                        },
+                    .top_0()
+                    .h_full()
+                    .child(
+                        SliderTrack::new(&self.slider)
+                            .disabled(!enabled)
+                            .relative()
+                            .size_full()
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left_0()
+                                    .right_0()
+                                    .top(px(HIT_SLOP_TOP + (REST_HEIGHT - height) / 2.))
+                                    .h(px(height))
+                                    .bg(colors.border),
+                            )
+                            .child(
+                                // Indicator 的完整宽度用于指针到进度的映射；填充放在内部。
+                                SliderIndicator::new(&self.slider)
+                                    .absolute()
+                                    .left_0()
+                                    .w_full()
+                                    .top(px(HIT_SLOP_TOP + (REST_HEIGHT - height) / 2.))
+                                    .h(px(height))
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .top_0()
+                                            .left_0()
+                                            .h_full()
+                                            .w(relative(progress))
+                                            .bg(colors.primary),
+                                    ),
+                            )
+                            .child(
+                                SliderThumb::new(&self.slider)
+                                    .disabled(!enabled)
+                                    .absolute()
+                                    .left(relative(progress))
+                                    .ml(px(-HANDLE_SIZE / 2.))
+                                    .top(px(HIT_SLOP_TOP + (REST_HEIGHT - HANDLE_SIZE) / 2.))
+                                    // 命中区域保持固定，只有可见白色播放头随悬停缩放。
+                                    .size(px(HANDLE_SIZE))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(
+                                        div()
+                                            .size(px(HANDLE_SIZE * t))
+                                            .opacity(t)
+                                            .rounded_full()
+                                            .bg(colors.primary_foreground)
+                                            .shadow(vec![
+                                                BoxShadow::new(
+                                                    px(0.),
+                                                    px(1.),
+                                                    hsla(0., 0., 0., 0.25),
+                                                )
+                                                .blur_radius(px(1.)),
+                                            ]),
+                                    ),
+                            ),
                     ),
             )
     }
