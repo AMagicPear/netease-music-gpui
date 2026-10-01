@@ -5,6 +5,7 @@ use gpui::*;
 
 use super::sidebar_page::{SidebarChanged, SidebarPage};
 use crate::components::{WindowDragState, window_drag_region};
+use crate::theme::IconSize;
 use gpui_kit::base::input::{Input, InputState};
 use gpui_kit::base::{ColorTokens, Theme as BaseTheme};
 
@@ -140,7 +141,62 @@ fn page_header(
                         .flex_1()
                         .h_full(),
                 )
-                .child(div().child("right"))
+                // 右侧的头像名称和按钮
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.))
+                                .text_size(px(13.))
+                                .text_color(colors.foreground.alpha(0.7))
+                                .child(
+                                    img("/Users/amagicpear/Pictures/Perry Origin Character/IMG_20240601_133150.jpeg")
+                                        .size(px(28.))
+                                        .rounded_full()
+                                        .flex_none(),
+                                )
+                                .child("一只会魔法的梨")
+                                .child(
+                                    img("icons/vip-level.svg")
+                                        .w(px(48.))
+                                        .h(px(16.))
+                                        .flex_none(),
+                                )
+                                .child(
+                                    svg()
+                                        .path("icons/unfold.svg")
+                                        .size(px(20.))
+                                        .flex_none()
+                                        .text_color(colors.foreground.alpha(0.6)),
+                                ),
+                        )
+                        .child(
+                            svg()
+                                .path("icons/message.svg")
+                                .size(IconSize::Small.pixels())
+                                .flex_none()
+                                .text_color(colors.foreground.alpha(0.6)),
+                        )
+                        .child(
+                            svg()
+                                .path("icons/setting.svg")
+                                .size(IconSize::Small.pixels())
+                                .flex_none()
+                                .text_color(colors.foreground.alpha(0.6)),
+                        )
+                        .child(
+                            svg()
+                                .path("icons/skin.svg")
+                                .size(IconSize::Small.pixels())
+                                .flex_none()
+                                .text_color(colors.foreground.alpha(0.6)),
+                        ),
+                )
                 .child(
                     window_drag_region("right-header-right-drag-region", cx)
                         .w(HEADER_SIDE_GUTTER)
