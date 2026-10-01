@@ -1,8 +1,9 @@
+use std::time::Duration;
+
 use gpui::*;
 use gpui_kit::base::{ColorTokens, Theme};
 
 use crate::state::playback::PlaybackState;
-use crate::theme::ANIMATION_DURATION;
 
 /// 轨道静止 / 悬浮时的高度
 const REST_HEIGHT: f32 = 2.;
@@ -62,7 +63,7 @@ impl Render for ProgressBar {
                     .bg(colors.border)
                     .with_animation(
                         ElementId::NamedInteger("player-progress-track".into(), generation),
-                        Animation::new(ANIMATION_DURATION).with_easing(ease_out_quint()),
+                        Animation::new(Duration::from_millis(130)).with_easing(ease_out_quint()),
                         move |this, delta| {
                             // generation 为 0 表示还没发生过悬浮切换，直接停在静止状态，
                             // 避免首次渲染时莫名播一段入场动画。

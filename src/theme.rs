@@ -1,6 +1,5 @@
 use gpui::{App, Hsla, Pixels, px, rgb};
 use gpui_kit::base::Theme;
-use std::time::Duration;
 
 #[derive(Clone, Copy)]
 pub enum IconSize {
@@ -19,9 +18,6 @@ impl IconSize {
         }
     }
 }
-
-/// 动画时长
-pub const ANIMATION_DURATION: Duration = Duration::from_millis(130);
 
 /// 按钮按下（active）时的整体透明度。
 ///
