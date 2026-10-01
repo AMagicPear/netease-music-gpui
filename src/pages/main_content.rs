@@ -200,6 +200,8 @@ fn page_header(
                                         .flex_none()
                                         .overflow_hidden()
                                         .rounded_full()
+                                        .border_1()
+                                        .border_color(colors.border)
                                         .image(
                                             AvatarImage::new(avatar_path)
                                                 .size_full()

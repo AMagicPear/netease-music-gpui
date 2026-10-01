@@ -1,5 +1,10 @@
 use gpui::*;
-use gpui_kit::base::{Avatar, AvatarImage, Theme};
+use gpui_kit::base::{Avatar, AvatarImage, Button, ColorTokens, Theme};
+
+/// 操作按钮的统一高度
+const ACTION_BUTTON_HEIGHT: Pixels = px(36.);
+/// 带文字按钮的左右内边距，宽度靠它 + 内容自适应
+const ACTION_BUTTON_PADDING: Pixels = px(12.);
 
 use super::ContentPage;
 use crate::state::user::UserProfile;
@@ -18,6 +23,35 @@ impl FavoriteMusicPage {
             _user_profile_subscription: user_profile_subscription,
         }
     }
+}
+
+/// 「播放全部」：主题红实心按钮，白字白图标，无边框。
+///
+/// 主操作用实心色块来吸引视线，所以它刻意不描边 —— 描边在纯色填充上
+/// 只会削弱色块边缘的锐利感。
+fn play_all_button(colors: ColorTokens) -> Button {
+    Button::new("favorite-play-all-button")
+        .h(ACTION_BUTTON_HEIGHT)
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(4.))
+        // 宽度交给内容：图标 + 文字 + 左右内边距
+        .px(ACTION_BUTTON_PADDING)
+        .rounded_lg()
+        .bg(colors.primary)
+        .hover(|style| style.bg(colors.primary.alpha(0.88)))
+        .text_size(px(13.))
+        .text_color(colors.primary_foreground)
+        .child(
+            svg()
+                .path("icons/play.svg")
+                .size(px(18.))
+                .flex_none()
+                .text_color(colors.primary_foreground),
+        )
+        .child("播放全部")
 }
 
 impl Render for FavoriteMusicPage {
@@ -136,7 +170,68 @@ impl Render for FavoriteMusicPage {
                                             ),
                                     ),
                             )
-                            // .child(div().flex().gap(px(12.)).child(child)),
+                            // 操作按钮组：播放全部 / 下载 / 更多
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(12.))
+                                    .child(play_all_button(colors))
+                                    // 下载：宽度自适应，浅灰填充 + 中灰文字，
+                                    // 描边与 header 的搜索框、返回键一致
+                                    .child(
+                                        Button::new("favorite-download-button")
+                                            .h(ACTION_BUTTON_HEIGHT)
+                                            .flex_none()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .gap(px(4.))
+                                            .px(ACTION_BUTTON_PADDING)
+                                            .border_1()
+                                            .border_color(colors.border)
+                                            .rounded_lg()
+                                            .bg(colors.muted)
+                                            // 主题里 accent 和 muted 都是 ink 6%，
+                                            // 叠 accent 看不出变化，hover 用略深一档的灰
+                                            .hover(|style| {
+                                                style.bg(colors.foreground.alpha(0.12))
+                                            })
+                                            .text_size(px(13.))
+                                            .text_color(colors.muted_foreground)
+                                            .child(
+                                                svg()
+                                                    .path("icons/download.svg")
+                                                    .size(px(18.))
+                                                    .flex_none()
+                                                    .text_color(colors.muted_foreground),
+                                            )
+                                            .child("下载"),
+                                    )
+                                    // 更多：固定 36×36 的纯图标按钮，靠 flex 居中
+                                    .child(
+                                        Button::new("favorite-more-button")
+                                            .size(px(36.))
+                                            .flex_none()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .border_1()
+                                            .border_color(colors.border)
+                                            .rounded_lg()
+                                            .bg(colors.muted)
+                                            .hover(|style| {
+                                                style.bg(colors.foreground.alpha(0.12))
+                                            })
+                                            .child(
+                                                svg()
+                                                    .path("icons/xpoint.svg")
+                                                    .size(px(16.))
+                                                    .flex_none()
+                                                    .text_color(colors.muted_foreground),
+                                            ),
+                                    ),
+                            ),
                     ),
             )
             // 控件区域
