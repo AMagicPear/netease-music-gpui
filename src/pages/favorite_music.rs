@@ -1,3 +1,4 @@
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_kit::base::{Avatar, AvatarImage, Button, ColorTokens, Theme};
 
@@ -10,10 +11,28 @@ use super::ContentPage;
 use crate::state::user::UserProfile;
 use crate::theme::PRESSED_OPACITY;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FavoriteMusicTab {
+    Songs,
+    Comments,
+    Collectors,
+}
+
+impl FavoriteMusicTab {
+    fn content_title(self) -> &'static str {
+        match self {
+            Self::Songs => "歌曲列表",
+            Self::Comments => "评论",
+            Self::Collectors => "收藏者",
+        }
+    }
+}
+
 /// 我喜欢的音乐
 pub struct FavoriteMusicPage {
     user_profile: Entity<UserProfile>,
     _user_profile_subscription: Subscription,
+    active_tab: FavoriteMusicTab,
 }
 
 impl FavoriteMusicPage {
@@ -22,8 +41,76 @@ impl FavoriteMusicPage {
         Self {
             user_profile,
             _user_profile_subscription: user_profile_subscription,
+            active_tab: FavoriteMusicTab::Songs,
         }
     }
+}
+
+fn favorite_music_tab(
+    tab: FavoriteMusicTab,
+    active_tab: FavoriteMusicTab,
+    label: &'static str,
+    count: Option<&'static str>,
+    colors: ColorTokens,
+    cx: &mut Context<FavoriteMusicPage>,
+) -> Button {
+    let active = tab == active_tab;
+    let label_color = if active {
+        colors.foreground
+    } else {
+        colors.muted_foreground
+    };
+
+    Button::new(format!("favorite-music-tab-{label}"))
+        .flex_none()
+        .selected(active)
+        .text_color(label_color)
+        // 第一层：整个控件的布局容器
+        .child(
+            div()
+                // div() 默认 display 是 block，横向排布必须显式开 flex
+                .flex()
+                // 顶边对齐：13px 的数字和 16px 的文字顶边对齐后
+                // 视觉上就是右上角的上标
+                .items_start()
+                // 第二层：文字 + 小横条，上下排列
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(
+                            div()
+                                .text_size(px(16.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(label),
+                        )
+                        // 小横条对着文字居中
+                        .child(
+                            div()
+                                .w(px(16.))
+                                .h(px(3.))
+                                .rounded_full()
+                                .bg(colors.primary)
+                                // 未选中时保留占位，切换 tab 时整体高度不跳动
+                                .when(!active, |this| this.opacity(0.)),
+                        ),
+                )
+                .when_some(count, |this, count| {
+                    this.child(
+                        div()
+                            .ml(px(2.))
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(count),
+                    )
+                }),
+        )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.active_tab = tab;
+            cx.notify();
+        }))
 }
 
 /// 「播放全部」：主题红实心按钮，白字白图标，无边框。
@@ -60,6 +147,7 @@ fn play_all_button(colors: ColorTokens) -> Button {
 impl Render for FavoriteMusicPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = Theme::global(cx).tokens.colors;
+        let active_tab = self.active_tab;
         let cover_path = "/Users/amagicpear/Pictures/Perry Origin Character/ChatGPT Image 2026年9月29日 15_39_30.png";
         let user_profile = self.user_profile.read(cx);
 
@@ -198,9 +286,7 @@ impl Render for FavoriteMusicPage {
                                             // 底色本身已有 3%，hover 只抬到 8%（+5 个点），
                                             // 观感与 header 返回键的 0 → accent(6%) 接近；
                                             // 按下不再换更深的颜色，统一降整体透明度
-                                            .hover(|style| {
-                                                style.bg(colors.foreground.alpha(0.08))
-                                            })
+                                            .hover(|style| style.bg(colors.foreground.alpha(0.08)))
                                             .active(|style| style.opacity(PRESSED_OPACITY))
                                             .text_size(px(13.))
                                             .text_color(colors.secondary_foreground)
@@ -225,9 +311,7 @@ impl Render for FavoriteMusicPage {
                                             .border_color(colors.foreground.alpha(0.06))
                                             .rounded_lg()
                                             .bg(colors.foreground.alpha(0.03))
-                                            .hover(|style| {
-                                                style.bg(colors.foreground.alpha(0.08))
-                                            })
+                                            .hover(|style| style.bg(colors.foreground.alpha(0.08)))
                                             .active(|style| style.opacity(PRESSED_OPACITY))
                                             .child(
                                                 svg()
@@ -241,8 +325,43 @@ impl Render for FavoriteMusicPage {
                     ),
             )
             // 控件区域
-            .child(div().flex().justify_between())
-            // 虚拟列表区域
-            .child("")
+            .child(
+                div()
+                    .mt(px(28.))
+                    .flex()
+                    .items_center()
+                    .gap(px(24.))
+                    .child(favorite_music_tab(
+                        FavoriteMusicTab::Songs,
+                        active_tab,
+                        "歌曲",
+                        Some("1193"),
+                        colors,
+                        cx,
+                    ))
+                    .child(favorite_music_tab(
+                        FavoriteMusicTab::Comments,
+                        active_tab,
+                        "评论",
+                        None,
+                        colors,
+                        cx,
+                    ))
+                    .child(favorite_music_tab(
+                        FavoriteMusicTab::Collectors,
+                        active_tab,
+                        "收藏者",
+                        Some("5"),
+                        colors,
+                        cx,
+                    )),
+            )
+            // 具体内容区域
+            .child(
+                div()
+                    .text_size(px(14.))
+                    .text_color(colors.muted_foreground)
+                    .child(active_tab.content_title()),
+            )
     }
 }
