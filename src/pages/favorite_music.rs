@@ -1,5 +1,5 @@
 use gpui::*;
-use gpui_kit::base::Theme;
+use gpui_kit::base::{Avatar, AvatarImage, Theme};
 
 use super::ContentPage;
 use crate::state::user::UserProfile;
@@ -106,10 +106,18 @@ impl Render for FavoriteMusicPage {
                                             .items_center()
                                             .gap_2()
                                             .child(
-                                                img(user_profile.avatar_path.clone())
-                                                    .size(px(28.))
+                                                Avatar::new()
+                                                    .size(px(26.))
+                                                    .flex_none()
+                                                    .overflow_hidden()
                                                     .rounded_full()
-                                                    .flex_none(),
+                                                    .image(
+                                                        AvatarImage::new(
+                                                            user_profile.avatar_path.clone(),
+                                                        )
+                                                        .size_full()
+                                                        .rounded_full(),
+                                                    ),
                                             )
                                             .child(
                                                 div()
@@ -128,7 +136,7 @@ impl Render for FavoriteMusicPage {
                                             ),
                                     ),
                             )
-                            .child("2"),
+                            // .child(div().flex().gap(px(12.)).child(child)),
                     ),
             )
             // 控件区域
