@@ -8,7 +8,7 @@ use super::sidebar_page::{SidebarChanged, SidebarPage};
 use crate::state::user::UserProfile;
 use crate::theme::IconSize;
 use gpui_kit::base::input::{Input, InputState};
-use gpui_kit::base::{Button, ColorTokens, Theme};
+use gpui_kit::base::{Button, ColorTokens, Scrollbar, ScrollbarMode, Theme};
 use gpui_kit::component::avatar::Avatar;
 use gpui_kit::component::{Sizable, TitleBar};
 
@@ -26,6 +26,7 @@ pub struct MainContent {
     user_profile: Entity<UserProfile>,
     /// 每个导航项对应一个页面 View，一次创建后长期持有。
     pages: HashMap<ContentPage, AnyView>,
+    page_scroll: ScrollHandle,
     _sidebar_subscription: Subscription,
     _user_profile_subscription: Subscription,
 }
@@ -61,6 +62,7 @@ impl MainContent {
             search_input,
             user_profile,
             pages,
+            page_scroll: ScrollHandle::default(),
             _sidebar_subscription: sidebar_subscription,
             _user_profile_subscription: user_profile_subscription,
         }
@@ -230,12 +232,27 @@ impl Render for MainContent {
                     // 右侧具体页面
                     .child(
                         div()
-                            .id("right-page-content")
+                            .relative()
                             .flex_1()
-                            .px(px(40.))
-                            .py(px(18.))
-                            .overflow_y_scroll()
-                            .children(self.pages.get(&active_page).cloned()),
+                            .min_h(px(0.))
+                            .flex()
+                            .flex_col()
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .id("right-page-content")
+                                    .flex_1()
+                                    .min_h(px(0.))
+                                    .px(px(40.))
+                                    .py(px(18.))
+                                    .overflow_y_scroll()
+                                    .track_scroll(&self.page_scroll)
+                                    .children(self.pages.get(&active_page).cloned()),
+                            )
+                            // 滚动条放在外层，避免它的边界被计入滚动内容高度。
+                            .child(
+                                Scrollbar::vertical(&self.page_scroll).mode(ScrollbarMode::Always),
+                            ),
                     ),
             )
             .child(

@@ -3,6 +3,7 @@ use gpui_kit::base::{Button, ColorTokens, Theme};
 use gpui_kit::component::Sizable;
 use gpui_kit::component::avatar::Avatar;
 use gpui_kit::component::native_menu::NativeMenu;
+use std::rc::Rc;
 
 /// 操作按钮的统一高度
 const ACTION_BUTTON_HEIGHT: Pixels = px(36.);
@@ -10,7 +11,7 @@ const ACTION_BUTTON_HEIGHT: Pixels = px(36.);
 const ACTION_BUTTON_PADDING: Pixels = px(12.);
 
 use super::ContentPage;
-use crate::components::{TabBar, TabChanged, TabItem};
+use crate::components::{TabBar, TabChanged, TabItem, TableColumn, virtual_table};
 use crate::state::user::UserProfile;
 use crate::theme::{DOLPHIN_FAMILY, PRESSED_OPACITY};
 
@@ -45,6 +46,42 @@ pub struct FavoriteMusicPage {
     _user_profile_subscription: Subscription,
     tabs: Entity<TabBar>,
     _tabs_subscription: Subscription,
+    songs: Vec<DemoSong>,
+    columns: Rc<Vec<TableColumn>>,
+}
+
+/// 临时示例数据，用于验证长表滚动；接入远程歌单后替换。
+struct DemoSong {
+    title: SharedString,
+    artist: SharedString,
+    album: SharedString,
+    duration: SharedString,
+    liked: bool,
+    cover: SharedString,
+}
+
+fn demo_songs() -> Vec<DemoSong> {
+    let examples = [
+        ("Run Away With Me", "Carly Rae Jepsen", "E·MO·TION", "04:11"),
+        ("晴天", "周杰伦", "叶惠美", "04:29"),
+        ("到此为止", "陈奕迅", "准备中", "04:37"),
+        ("Style", "Taylor Swift", "1989", "03:51"),
+        ("平凡之路", "朴树", "猎户星座", "05:02"),
+        ("海阔天空", "Beyond", "乐与怒", "05:24"),
+    ];
+    (0..1193)
+        .map(|index| {
+            let (title, artist, album, duration) = examples[index % examples.len()];
+            DemoSong {
+                title: title.into(),
+                artist: artist.into(),
+                album: album.into(),
+                duration: duration.into(),
+                liked: true,
+                cover: "images/demo-album.svg".into(),
+            }
+        })
+        .collect()
 }
 
 impl FavoriteMusicPage {
@@ -63,7 +100,95 @@ impl FavoriteMusicPage {
             _user_profile_subscription: user_profile_subscription,
             tabs,
             _tabs_subscription: tabs_subscription,
+            songs: demo_songs(),
+            columns: Rc::new(vec![
+                TableColumn::new("序号", Some(px(56.))),
+                TableColumn::new("标题", None),
+                TableColumn::new("专辑", None),
+                TableColumn::new("喜欢", Some(px(64.))),
+                TableColumn::new("时长", Some(px(72.))),
+            ]),
         }
+    }
+
+    fn song_cells(&mut self, index: usize, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let colors = Theme::global(cx).tokens.colors;
+        let song = &self.songs[index];
+        vec![
+            div()
+                .text_color(colors.muted_foreground)
+                .child(format!("{:02}", index + 1))
+                .into_any_element(),
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .min_w(px(0.))
+                .child(
+                    div()
+                        .size(px(36.))
+                        .flex_none()
+                        .rounded(px(4.))
+                        .overflow_hidden()
+                        .bg([
+                            rgb(0x537b83),
+                            rgb(0x94705b),
+                            rgb(0x60658b),
+                            rgb(0x8b687e),
+                            rgb(0x657853),
+                            rgb(0x566678),
+                        ][index % 6])
+                        // 只在可见行中创建 img；以后 cover 可直接换成远程 URL。
+                        .child(
+                            img(song.cover.clone())
+                                .size_full()
+                                .object_fit(ObjectFit::Cover),
+                        ),
+                )
+                .child(
+                    div()
+                        .min_w(px(0.))
+                        .flex_1()
+                        .child(div().truncate().child(song.title.clone()))
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(11.))
+                                .text_color(colors.muted_foreground)
+                                .child(song.artist.clone()),
+                        ),
+                )
+                .into_any_element(),
+            div()
+                .truncate()
+                .text_color(colors.secondary_foreground)
+                .child(song.album.clone())
+                .into_any_element(),
+            Button::new(("favorite-song-like", index))
+                .size(px(28.))
+                .rounded_full()
+                .accessibility_label(if song.liked { "取消喜欢" } else { "喜欢" })
+                .hover(|style| style.bg(colors.foreground.alpha(0.08)))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.songs[index].liked = !this.songs[index].liked;
+                    cx.notify();
+                }))
+                .child(
+                    svg()
+                        .path("icons/like.svg")
+                        .size(px(16.))
+                        .text_color(if song.liked {
+                            colors.primary
+                        } else {
+                            colors.muted_foreground
+                        }),
+                )
+                .into_any_element(),
+            div()
+                .text_color(colors.muted_foreground)
+                .child(song.duration.clone())
+                .into_any_element(),
+        ]
     }
 }
 
@@ -108,6 +233,22 @@ impl Render for FavoriteMusicPage {
         ][self.tabs.read(cx).selected_index()];
         let cover_path = "/Users/amagicpear/Pictures/Perry Origin Character/ChatGPT Image 2026年9月29日 15_39_30.png";
         let user_profile = self.user_profile.read(cx);
+        let content = match active_tab {
+            FavoriteMusicTab::Songs => virtual_table(
+                cx.entity(),
+                "favorite-songs",
+                self.columns.clone(),
+                self.songs.len(),
+                |this, index, _, cx| this.song_cells(index, cx),
+                cx,
+            )
+            .into_any_element(),
+            _ => div()
+                .text_size(px(14.))
+                .text_color(colors.muted_foreground)
+                .child(active_tab.content_title())
+                .into_any_element(),
+        };
 
         div()
             // 封面标题区域
@@ -287,11 +428,6 @@ impl Render for FavoriteMusicPage {
             // 控件区域
             .child(div().mt(px(28.)).child(self.tabs.clone()))
             // 具体内容区域
-            .child(
-                div()
-                    .text_size(px(14.))
-                    .text_color(colors.muted_foreground)
-                    .child(active_tab.content_title()),
-            )
+            .child(div().mt(px(16.)).child(content))
     }
 }
