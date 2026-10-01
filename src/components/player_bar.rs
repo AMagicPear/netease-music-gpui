@@ -64,6 +64,22 @@ fn interaction_count(
         )
 }
 
+fn hover_icon(
+    id: &'static str,
+    icon_path: &'static str,
+    size: Pixels,
+    color: Hsla,
+    colors: ColorTokens,
+) -> impl IntoElement {
+    svg()
+        .path(icon_path)
+        .size(size)
+        .flex_none()
+        .text_color(color)
+        .hover(|style| style.text_color(colors.foreground))
+        .id(id)
+}
+
 impl Render for PlayerBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = Theme::global(cx).tokens.colors;
@@ -172,18 +188,20 @@ impl Render for PlayerBar {
                             .items_center()
                             .gap(px(20.))
                             .text_color(colors.foreground)
-                            .child(
-                                svg()
-                                    .path("icons/播放顺序/顺序.svg")
-                                    .size(IconSize::Large.pixels())
-                                    .text_color(colors.muted_foreground),
-                            )
-                            .child(
-                                svg()
-                                    .path("icons/pre.svg")
-                                    .size(IconSize::Large.pixels())
-                                    .text_color(colors.secondary_foreground),
-                            )
+                            .child(hover_icon(
+                                "player-order-button",
+                                "icons/播放顺序/顺序.svg",
+                                IconSize::Large.pixels(),
+                                colors.muted_foreground,
+                                colors,
+                            ))
+                            .child(hover_icon(
+                                "player-previous-button",
+                                "icons/pre.svg",
+                                IconSize::Large.pixels(),
+                                colors.secondary_foreground,
+                                colors,
+                            ))
                             .child(
                                 div()
                                     .id("play-pause-hover-region")
@@ -231,18 +249,20 @@ impl Render for PlayerBar {
                                             .child(play_pause_icon),
                                     ),
                             )
-                            .child(
-                                svg()
-                                    .path("icons/next.svg")
-                                    .size(IconSize::Large.pixels())
-                                    .text_color(colors.secondary_foreground),
-                            )
-                            .child(
-                                svg()
-                                    .path("icons/playlist.svg")
-                                    .size(IconSize::Large.pixels())
-                                    .text_color(colors.muted_foreground),
-                            ),
+                            .child(hover_icon(
+                                "player-next-button",
+                                "icons/next.svg",
+                                IconSize::Large.pixels(),
+                                colors.secondary_foreground,
+                                colors,
+                            ))
+                            .child(hover_icon(
+                                "player-playlist-button",
+                                "icons/playlist.svg",
+                                IconSize::Large.pixels(),
+                                colors.muted_foreground,
+                                colors,
+                            )),
                     )
                     // 右侧：收藏、音量等工具
                     .child(
@@ -253,30 +273,34 @@ impl Render for PlayerBar {
                             .justify_end()
                             .gap(px(18.))
                             .text_color(colors.muted_foreground)
-                            .child(
-                                svg()
-                                    .path("icons/sq.svg")
-                                    .size(IconSize::Middle.pixels())
-                                    .text_color(colors.muted_foreground),
-                            )
-                            .child(
-                                svg()
-                                    .path("icons/collect.svg")
-                                    .size(IconSize::Middle.pixels())
-                                    .text_color(colors.muted_foreground),
-                            )
-                            .child(
-                                svg()
-                                    .path("icons/volume.svg")
-                                    .size(IconSize::Middle.pixels())
-                                    .text_color(colors.muted_foreground),
-                            )
-                            .child(
-                                svg()
-                                    .path("icons/xpoint.svg")
-                                    .size(IconSize::Middle.pixels())
-                                    .text_color(colors.muted_foreground),
-                            ),
+                            .child(hover_icon(
+                                "player-sq-button",
+                                "icons/sq.svg",
+                                IconSize::Middle.pixels(),
+                                colors.muted_foreground,
+                                colors,
+                            ))
+                            .child(hover_icon(
+                                "player-collect-button",
+                                "icons/collect.svg",
+                                IconSize::Middle.pixels(),
+                                colors.muted_foreground,
+                                colors,
+                            ))
+                            .child(hover_icon(
+                                "player-volume-button",
+                                "icons/volume.svg",
+                                IconSize::Middle.pixels(),
+                                colors.muted_foreground,
+                                colors,
+                            ))
+                            .child(hover_icon(
+                                "player-more-button",
+                                "icons/xpoint.svg",
+                                IconSize::Middle.pixels(),
+                                colors.muted_foreground,
+                                colors,
+                            )),
                     ),
             )
     }

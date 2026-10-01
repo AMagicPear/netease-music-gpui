@@ -14,8 +14,12 @@ use gpui_kit::base::{Button, ColorTokens, Theme};
 const MIN_SIDEBAR_WIDTH: Pixels = px(204.);
 const MAX_SIDEBAR_WIDTH: Pixels = px(627.);
 const HEADER_HEIGHT: Pixels = px(72.);
-const HEADER_TOP_PADDING: Pixels = px(34.);
+const HEADER_TOP_PADDING: Pixels = px(30.);
 const HEADER_SIDE_GUTTER: Pixels = px(40.);
+/// 搜索框的理想宽度
+const SEARCH_BOX_WIDTH: Pixels = px(258.);
+/// 搜索框的压缩下限
+const SEARCH_BOX_MIN_WIDTH: Pixels = px(40.);
 
 pub struct MainContent {
     sidebar_width: Pixels,
@@ -73,10 +77,13 @@ impl WindowDragState for MainContent {
     }
 }
 
-/// 搜索框：左边放大镜图标，右边文本输入框。
+/// 搜索框：左边放大镜图标，右边文本输入框，宽度可被压缩
 fn search_box(input: Entity<InputState>, colors: ColorTokens) -> impl IntoElement {
     div()
-        .w(px(258.))
+        .w(SEARCH_BOX_WIDTH)
+        .min_w(SEARCH_BOX_MIN_WIDTH)
+        .mr_2()
+        .flex_shrink(1.)
         .flex()
         .items_center()
         .gap_1()
@@ -94,6 +101,16 @@ fn search_box(input: Entity<InputState>, colors: ColorTokens) -> impl IntoElemen
                 .text_color(colors.muted_foreground),
         )
         .child(Input::new(&input))
+}
+
+fn hover_icon(id: &'static str, path: &'static str, colors: ColorTokens) -> impl IntoElement {
+    svg()
+        .path(path)
+        .size(IconSize::Small.pixels())
+        .flex_none()
+        .text_color(colors.foreground.alpha(0.6))
+        .hover(|style| style.text_color(colors.foreground))
+        .id(id)
 }
 
 fn page_header(
@@ -132,15 +149,18 @@ fn page_header(
                         .h_full()
                         .flex_none(),
                 )
+                // 左侧组
                 .child(
                     div()
                         .h_9()
                         .flex()
                         .gap_2()
+                        .min_w(px(0.))
                         // 返回按钮
                         .child(
                             Button::new("back-button")
                                 .w_7()
+                                .flex_none()
                                 .border_1()
                                 .border_color(colors.border)
                                 .rounded_lg()
@@ -166,6 +186,7 @@ fn page_header(
                         .flex()
                         .items_center()
                         .gap(px(10.))
+                        .flex_shrink(0.2)
                         .child(
                             div()
                                 .flex()
@@ -184,27 +205,17 @@ fn page_header(
                                         .text_color(colors.foreground.alpha(0.6)),
                                 ),
                         )
-                        .child(
-                            svg()
-                                .path("icons/message.svg")
-                                .size(IconSize::Small.pixels())
-                                .flex_none()
-                                .text_color(colors.foreground.alpha(0.6)),
-                        )
-                        .child(
-                            svg()
-                                .path("icons/setting.svg")
-                                .size(IconSize::Small.pixels())
-                                .flex_none()
-                                .text_color(colors.foreground.alpha(0.6)),
-                        )
-                        .child(
-                            svg()
-                                .path("icons/skin.svg")
-                                .size(IconSize::Small.pixels())
-                                .flex_none()
-                                .text_color(colors.foreground.alpha(0.6)),
-                        ),
+                        .child(hover_icon(
+                            "header-message-button",
+                            "icons/message.svg",
+                            colors,
+                        ))
+                        .child(hover_icon(
+                            "header-setting-button",
+                            "icons/setting.svg",
+                            colors,
+                        ))
+                        .child(hover_icon("header-skin-button", "icons/skin.svg", colors)),
                 )
                 .child(
                     window_drag_region("right-header-right-drag-region", cx)
