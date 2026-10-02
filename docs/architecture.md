@@ -1,66 +1,96 @@
-# 项目结构与歌单链路
+# 项目结构与播放链路
 
 ## 运行和验证
 
-应用通过 `std::env::var("COOKIE")` 读取登录凭据，不自行读取 `.env`。
-开发时可使用 `dotenv run cargo run`；普通检查使用 `cargo check`、`cargo test`，真实接口验证使用 `dotenv run cargo test -- --include-ignored`。
+应用通过 `COOKIE` 环境变量读取登录凭据，不自行读取 `.env`。
+开发时可使用 `dotenv run cargo run`。`cargo check`、`cargo test` 不启动界面；真实接口验证使用 `dotenv run cargo test -- --include-ignored`。
 
-## 状态、页面和元素的职责
+## 模块职责
 
-按 `AGENTS.md` 的 GPUI 分层方式组织：共享数据放在 Entity，页面实现 Render，布局和绘制使用 Element。
+```text
+src/
+├── main.rs                  初始化服务、创建 Entity、打开窗口
+├── api.rs                   网易云接口及共享网络客户端、Tokio 运行时
+├── models/                  歌曲、歌单、用户资料、播放资源信息
+├── state/                   账号、音乐库索引、当前浏览的歌单详情
+├── playback/
+│   ├── mod.rs               对外类型与只读 PlaybackSnapshot
+│   ├── controller.rs        GPUI Entity：控制入口、队列、请求、通知
+│   ├── engine.rs            rodio 设备、当前播放源、暂停、音量
+│   └── stream.rs            HTTP 下载、渐进缓存、后台解码、PCM 队列
+└── ui/
+    ├── shell.rs             主窗口布局、导航协调、页面生命周期
+    ├── sidebar.rs           侧栏 View 与导航事件
+    ├── pages/               页面 View
+    ├── components/          播放栏、进度条、标签栏、虚拟表格
+    ├── assets.rs            静态资源及远程缩略图 URL
+    └── theme.rs             字体、主题与 UI 样式常量
+```
 
-| 位置 | 职责 |
+`models` 是数据类型，不依赖 GPUI。登录资料与歌单创建者都使用 `UserProfile`，但只有 `AccountState` 负责加载登录账号与会员资料，歌单创建者不会携带账号加载逻辑。
+
+GPUI 的共享业务对象放在 Entity 中：`AccountState`、`MusicLibrary`、`PlaylistDetail`、`PlaybackController`。View 观察 Entity 的通知并渲染；底层 `PlayerEngine` 和流式解码实现不依赖 GPUI 或网易云 SDK。
+
+## 统一播放入口
+
+界面只持有 `Entity<PlaybackController>`，用 `snapshot()` 读取状态，所有修改通过控制器方法提交。
+
+| 接口 | 用途 |
 | --- | --- |
-| `src/api.rs` | 共享 SDK 客户端、图片/音频 HTTP 客户端和 Tokio 运行时；超时、响应检查、账号/歌单/歌曲接口。 |
-| `src/state/user.rs` | 登录账号资料；只供账号相关界面使用，不能代替歌单创建者。 |
-| `src/state/library.rs` | 账号的歌单索引和喜欢的歌曲 ID；不持有某个歌单的歌曲。 |
-| `src/state/playlist.rs`、`song.rs` | 与 API 字段对应的业务数据模型。 |
-| `src/state/playlist_detail.rs` | 当前歌单详情、歌曲、加载与错误状态，以及请求取消和过期结果校验。 |
-| `src/state/playback.rs` | 当前歌曲、播放队列、音频输出和进度；统一管理加载、切歌、暂停、seek 和顺序播放。 |
-| `src/state/audio.rs` | 渐进下载缓存、后台解码和有界 PCM 队列；输出线程不等待网络。 |
-| `src/pages.rs` | 页面目标；普通歌单用 `ContentPage::Playlist(id)` 标识。 |
-| `src/pages/main_content.rs` | 导航协调、静态页面生命周期、一个共享歌单页面及每个目标的滚动位置。 |
-| `src/pages/playlist.rs` | 通用歌单 View；只保存标签、排序、列宽比例和 hover 等显示状态。 |
-| `src/components/` | 播放栏、标签栏、虚拟表格等可复用 UI 元素和 View。 |
+| `play_from_queue(songs, song_id, cx)` | 按给定队列选歌；继续当前未播完的歌曲时保留进度。 |
+| `pause(cx)` / `resume(cx)` / `toggle(cx)` | 控制当前播放；加载期间保留用户的播放意图。 |
+| `previous(cx)` / `next(cx)` | 按队列顺序切歌，队列边界不循环。 |
+| `seek_to(Duration, cx)` | 提交时间位置，由后台解码线程完成跳转。 |
+| `set_volume(f32, cx)` | 0..=1，超出范围钳制，忽略非有限值；切歌与重试保留音量。 |
+| `snapshot()` | 只读当前歌曲、位置、时长、播放/加载状态、错误和音量。 |
+| `progress()` / `can_seek()` / `is_play_requested()` | 给现有播放控件提供显示与交互依据。 |
 
-## 打开歌单
+使用示例：
+
+```rust,ignore
+playback.update(cx, |controller, cx| {
+    controller.pause(cx);
+    controller.seek_to(std::time::Duration::from_secs(125), cx);
+    controller.set_volume(0.5, cx);
+});
+```
+
+歌曲 ID 使用 `u64`，时间使用 `Duration`。进度条在释放时将百分比换算为时间，控制器不依赖 Slider 类型。控制器保存私有快照，不提供可变借用，避免 UI 修改状态但未同步到音频引擎。
+
+## 播放地址与流式音频
 
 ```mermaid
 flowchart LR
-    A[侧栏点击歌单] --> B[ContentPage::Playlist ID]
-    B --> C[MainContent 协调导航]
-    C --> D[同一个 PlaylistPage]
-    D --> E[PlaylistDetail Entity]
-    E --> F[MusicApi playlist_detail + 分批 song_detail]
-    F --> E
-    E -->|notify / observe| D
-    D -->|选择 Song| G[共享 PlaybackState]
-    G --> H[播放栏与进度条]
+    UI[歌单 / 播放栏 / 进度条] --> C[PlaybackController]
+    C --> API[MusicApi song_source]
+    API --> I[AudioSourceInfo: URL / 文件长度 / 时长]
+    I --> S[StreamingAudio: HTTP 渐进下载与后台解码]
+    S --> P[有界 PCM 队列]
+    P --> E[PlayerEngine: rodio Player / MixerDeviceSink]
+    E --> C
+    C -->|snapshot + notify| UI
 ```
 
-“我喜欢的音乐”保留为快捷入口：MainContent 从音乐库索引解析 `specialType == 5` 的歌单 ID，再进入相同链路。即使先点击入口、后收到账号歌单列表，也会在索引更新时打开收藏歌单。
+`MusicApi::song_source` 使用现有 COOKIE 调用 `song_url_v1`，返回 standard 音质的 `AudioSourceInfo`。音频服务器连接、状态检查、下载超时和读取放在播放模块。音频直接使用 reqwest，GPUI 图片使用 reqwest-client；后者内部依赖 gpui-pre-reqwest 分支，两种客户端各自复用连接池，共用 Tokio 运行时，不向资源服务器发送账号 COOKIE。
 
-账号资料就绪后立即通知观察者；会员资料独立补充，不阻塞歌单索引。音乐库并行获取歌单索引和喜欢状态。实际打开歌单后才取详情和歌曲，所有 `trackIds` 每 200 首请求一次，按歌单原顺序整理返回的歌曲。接口没有返回的歌曲不会伪造为可播放数据。
+HTTP 响应边下载边写入内存缓存。后台解码线程通过 `Read + Seek` 读取缓存，缺数据时在该线程等待。解码结果进入约 400 ms 的有界 PCM 队列；输出线程只取已准备好的样本，缺数据时输出完整声道帧的静音，不等待网络。
 
-页头标题、封面、创建时间、播放量、标签计数和创建者都来自当前歌单；创建者头像和昵称取 `playlist.creator`。账号页头仍取登录账号资料，两者职责独立。
+引擎长期保留 MixerDeviceSink，换歌时创建新的 Player，释放旧播放源并取消旧下载。控制器每 250 ms 读取已交给输出链路的歌曲样本位置，缓冲静音不计入进度；这不是声卡实际输出时间的精确测量。正常 EOF 后自动播放下一首，队列末尾停止；下载或解码失败则停止并记录错误，点击播放可重试。请求代次防止过期加载结果覆盖新歌曲。
 
-切换歌单会取消前一个网络任务并清空旧歌曲；每次请求还有代次校验，防止 A → B → A 后旧 A 请求覆盖新 A。切歌单重置排序、标签和 hover，列宽偏好保留。离开歌单去静态页面再返回，同一歌单 View 的状态仍保留；只有当前一份歌单数据，切回其他歌单会重新获取。
+Seek 清空旧 PCM 并立即提交目标。已缓存部分可回退，尚未下载的位置等待顺序下载；UI 线程不等待。时长优先取解码器，其次取播放地址接口（包含试听片段），最后取歌曲详情。歌手文字始终保留，不显示加载或缓冲文字。
 
-## 后续扩展入口
+单首内存缓存上限 100 MiB，暂不持久化，不发起 HTTP Range 请求。部分索引在尾部的格式仍可能等待尾部数据；即时远端 Seek 和重复播放缓存应在 `stream` 模块扩展。当前没有音量调整 UI，但接口已经作用于引擎并保留设置。
 
-- 新增歌单入口：向 MainContent 提交 `ContentPage::Playlist(id)`，调用统一的 `navigate`；侧栏也是通过导航事件进入这个入口。搜索或推荐页可用 GPUI 事件把目标交给主内容区，不再复制歌单页面。
-- 新增静态页面：增加页面模块及 ContentPage 分支，通过 `build` 创建并长期持有；需要侧栏入口时添加到对应导航分组。
-- 新增接口：在 MusicApi 中处理请求，在负责该数据的 Entity 中更新状态并 `notify`；View 用 `observe` 响应更新，不在 `render` 中发起网络请求。
-- 新增播放来源：通过 `play_from_queue` 向共享 PlaybackState 提交歌曲列表和目标歌曲 ID；播放队列独立于正在浏览的歌单页面。
+## 歌单与账号状态
 
-## 音频播放
+账号资料返回后立即通知音乐库，会员资料独立补充。音乐库并行加载歌单索引和喜欢状态；打开歌单才加载详情与歌曲。所有 trackIds 每 200 首请求一次，按原始顺序整理歌曲，缺失的歌曲不伪造。
 
-点击歌曲或“播放全部”时，将当前显示顺序复制为播放队列。`MusicApi` 使用现有 COOKIE 调用 `song_url_v1`（standard 音质）。音频直接使用 `reqwest` 分块下载，GPUI 图片使用 `reqwest-client` 适配器。适配器内部使用 `gpui-pre-reqwest` 分支，与标准 reqwest Client 类型不同，因此图片和音频各自复用客户端与连接池，使用同一个 Tokio 运行时。HTTP 响应体边下载边写入内存缓存，后台解码线程通过 `Read + Seek` 读取缓存，缺数据时在该线程等待。解码结果放入有界 PCM 队列（约 400 ms）；`rodio` 的输出线程只取队列中的样本，缺数据时输出整帧静音，不等待网络。
+“我喜欢的音乐”从音乐库中解析 specialType == 5 的歌单 ID，普通歌单使用 ContentPage::Playlist(id)，都进入同一个 PlaylistPage 和 PlaylistDetail。导航只由 shell 协调，页面的显示顺序、标签、列宽和 hover 留在 View。切换歌单取消旧请求并清空旧歌曲，请求代次阻止 A → B → A 的过期结果生效。
 
-OutputStream 在播放状态中长期持有，Sink 控制播放与暂停。播放状态每 250 ms 读取已输出歌曲样本的位置，等待数据期间的静音不计入进度。音频正常结束后按队列顺序播放下一首，队列末尾停止。切歌取消旧下载、唤醒等待中的解码线程，并用请求代次阻止过期结果生效。
+选歌时将当前显示顺序复制为播放队列，因此播放与当前浏览的歌单相互独立。离开页面不会停止音乐。歌单标题、封面、创建者和计数取当前歌单；账号头像和会员标识取 AccountState。
 
-拖动进度条只在释放时提交 seek，立即清除旧 PCM 数据，由后台解码线程完成跳转。已缓存部分可直接回退；尚未下载的部分等待顺序下载到目标位置，界面线程不等待。时长优先使用解码器返回的音频时长，其次使用播放地址接口的时长（包含试听片段），最后使用歌曲详情时长。歌手文字始终保留，不显示加载或缓冲文字；错误记录到终端并停止播放，点击播放可重试。
+## 依赖版本
 
-当前单首下载缓存上限 100 MiB，不持久化缓存，不发起 HTTP Range 请求。部分索引在尾部的格式可能需要等待尾部数据；需要即时跳转到远端位置时，再接入 Range 区间缓存。
+本轮使用 rodio 0.22.2、reqwest 0.13.5，并更新 Cargo.lock 中兼容的依赖和 gpui-kit Git 版本。rodio 只开启播放和常用格式解码，不开启录音功能。GPUI 与其 reqwest 适配器保持一致的 0.3.7，这是当前发布的 gpui-pre 最新版本。
 
-目前评论和收藏者标签仅展示真实计数及占位内容，下载、分享、音量调节和播放模式切换尚未实现。歌单索引和详情的失败分别处理，详情页提供重试；喜欢状态失败不阻止展示歌单。
+SDK 内部依赖的 reqwest 0.12、GPUI 分支依赖等由各自上游决定，本项目的音频下载使用 0.13；不能只修改锁文件就把这些类型替换成同一个版本。

@@ -2,8 +2,9 @@ use std::collections::HashSet;
 
 use gpui::{Context, Entity, ReadGlobal, Subscription};
 
-use super::{playlist::Playlist, user::UserProfile};
+use super::account::AccountState;
 use crate::api::MusicApi;
+use crate::models::Playlist;
 
 #[derive(Default)]
 pub struct MusicLibrary {
@@ -18,16 +19,16 @@ pub struct MusicLibrary {
 }
 
 impl MusicLibrary {
-    pub fn new(user: Entity<UserProfile>, cx: &mut Context<Self>) -> Self {
+    pub fn new(user: Entity<AccountState>, cx: &mut Context<Self>) -> Self {
         let subscription = cx.observe(&user, |this, user, cx| {
-            this.load(user.read(cx).user_id, cx);
+            this.load(user.read(cx).profile.user_id, cx);
         });
         let mut this = Self {
             loading: true,
             _user_subscription: Some(subscription),
             ..Default::default()
         };
-        let user_id = user.read(cx).user_id;
+        let user_id = user.read(cx).profile.user_id;
         if user_id != 0 {
             this.load(user_id, cx);
         }

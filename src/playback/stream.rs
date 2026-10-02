@@ -1,5 +1,5 @@
-use crate::api::AudioResponse;
-use rodio::{Decoder, Source};
+use crate::models::AudioSourceInfo;
+use rodio::{ChannelCount, Decoder, SampleRate, Source};
 use std::{
     collections::VecDeque,
     io::{self, Read, Seek, SeekFrom},
@@ -12,6 +12,12 @@ use std::{
 
 const MAX_AUDIO_BYTES: usize = 100 * 1024 * 1024;
 const PCM_CHUNKS: usize = 8;
+
+struct AudioResponse {
+    body: reqwest::Response,
+    byte_len: Option<u64>,
+    duration: Option<Duration>,
+}
 
 #[derive(Default)]
 struct Download {
@@ -157,7 +163,27 @@ pub struct StreamingAudio {
 }
 
 impl StreamingAudio {
-    pub async fn start(response: AudioResponse) -> Result<(Self, BufferedSource), String> {
+    pub async fn open(
+        http: reqwest::Client,
+        source: AudioSourceInfo,
+    ) -> Result<(Self, BufferedSource), String> {
+        let response = tokio::time::timeout(Duration::from_secs(20), http.get(source.url).send())
+            .await
+            .map_err(|_| "音频连接超时".to_string())?
+            .map_err(|_| "音频下载失败，请检查网络后重试".to_string())?;
+        if !response.status().is_success() {
+            return Err(format!("音频服务器返回错误：{}", response.status()));
+        }
+        let byte_len = response.content_length().or(source.byte_len);
+        Self::start(AudioResponse {
+            body: response,
+            byte_len,
+            duration: source.duration,
+        })
+        .await
+    }
+
+    async fn start(response: AudioResponse) -> Result<(Self, BufferedSource), String> {
         if response
             .byte_len
             .is_some_and(|length| length > MAX_AUDIO_BYTES as u64)
@@ -264,11 +290,8 @@ fn decode(
     let mut decoder = builder
         .build()
         .map_err(|error| format!("音频解码失败：{error}"))?;
-    let channels = decoder.channels();
-    let sample_rate = decoder.sample_rate();
-    if channels == 0 || sample_rate == 0 {
-        return Err("无效音频格式".into());
-    }
+    let channels = decoder.channels().get();
+    let sample_rate = decoder.sample_rate().get();
     let duration = decoder.total_duration();
     let source = BufferedSource {
         pcm: pcm.clone(),
@@ -404,11 +427,11 @@ impl Source for BufferedSource {
     fn current_span_len(&self) -> Option<usize> {
         None
     }
-    fn channels(&self) -> u16 {
-        self.channels
+    fn channels(&self) -> ChannelCount {
+        ChannelCount::new(self.channels).unwrap()
     }
-    fn sample_rate(&self) -> u32 {
-        self.sample_rate
+    fn sample_rate(&self) -> SampleRate {
+        SampleRate::new(self.sample_rate).unwrap()
     }
     // 包含静音等待的输出时长不等于歌曲时长，避免 rodio 在缓冲时提前裁掉结尾。
     fn total_duration(&self) -> Option<Duration> {

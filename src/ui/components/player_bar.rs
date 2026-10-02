@@ -7,12 +7,12 @@ use gpui_kit::base::{Button, ColorTokens, Theme, Transition, transition};
 use super::artist_label;
 use super::progress_bar::ProgressBar;
 use crate::api::MusicApi;
-use crate::assets::thumbnail_url;
-use crate::state::playback::PlaybackState;
-use crate::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
+use crate::playback::PlaybackController;
+use crate::ui::assets::thumbnail_url;
+use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
 
 pub struct PlayerBar {
-    playback: Entity<PlaybackState>,
+    playback: Entity<PlaybackController>,
     progress_bar: Entity<ProgressBar>,
     play_button_hovered: bool,
     play_button_pressed: bool,
@@ -24,7 +24,7 @@ pub struct PlayerBar {
 
 impl PlayerBar {
     pub fn new(
-        playback: Entity<PlaybackState>,
+        playback: Entity<PlaybackController>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -52,6 +52,7 @@ impl PlayerBar {
         let song_id = self
             .playback
             .read(cx)
+            .snapshot()
             .current_song
             .as_ref()
             .map(|song| song.id);
@@ -184,6 +185,7 @@ impl Render for PlayerBar {
         let (title, artist, cover_url, is_playing) = {
             let playback = self.playback.read(cx);
             playback
+                .snapshot()
                 .current_song
                 .as_ref()
                 .map(|song| {
@@ -330,9 +332,8 @@ impl Render for PlayerBar {
                                     .role(Role::Button)
                                     .aria_label("上一首")
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.playback.update(cx, |playback, cx| {
-                                            playback.change_song(-1, cx)
-                                        });
+                                        this.playback
+                                            .update(cx, |playback, cx| playback.previous(cx));
                                     }))
                                     .child(hover_icon(
                                         "player-previous-button",
@@ -398,7 +399,7 @@ impl Render for PlayerBar {
                                             .active(|style| style.opacity(PRESSED_OPACITY))
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 this.playback.update(cx, |playback, cx| {
-                                                    playback.toggle_playing(cx);
+                                                    playback.toggle(cx);
                                                 });
                                             }))
                                             .child(play_pause_icon),
@@ -410,8 +411,7 @@ impl Render for PlayerBar {
                                     .role(Role::Button)
                                     .aria_label("下一首")
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.playback
-                                            .update(cx, |playback, cx| playback.change_song(1, cx));
+                                        this.playback.update(cx, |playback, cx| playback.next(cx));
                                     }))
                                     .child(hover_icon(
                                         "player-next-button",

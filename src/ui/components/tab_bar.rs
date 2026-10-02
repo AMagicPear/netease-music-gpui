@@ -7,7 +7,7 @@ use gpui::{
 };
 use gpui_kit::base::{Button, Theme};
 
-use crate::theme::DOLPHIN_FAMILY;
+use crate::ui::theme::DOLPHIN_FAMILY;
 
 const INDICATOR_DURATION: Duration = Duration::from_millis(200);
 const INDICATOR_WIDTH: Pixels = px(16.);

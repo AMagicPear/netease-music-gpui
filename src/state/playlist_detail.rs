@@ -1,7 +1,7 @@
 use gpui::{Context, ReadGlobal};
 
-use super::{playlist::Playlist, song::Song};
 use crate::api::MusicApi;
+use crate::models::{Playlist, Song};
 
 /// 当前打开的歌单数据；排序、标签和 hover 留在页面 View 中。
 #[derive(Default)]

@@ -12,8 +12,8 @@ pub use virtual_table::{
 };
 
 /// 未知歌手单独变灰，多歌手中已有的名字保持原色。
-pub(crate) fn artist_label(
-    song: &crate::state::song::Song,
+pub(super) fn artist_label(
+    song: &crate::models::Song,
     colors: gpui_kit::base::ColorTokens,
 ) -> gpui::StyledText {
     let mut text = String::new();

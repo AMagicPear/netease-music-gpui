@@ -1,18 +1,14 @@
 mod featured;
 mod following;
-mod main_content;
 mod my_collection;
 mod my_podcast;
-mod playlist;
+pub(super) mod playlist;
 mod podcast;
 mod recent;
 mod recommend;
 mod roaming;
-mod sidebar_page;
 
 use gpui::*;
-
-pub use main_content::MainContent;
 
 /// 主内容区可切换的页面，侧边栏里的每一个导航项都对应其中一个。
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -32,7 +28,7 @@ pub(super) enum ContentPage {
 }
 
 /// 顶部导航分组：推荐、精选、播客、漫游、关注。
-const MAIN_PAGES: [ContentPage; 5] = [
+pub(super) const MAIN_PAGES: [ContentPage; 5] = [
     ContentPage::Recommend,
     ContentPage::Featured,
     ContentPage::Podcast,
@@ -41,7 +37,7 @@ const MAIN_PAGES: [ContentPage; 5] = [
 ];
 
 /// 「我的音乐库」分组，展示在分隔线下方。
-const LIBRARY_PAGES: [ContentPage; 6] = [
+pub(super) const LIBRARY_PAGES: [ContentPage; 6] = [
     ContentPage::FavoriteMusic,
     ContentPage::Recent,
     ContentPage::MyPodcast,
@@ -52,7 +48,7 @@ const LIBRARY_PAGES: [ContentPage; 6] = [
 
 impl ContentPage {
     /// 同时作为元素 id，GPUI 靠它来匹配状态与事件。
-    fn id(self) -> SharedString {
+    pub(super) fn id(self) -> SharedString {
         let id = match self {
             Self::Recommend => "recommend",
             Self::Featured => "featured",
@@ -87,7 +83,7 @@ impl ContentPage {
         }
     }
 
-    fn icon(self) -> &'static str {
+    pub(super) fn icon(self) -> &'static str {
         match self {
             Self::Recommend => "icons/sidebar/sidebar_home.svg",
             Self::Featured => "icons/sidebar/sidebar_featured.svg",
@@ -105,19 +101,19 @@ impl ContentPage {
     }
 
     /// TODO: 如果有通知的话，会在右边显示个小红点
-    fn has_notification(self) -> bool {
+    pub(super) fn has_notification(self) -> bool {
         matches!(self, Self::Following | Self::MyPodcast)
     }
 
     /// 遍历所有页面，供 `MainContent` 预创建。
-    fn all() -> impl Iterator<Item = ContentPage> {
+    pub(super) fn all() -> impl Iterator<Item = ContentPage> {
         MAIN_PAGES.into_iter().chain(LIBRARY_PAGES)
     }
 
     /// 创建该导航项对应的页面 View。
     ///
     /// 静态页面长期持有；带 ID 的歌单由 MainContent 的单个 PlaylistPage 承接。
-    fn build(self, cx: &mut App) -> Option<AnyView> {
+    pub(super) fn build(self, cx: &mut App) -> Option<AnyView> {
         Some(match self {
             Self::Recommend => cx.new(|_| recommend::RecommendPage).into(),
             Self::Featured => cx.new(|_| featured::FeaturedPage).into(),

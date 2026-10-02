@@ -7,8 +7,8 @@ use gpui_kit::base::{
 };
 use gpui_kit::component::slider::{SliderEvent, SliderState};
 
-use crate::state::playback::PlaybackState;
-use crate::theme::DOLPHIN_FAMILY;
+use crate::playback::PlaybackController;
+use crate::ui::theme::DOLPHIN_FAMILY;
 
 /// 轨道静止 / 悬浮时的高度
 const REST_HEIGHT: f32 = 2.;
@@ -20,7 +20,7 @@ const HANDLE_SIZE: f32 = 16.;
 const HIT_SLOP_TOP: f32 = 6.;
 
 pub struct ProgressBar {
-    playback: Entity<PlaybackState>,
+    playback: Entity<PlaybackController>,
     slider: Entity<SliderState>,
     hovered: bool,
     dragging: bool,
@@ -30,7 +30,7 @@ pub struct ProgressBar {
 
 impl ProgressBar {
     pub fn new(
-        playback: Entity<PlaybackState>,
+        playback: Entity<PlaybackController>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -60,8 +60,14 @@ impl ProgressBar {
                 SliderEvent::Release(value) => {
                     this.dragging = false;
                     this.playback.update(cx, |playback, cx| {
-                        playback.seek_to_progress(value.end());
-                        cx.notify();
+                        let progress = value.end();
+                        if progress.is_finite() {
+                            let position = playback
+                                .snapshot()
+                                .duration
+                                .mul_f64(f64::from(progress.clamp(0., 1.)));
+                            playback.seek_to(position, cx);
+                        }
                     });
                 }
             }
@@ -87,12 +93,12 @@ impl Render for ProgressBar {
         let colors = Theme::global(cx).tokens.colors;
         let progress = self.slider.read(cx).percentage().end;
         let playback = self.playback.read(cx);
-        let duration = playback.duration();
+        let duration = playback.snapshot().duration;
         let enabled = playback.can_seek();
         let elapsed = if self.dragging {
             duration.mul_f64(f64::from(progress))
         } else {
-            playback.position.min(duration)
+            playback.snapshot().position.min(duration)
         };
         // 稳定 ID 的 transition 从当前采样值反向，并由库处理 reduced motion。
         let t = transition(

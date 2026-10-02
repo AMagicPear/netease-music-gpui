@@ -4,11 +4,7 @@ use gpui::Global;
 use ncm_api_rs::{ApiClient, ApiResponse, NcmError, Query, create_client};
 use tokio::runtime::Runtime;
 
-use crate::state::user::{UserProfile, VipInfo};
-use crate::state::{
-    playlist::{Playlist, TrackId},
-    song::Song,
-};
+use crate::models::{AudioSourceInfo, Playlist, Song, TrackId, UserProfile, VipInfo};
 
 /// GPUI 负责界面，Tokio 负责 SDK 的网络请求。客户端和运行时在应用内复用。
 pub struct MusicApi {
@@ -19,12 +15,6 @@ pub struct MusicApi {
 }
 
 impl Global for MusicApi {}
-
-pub struct AudioResponse {
-    pub body: reqwest::Response,
-    pub byte_len: Option<u64>,
-    pub duration: Option<Duration>,
-}
 
 impl MusicApi {
     pub fn http_client(&self) -> Arc<reqwest_client::ReqwestClient> {
@@ -43,7 +33,7 @@ impl MusicApi {
 
         let runtime = Runtime::new()?;
         let audio_http = reqwest::Client::builder()
-            .use_rustls_tls()
+            .tls_backend_rustls()
             .connect_timeout(Duration::from_secs(10))
             .read_timeout(Duration::from_secs(20))
             .build()?;
@@ -117,11 +107,7 @@ impl MusicApi {
         ]
     }
 
-    pub async fn song_stream(
-        client: ApiClient,
-        http: reqwest::Client,
-        song_id: u64,
-    ) -> Result<AudioResponse, String> {
+    pub async fn song_source(client: ApiClient, song_id: u64) -> Result<AudioSourceInfo, String> {
         let response = Self::request(
             client.song_url_v1(
                 &Query::new()
@@ -130,31 +116,7 @@ impl MusicApi {
             ),
         )
         .await?;
-        let url = song_audio_url(&response.body, song_id)?;
-        let track = response.body["data"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|track| track["id"].as_u64() == Some(song_id))
-            .unwrap();
-        let duration = track["time"]
-            .as_u64()
-            .filter(|time| *time > 0)
-            .map(Duration::from_millis);
-        let size = track["size"].as_u64().filter(|size| *size > 0);
-        let response = tokio::time::timeout(Duration::from_secs(20), http.get(url).send())
-            .await
-            .map_err(|_| "音频连接超时".to_string())?
-            .map_err(|_| "音频下载失败，请检查网络后重试".to_string())?;
-        if !response.status().is_success() {
-            return Err(format!("音频服务器返回错误：{}", response.status()));
-        }
-        let byte_len = response.content_length().or(size);
-        Ok(AudioResponse {
-            body: response,
-            byte_len,
-            duration,
-        })
+        song_source_info(&response.body, song_id)
     }
 
     pub async fn user_playlists(client: &ApiClient, user_id: u64) -> Result<Vec<Playlist>, String> {
@@ -217,7 +179,7 @@ impl MusicApi {
     }
 }
 
-fn song_audio_url(body: &serde_json::Value, song_id: u64) -> Result<reqwest::Url, String> {
+fn song_source_info(body: &serde_json::Value, song_id: u64) -> Result<AudioSourceInfo, String> {
     let track = body["data"]
         .as_array()
         .and_then(|tracks| {
@@ -234,7 +196,14 @@ fn song_audio_url(body: &serde_json::Value, song_id: u64) -> Result<reqwest::Url
     if !matches!(url.scheme(), "http" | "https") {
         return Err("歌曲播放地址协议不受支持".into());
     }
-    Ok(url)
+    Ok(AudioSourceInfo {
+        url: url.to_string(),
+        byte_len: track["size"].as_u64().filter(|size| *size > 0),
+        duration: track["time"]
+            .as_u64()
+            .filter(|time| *time > 0)
+            .map(Duration::from_millis),
+    })
 }
 
 /// song_detail 的响应顺序不作为歌单顺序；缺失和额外的歌曲不补造。
@@ -259,9 +228,12 @@ mod tests {
             {"id": 2, "url": null},
             {"id": 3, "url": "file:///song.mp3"}
         ]});
-        assert_eq!(song_audio_url(&body, 1).unwrap().scheme(), "https");
+        assert_eq!(
+            song_source_info(&body, 1).unwrap().url,
+            "https://example.com/song.mp3"
+        );
         for id in [2, 3, 4] {
-            assert!(song_audio_url(&body, id).is_err());
+            assert!(song_source_info(&body, id).is_err());
         }
     }
 
@@ -368,7 +340,7 @@ mod tests {
             .iter()
             .find_map(|song| song.al.pic_url.as_deref())
             .expect("缺少歌曲封面");
-        let thumbnail = crate::assets::thumbnail_url(cover, 72);
+        let thumbnail = crate::ui::assets::thumbnail_url(cover, 72);
         let mut downloaded_sizes = Vec::new();
         for url in [
             &profile.avatar_url,

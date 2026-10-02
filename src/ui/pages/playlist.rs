@@ -43,15 +43,15 @@ const DIVIDER_ID: &str = "playlist-title-divider";
 /// 起拖时的鼠标 x、专辑占比、两列可用宽度。
 type DividerDragAnchor = Rc<Cell<(Pixels, f32, Pixels)>>;
 
-use crate::assets::thumbnail_url;
-use crate::components::{
+use crate::models::Song;
+use crate::playback::PlaybackController;
+use crate::state::{library::MusicLibrary, playlist_detail::PlaylistDetail};
+use crate::ui::assets::thumbnail_url;
+use crate::ui::components::{
     CELL_PADDING, COLUMN_GAP, HEADER_HEIGHT, ROW_TEXT_SIZE, ResizeDragPreview, TabBar, TabChanged,
     TabItem, TableColumn, artist_label, virtual_table,
 };
-use crate::state::{
-    library::MusicLibrary, playback::PlaybackState, playlist_detail::PlaylistDetail, song::Song,
-};
-use crate::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
+use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
 
 // 「更多」菜单里的三个命令。
 actions!(playlist, [Share, BatchOperation, AddAllToPlaylist]);
@@ -81,7 +81,7 @@ pub struct PlaylistPage {
     tabs: Entity<TabBar>,
     _tabs_subscription: Subscription,
     library: Entity<MusicLibrary>,
-    playback: Entity<PlaybackState>,
+    playback: Entity<PlaybackController>,
     _playback_subscription: Subscription,
     _library_subscription: Subscription,
     /// 原始歌单顺序保存在 detail.songs；这里只保存显示顺序。
@@ -210,7 +210,7 @@ fn playing_indicator(song_id: u64, colors: ColorTokens) -> AnyElement {
 impl PlaylistPage {
     pub fn new(
         library: Entity<MusicLibrary>,
-        playback: Entity<PlaybackState>,
+        playback: Entity<PlaybackController>,
         cx: &mut Context<Self>,
     ) -> Self {
         let detail = cx.new(|_| PlaylistDetail::default());
@@ -410,10 +410,11 @@ impl PlaylistPage {
         let song_id = song.id;
         let playback = self.playback.read(cx);
         let is_current_song = playback
+            .snapshot()
             .current_song
             .as_ref()
             .is_some_and(|current| current.id == song_id);
-        let is_playing = playback.is_playing;
+        let is_playing = playback.snapshot().is_playing;
         let liked = library.liked_song_ids.contains(&song_id);
         let album_name = song
             .al
@@ -437,7 +438,7 @@ impl PlaylistPage {
                             .id(("playlist-pause-song", song_id))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.playback.update(cx, |playback, cx| {
-                                    playback.set_playing(false, cx);
+                                    playback.pause(cx);
                                 });
                             }))
                             .child(row_hover_icon(

@@ -1,7 +1,4 @@
-use gpui::{Context, ReadGlobal};
 use serde::{Deserialize, Serialize};
-
-use crate::api::MusicApi;
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -17,9 +14,6 @@ pub struct UserProfile {
     pub vip_type: Option<u32>,
     pub user_type: Option<u32>,
     pub auth_status: Option<u32>,
-    /// 独立的 vip_info 接口返回值，不属于 user_account 的 profile。
-    #[serde(skip)]
-    pub vip: Option<VipInfo>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -62,62 +56,6 @@ impl VipInfo {
             prefix.into()
         };
         Some(format!("icons/VIP/{badge}.svg"))
-    }
-}
-
-impl UserProfile {
-    pub fn new(cx: &mut Context<Self>) -> Self {
-        let api = MusicApi::global(cx);
-        let request = api
-            .runtime
-            .spawn(MusicApi::user_profile(api.client.clone()));
-        cx.spawn(async move |this, cx| {
-            let result = request
-                .await
-                .unwrap_or_else(|_| Err("账号请求任务失败".into()));
-            let loaded = match result {
-                Ok(profile) => profile,
-                Err(message) => {
-                    eprintln!("{message}");
-                    let _ = this.update(cx, |profile, cx| {
-                        profile.nickname = "未登录".into();
-                        cx.notify();
-                    });
-                    return;
-                }
-            };
-            let user_id = loaded.user_id;
-            let Ok(request) = this.update(cx, |profile, cx| {
-                *profile = loaded;
-                // 账号就绪立即触发音乐库加载，会员请求不阻塞歌单索引。
-                cx.notify();
-                let api = MusicApi::global(cx);
-                api.runtime
-                    .spawn(MusicApi::vip_info(api.client.clone(), user_id))
-            }) else {
-                return;
-            };
-            match request
-                .await
-                .unwrap_or_else(|_| Err("会员请求任务失败".into()))
-            {
-                Ok(vip) => {
-                    let _ = this.update(cx, |profile, cx| {
-                        if profile.user_id == user_id {
-                            profile.vip = Some(vip);
-                            cx.notify();
-                        }
-                    });
-                }
-                Err(message) => eprintln!("{message}"),
-            }
-        })
-        .detach();
-
-        Self {
-            nickname: "加载中…".into(),
-            ..Default::default()
-        }
     }
 }
 

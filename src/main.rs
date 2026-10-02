@@ -1,35 +1,15 @@
 mod api;
-mod assets;
-mod components;
-mod pages;
+mod models;
+mod playback;
 mod state;
-mod theme;
+mod ui;
 
 use std::path::PathBuf;
 
-use assets::Assets;
-use components::PlayerBar;
 use gpui::*;
-use pages::MainContent;
-use state::{library::MusicLibrary, playback::PlaybackState, user::UserProfile};
-
-struct MainWindow {
-    main_content: Entity<MainContent>,
-    player_bar: Entity<PlayerBar>,
-}
-
-impl Render for MainWindow {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = gpui_kit::base::Theme::global(cx).tokens.colors;
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(colors.background)
-            .child(self.main_content.clone())
-            .child(self.player_bar.clone())
-    }
-}
+use playback::PlaybackController;
+use state::{account::AccountState, library::MusicLibrary};
+use ui::{MainContent, MainWindow, PlayerBar, assets::Assets, theme};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api = api::MusicApi::from_env()?;
@@ -56,8 +36,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 cx,
                 |window, cx| {
-                    let playback = cx.new(PlaybackState::new);
-                    let user_profile = cx.new(UserProfile::new);
+                    let playback = cx.new(PlaybackController::new);
+                    let user_profile = cx.new(AccountState::new);
                     let library = cx.new(|cx| MusicLibrary::new(user_profile.clone(), cx));
                     let main_content = cx.new(|cx| {
                         MainContent::new(window, user_profile, library, playback.clone(), cx)

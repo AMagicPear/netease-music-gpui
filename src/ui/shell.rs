@@ -3,14 +3,15 @@ use std::{cell::Cell, collections::HashMap, rc::Rc};
 use gpui::prelude::{FluentBuilder, StatefulInteractiveElement};
 use gpui::*;
 
-use super::ContentPage;
-use super::playlist::PlaylistPage;
-use super::sidebar_page::{SidebarChanged, SidebarPage};
-use crate::assets::thumbnail_url;
-use crate::components::ResizeDragPreview;
-use crate::state::user::UserProfile;
-use crate::state::{library::MusicLibrary, playback::PlaybackState};
-use crate::theme::{IconSize, PRESSED_ICON_ALPHA};
+use super::pages::ContentPage;
+use super::pages::playlist::PlaylistPage;
+use super::sidebar::{SidebarChanged, SidebarPage};
+use crate::playback::PlaybackController;
+use crate::state::account::AccountState;
+use crate::state::library::MusicLibrary;
+use crate::ui::assets::thumbnail_url;
+use crate::ui::components::{PlayerBar, ResizeDragPreview};
+use crate::ui::theme::{IconSize, PRESSED_ICON_ALPHA};
 use gpui_kit::base::input::{Input, InputState};
 use gpui_kit::base::{Button, ColorTokens, Scrollbar, ScrollbarMode, Theme};
 use gpui_kit::component::avatar::Avatar;
@@ -23,12 +24,30 @@ const SEARCH_BOX_WIDTH: Pixels = px(258.);
 /// 搜索框的压缩下限
 const SEARCH_BOX_MIN_WIDTH: Pixels = px(40.);
 
+pub struct MainWindow {
+    pub main_content: Entity<MainContent>,
+    pub player_bar: Entity<PlayerBar>,
+}
+
+impl Render for MainWindow {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = Theme::global(cx).tokens.colors;
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(colors.background)
+            .child(self.main_content.clone())
+            .child(self.player_bar.clone())
+    }
+}
+
 pub struct MainContent {
     active_page: ContentPage,
     sidebar_width: Pixels,
     sidebar: Entity<SidebarPage>,
     search_input: Entity<InputState>,
-    user_profile: Entity<UserProfile>,
+    user_profile: Entity<AccountState>,
     /// 每个导航项对应一个页面 View，一次创建后长期持有。
     pages: HashMap<ContentPage, AnyView>,
     playlist_page: Entity<PlaylistPage>,
@@ -42,9 +61,9 @@ pub struct MainContent {
 impl MainContent {
     pub fn new(
         window: &mut Window,
-        user_profile: Entity<UserProfile>,
+        user_profile: Entity<AccountState>,
         library: Entity<MusicLibrary>,
-        playback: Entity<PlaybackState>,
+        playback: Entity<PlaybackController>,
         cx: &mut Context<Self>,
     ) -> Self {
         let sidebar = cx.new(|cx| SidebarPage::new(library.clone(), cx));
@@ -298,8 +317,8 @@ impl Render for MainContent {
                     .child(page_header(
                         colors,
                         self.search_input.clone(),
-                        user_profile.nickname.clone(),
-                        thumbnail_url(&user_profile.avatar_url, 56),
+                        user_profile.profile.nickname.clone(),
+                        thumbnail_url(&user_profile.profile.avatar_url, 56),
                         user_profile.vip.as_ref().and_then(|vip| {
                             vip.badge_path(
                                 time::OffsetDateTime::now_utc().unix_timestamp() as u64 * 1000,

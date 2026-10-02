@@ -10,8 +10,8 @@ use gpui_kit::component::Theme;
 pub const DOLPHIN_FAMILY: &str = "Dolphin";
 
 /// 编译期把字体字节打进二进制，运行时零拷贝地交给文本系统。
-const DOLPHIN_MEDIUM: &[u8] = include_bytes!("../assets/font/dolphin.ttf");
-const DOLPHIN_BOLD: &[u8] = include_bytes!("../assets/font/dolphin_bold.ttf");
+const DOLPHIN_MEDIUM: &[u8] = include_bytes!("../../assets/font/dolphin.ttf");
+const DOLPHIN_BOLD: &[u8] = include_bytes!("../../assets/font/dolphin_bold.ttf");
 
 #[derive(Clone, Copy)]
 pub enum IconSize {
