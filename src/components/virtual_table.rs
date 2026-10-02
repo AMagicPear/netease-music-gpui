@@ -8,14 +8,42 @@ const ROW_HEIGHT: Pixels = px(56.);
 /// 表头行高。调用者要在表头上叠东西（比如可拖动的分界线）时，用同一个值对齐。
 pub const HEADER_HEIGHT: Pixels = px(36.);
 /// 行与表头的文字字号。
-///
-/// 表格内字体大小
 pub const ROW_TEXT_SIZE: Pixels = px(13.);
 /// 列与列之间的间距。表头与每一行用同一个值，列的边界才对得齐。
 ///
 /// 它落在列宽**之外**（列宽只描述这一列自己的盒子）：调用者要在某两条列边界之间放东西，
 /// 比如可拖动的分界线，间距就是天然的落点 —— 那时它同时也是拖动热区的宽度，别调太小。
-pub const COLUMN_GAP: Pixels = px(24.);
+pub const COLUMN_GAP: Pixels = px(20.);
+
+/// 行 hover 时的圆角。
+///
+/// 它同时作用于底色和投影：GPUI 画 drop shadow 时读的就是元素的 `corner_radii`，
+/// 所以底色圆了、投影也跟着圆，不用两处各写一遍。
+const ROW_HOVER_RADIUS: Pixels = px(12.);
+/// hover 投影的 Y 偏移（正数向下）、模糊半径与颜色透明度（颜色取主题墨色，见行 hover 处）。
+///
+/// 偏移刻意不为 0：整个投影往下挪一点，下方就比上方重一档，读起来是"这一行被托起来"，
+/// 而不是四边等重的发光圈（上方有效范围 ≈ 模糊 − 偏移，下方 ≈ 模糊 + 偏移）。
+/// spread 保持 0：一旦有了扩散，56px 的行高里会先摊出一层实色，像描边而不像阴影。
+const ROW_HOVER_SHADOW_OFFSET_Y: Pixels = px(2.);
+const ROW_HOVER_SHADOW_BLUR: Pixels = px(12.);
+const ROW_HOVER_SHADOW_ALPHA: f32 = 0.10;
+
+/// 行区域的裁剪框：比行盒子四周各让出「投影能糊出去多远」。
+///
+/// 不这么做的话投影会被切平，左右两侧最先看出来 —— 那两条边正好压在列边界上。
+/// 外扩量取四周的最大值：竖直方向是 `模糊 + |偏移|`（下移之后往下糊得更远），水平方向只有 `模糊`，
+/// 而 `Bounds::dilate` 只能均匀外扩，所以按最大值来，宁可多留一点。
+/// 它直接从投影参数算出来，改偏移或模糊时自动跟着变，不存在"两处要同步"的问题。
+///
+/// 放宽是安全的：行内容本身不可能溢出（单元格都带 `overflow_hidden`，行也是
+/// `Definite(ROW_HEIGHT)` 定高的），所以唯一会画到行盒子外面的就是投影；再往外还有页面内边距
+/// 和滚动容器的裁剪兜着，阴影糊不出表格所在的区域。
+fn rows_clip(bounds: Bounds<Pixels>) -> ContentMask<Pixels> {
+    ContentMask {
+        bounds: bounds.dilate(ROW_HOVER_SHADOW_BLUR + ROW_HOVER_SHADOW_OFFSET_Y),
+    }
+}
 
 /// 固定宽度列传 Some；None 列平分剩余宽度。表头与单元格共用同一套宽度。
 pub struct TableColumn {
@@ -43,11 +71,33 @@ impl TableColumn {
 }
 
 fn cell(column: &TableColumn, content: AnyElement) -> Div {
+    // `min_w(0)` 是给 `truncate()` 让路的：flex 项默认最小宽度等于内容宽度，
+    // 不压到 0 的话列会被文字撑宽，而不是把文字截断成省略号。
     let cell = div().min_w(px(0.)).overflow_hidden().child(content);
     match column.width {
         Some(width) => cell.w(width).flex_none(),
         None => cell.flex_1(),
     }
+}
+
+/// 表头与数据行共用的骨架：撑满宽度、横向排列、列间距与字号一致，再按列宽把单元格摆好。
+///
+/// 表头是一棵布局树，每个数据行又是**各自独立**的一棵（虚拟化的要求），两边的列边界
+/// 只能靠这里保持一致。列间距、行内字号、单元格包装收在一处，就不会出现"改了一边、
+/// 表头和数据悄悄错位"的 bug。
+fn table_row(columns: &[TableColumn], cells: impl IntoIterator<Item = AnyElement>) -> Div {
+    div()
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(COLUMN_GAP)
+        .text_size(ROW_TEXT_SIZE)
+        .children(
+            columns
+                .iter()
+                .zip(cells)
+                .map(|(column, content)| cell(column, content)),
+        )
 }
 
 /// 跟随祖先滚动的固定行高表格。回调仅为可见范围及上下各四行缓冲创建单元格。
@@ -61,29 +111,23 @@ pub fn virtual_table<V: Render>(
     cx: &App,
 ) -> impl IntoElement {
     let colors = Theme::global(cx).tokens.colors;
-    let header = div()
-        .w_full()
-        .h(HEADER_HEIGHT)
-        .flex()
-        .items_center()
-        .gap(COLUMN_GAP)
-        .text_size(ROW_TEXT_SIZE)
-        .text_color(colors.muted_foreground)
-        .border_b_1()
-        .border_color(colors.foreground.alpha(0.06))
-        .children(columns.iter().map(|column| {
-            cell(
-                column,
-                div()
-                    // 撑满单元格后按列的对齐方式摆表头，「#」这类右对齐列才跟数字对齐。
-                    .w_full()
-                    .text_align(column.align)
-                    // 表头就是一行标签，列再窄也不该折成两行。
-                    .whitespace_nowrap()
-                    .child(column.title.clone())
-                    .into_any_element(),
-            )
-        }));
+    let header = table_row(
+        &columns,
+        columns.iter().map(|column| {
+            div()
+                // 撑满单元格后按列的对齐方式摆表头，「#」这类右对齐列才跟数字对齐。
+                .w_full()
+                .text_align(column.align)
+                // 表头就是一行标签，列再窄也不该折成两行。
+                .whitespace_nowrap()
+                .child(column.title.clone())
+                .into_any_element()
+        }),
+    )
+    .h(HEADER_HEIGHT)
+    .text_color(colors.muted_foreground)
+    .border_b_1()
+    .border_color(colors.foreground.alpha(0.06));
     div().w_full().child(header).child(VirtualRows {
         id: id.into(),
         row_count,
@@ -95,23 +139,31 @@ pub fn virtual_table<V: Render>(
                     columns.len(),
                     "one cell per table column is required"
                 );
-                let row = div()
+                let row = table_row(&columns, cells)
                     .id(("row", index))
-                    .w_full()
                     .h(ROW_HEIGHT)
-                    .flex()
-                    .items_center()
-                    .gap(COLUMN_GAP)
-                    .text_size(ROW_TEXT_SIZE)
                     .text_color(colors.foreground)
-                    .hover(|style| style.bg(colors.foreground.alpha(0.06)));
-                row.children(
-                    columns
-                        .iter()
-                        .zip(cells)
-                        .map(|(column, content)| cell(column, content)),
-                )
-                .into_any_element()
+                    // hover 不是「把底色压深」，而是把整行托起来：底色换成项目的表面色
+                    // （`colors.surface` = #fafafa，播放栏用的同一层柔和白），配圆角 + 柔和投影。
+                    // 不用纯白：纯白是"最亮"而不是"项目的白"，换主题时会跟其它卡片脱节。
+                    //
+                    // 投影只留模糊半径 + 一点向下的偏移，不给 spread：偏移让下方比上方重一档，
+                    // 这一行看起来才是被托起来的；加 spread 则会先铺开一层实色，在 56px 的行高里
+                    // 就是一条硬边，像描边而不像阴影。颜色用主题墨色而不是纯黑，
+                    // 和 `player_bar` 的投影同一套做法，深浅随主题走。
+                    //
+                    // 参数都用上面的常量：`rows_clip()` 直接从它们算出裁剪框要外扩多少。
+                    .hover(|style| {
+                        style.bg(colors.surface).rounded(ROW_HOVER_RADIUS).shadow(vec![
+                            BoxShadow::new(
+                                px(0.),
+                                ROW_HOVER_SHADOW_OFFSET_Y,
+                                colors.foreground.alpha(ROW_HOVER_SHADOW_ALPHA),
+                            )
+                            .blur_radius(ROW_HOVER_SHADOW_BLUR),
+                        ])
+                    });
+                row.into_any_element()
             })
         }),
     })
@@ -130,8 +182,12 @@ impl IntoElement for VirtualRows {
     }
 }
 
-// ponytail: 固定行高；需要换行或展开行时再引入逐行高度缓存。
-fn visible_rows(count: usize, height: f32, top: f32, bottom: f32) -> Range<usize> {
+/// 算出需要渲染的行区间，上下各多带 `OVERSCAN_ROWS` 行缓冲。
+///
+/// `top` / `bottom` 是视口相对表格顶部的纵坐标。行高固定（`ROW_HEIGHT`），
+/// 所以第 n 行的位置就是 `ROW_HEIGHT * n`，一次除法即可定位。
+fn visible_rows(count: usize, top: f32, bottom: f32) -> Range<usize> {
+    let height = f32::from(ROW_HEIGHT);
     if count == 0 || bottom <= 0. || top >= count as f32 * height || bottom <= top {
         return 0..0;
     }
@@ -184,11 +240,11 @@ impl Element for VirtualRows {
         }
         let range = visible_rows(
             self.row_count,
-            f32::from(ROW_HEIGHT),
             f32::from(viewport.top() - bounds.top()),
             f32::from(viewport.bottom() - bounds.top()),
         );
-        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+        // 裁剪框比行盒子外扩一圈（见 `rows_clip`），好让 hover 投影的柔光画到行外面去。
+        window.with_content_mask(Some(rows_clip(bounds)), |window| {
             range
                 .map(|index| {
                     let mut row = (self.render_row)(index, window, cx);
@@ -221,7 +277,8 @@ impl Element for VirtualRows {
         window: &mut Window,
         cx: &mut App,
     ) {
-        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+        // 同 prepaint，用同一个裁剪框：两处必须一致，否则预排版和绘制会对不上。
+        window.with_content_mask(Some(rows_clip(bounds)), |window| {
             for row in rows {
                 row.paint(window, cx);
             }
@@ -235,13 +292,13 @@ mod tests {
 
     #[test]
     fn visible_range_tracks_outer_viewport() {
-        assert_eq!(visible_rows(1193, 56., -250., 230.), 0..9);
-        assert_eq!(visible_rows(1193, 56., 560., 1120.), 6..24);
-        assert_eq!(visible_rows(1193, 56., 561., 1121.), 6..25);
-        assert_eq!(visible_rows(1193, 56., 66640., 67200.), 1186..1193);
-        assert_eq!(visible_rows(1193, 56., -500., -1.), 0..0);
-        assert_eq!(visible_rows(1193, 56., 66808., 68000.), 0..0);
-        assert_eq!(visible_rows(0, 56., 0., 500.), 0..0);
-        assert_eq!(visible_rows(10, 56., 100., 100.), 0..0);
+        assert_eq!(visible_rows(1193, -250., 230.), 0..9);
+        assert_eq!(visible_rows(1193, 560., 1120.), 6..24);
+        assert_eq!(visible_rows(1193, 561., 1121.), 6..25);
+        assert_eq!(visible_rows(1193, 66640., 67200.), 1186..1193);
+        assert_eq!(visible_rows(1193, -500., -1.), 0..0);
+        assert_eq!(visible_rows(1193, 66808., 68000.), 0..0);
+        assert_eq!(visible_rows(0, 0., 500.), 0..0);
+        assert_eq!(visible_rows(10, 100., 100.), 0..0);
     }
 }

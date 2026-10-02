@@ -317,7 +317,7 @@ impl Render for PlayerBar {
                             .text_color(colors.muted_foreground)
                             .child(hover_icon(
                                 "player-sq-button",
-                                "icons/sq.svg",
+                                "icons/音质选项/sq.svg",
                                 IconSize::Middle.pixels(),
                                 colors.muted_foreground,
                                 colors,

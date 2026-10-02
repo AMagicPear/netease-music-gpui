@@ -39,9 +39,70 @@ const ALBUM_WIDTH_MIN: Pixels = px(80.);
 /// 上限是防止专辑列把弹性的标题列挤没，那样整行会溢出。
 const ALBUM_WIDTH_MAX: Pixels = px(400.);
 
+/// 歌曲标题和它右边副标题的字号。固定值，不跟着行内的 `ROW_TEXT_SIZE` 联动；
+/// 两者必须是同一个值，否则副标题看起来会被"降级"。
+const TITLE_TEXT_SIZE: Pixels = px(14.);
+
+/// 音质徽章的显示高度，宽度交给 `img()` 按各自比例算（见 `Quality` 的注释）。
+///
+/// 7 个图标都是**原生 13 高**：它们取自网易云同一套徽章的小号版本（大号是 16 高），
+/// 所以按 13 显示就是 1:1 —— 描边和字都不会被重采样，这是选这套图标的理由，别随手改。
+/// 想整体放大只管改这里，但要知道那就不是原尺寸了。
+const QUALITY_BADGE_HEIGHT: Pixels = px(13.);
+
+/// 歌曲的音质标识，显示在歌手前面。
+///
+/// 这些徽章图标自带配色（金色描边），而且宽高各不相同，所以必须用 `img()` 渲染：
+/// `svg()` 会把它当成单色遮罩、用 `text_color` 重绘，原始配色会丢。
+#[derive(Clone, Copy)]
+enum Quality {
+    Hq,
+    Sq,
+    HiRes,
+    /// 全景声
+    Spatial,
+    /// 沉浸声
+    Immersive,
+    /// 超清母带
+    Master,
+    /// 高清臻音
+    Hd,
+}
+
+impl Quality {
+    /// 全部档位，示例数据用它按行轮换，好把每个徽章都看一眼。
+    const ALL: [Quality; 7] = [
+        Quality::Hq,
+        Quality::Sq,
+        Quality::HiRes,
+        Quality::Spatial,
+        Quality::Immersive,
+        Quality::Master,
+        Quality::Hd,
+    ];
+
+    fn badge(self) -> &'static str {
+        match self {
+            Self::Hq => "icons/音质选项/HQ.svg",
+            Self::Sq => "icons/音质选项/sq.svg",
+            Self::HiRes => "icons/音质选项/Hi-Res.svg",
+            Self::Spatial => "icons/音质选项/全景声.svg",
+            Self::Immersive => "icons/音质选项/沉浸声.svg",
+            Self::Master => "icons/音质选项/超清母带.svg",
+            Self::Hd => "icons/音质选项/高清臻音.svg",
+        }
+    }
+}
+
+/// 次要文字（副标题、艺术家、专辑、时长）的字重：比正文细一档。
+///
+/// `FontWeight` 就是 f32 的包装，想取 Light/Regular 之间的中间值可以写
+/// `FontWeight::from(350.)`（能不能落到真正的中间字面取决于系统字体有没有那一档）。
+const SECONDARY_FONT_WEIGHT: FontWeight = FontWeight::NORMAL;
+
 /// 「喜欢」「时长」的固定宽度：两列都在分界线右边，反推分界线位置要用到它们。
-const LIKE_COLUMN_WIDTH: Pixels = px(64.);
-const DURATION_COLUMN_WIDTH: Pixels = px(72.);
+const LIKE_COLUMN_WIDTH: Pixels = px(42.);
+const DURATION_COLUMN_WIDTH: Pixels = px(66.);
 
 /// 分界线的元素 id，同时用作它作为 hover group 的名字。
 /// 两处必须完全一致 `group_hover` 才会响应，所以抽成常量而不是写两遍字面量。
@@ -103,7 +164,12 @@ pub struct FavoriteMusicPage {
 /// 临时示例数据，用于验证长表滚动；接入远程歌单后替换。
 struct DemoSong {
     title: SharedString,
-    artist: SharedString,
+    /// 副标题（比如所属 EP）：渲染在标题右边、括号里，同一字号、灰色。
+    subtitle: Option<SharedString>,
+    /// 艺术家可能不止一个，渲染时用「 / 」连起来。
+    artists: Vec<SharedString>,
+    /// 音质徽章，显示在歌手前面。
+    quality: Quality,
     album: SharedString,
     duration: SharedString,
     liked: bool,
@@ -111,27 +177,86 @@ struct DemoSong {
 }
 
 fn demo_songs() -> Vec<DemoSong> {
-    let examples = [
-        ("Run Away With Me", "Carly Rae Jepsen", "E·MO·TION", "04:11"),
-        ("晴天", "周杰伦", "叶惠美", "04:29"),
-        ("到此为止", "陈奕迅", "准备中", "04:37"),
-        ("Style", "Taylor Swift", "1989", "03:51"),
-        ("平凡之路", "朴树", "猎户星座", "05:02"),
-        ("海阔天空", "Beyond", "乐与怒", "05:24"),
+    // (标题, 副标题, 艺术家, 专辑, 时长)
+    let examples: [(&str, Option<&str>, &[&str], &str, &str); 6] = [
+        (
+            "Lose My Mind (feat. Doja Cat)",
+            None,
+            &["Don Toliver", "Doja Cat"],
+            "Hardstone Psycho",
+            "03:29",
+        ),
+        (
+            "DAMIDAMI",
+            Some("《绝区零》卢西娅EP"),
+            &["Sihan", "三Z-STUDIO", "HOYO-MiX"],
+            "绝区零-DAMIDAMI",
+            "03:11",
+        ),
+        (
+            "Let You Down",
+            None,
+            &["Stonebank", "Danyka Nadeau"],
+            "Let You Down",
+            "04:13",
+        ),
+        ("Crown", None, &["BUNT."], "Crown", "04:00"),
+        ("晴天", None, &["周杰伦"], "叶惠美", "04:29"),
+        ("海阔天空", None, &["Beyond"], "乐与怒", "05:24"),
     ];
     (0..1193)
         .map(|index| {
-            let (title, artist, album, duration) = examples[index % examples.len()];
+            let (title, subtitle, artists, album, duration) = examples[index % examples.len()];
             DemoSong {
                 title: title.into(),
-                artist: artist.into(),
+                subtitle: subtitle.map(SharedString::from),
+                artists: artists
+                    .iter()
+                    .map(|artist| SharedString::from(*artist))
+                    .collect(),
+                // 音质按行轮换，一屏里就能把每个徽章都看到。
+                quality: Quality::ALL[index % Quality::ALL.len()],
                 album: album.into(),
                 duration: duration.into(),
-                liked: true,
+                // 混着来：既能看到点亮时的实心红心，也能看到未点亮的勾线灰心。
+                liked: index % 4 != 0,
                 cover: "images/demo-album.svg".into(),
             }
         })
         .collect()
+}
+
+/// 把标题和（可选）副标题拼成**一整行**文字，副标题那段换成灰色 + 细字重。
+///
+/// 为什么用 `StyledText` + highlights 而不是两个元素并排：并排的两个文本元素各截各的，
+/// 收缩时会出现两个省略号。highlights 是在排版时叠加到**继承来的**文字样式上的
+/// （字号、家族都跟随父级），整串仍是一行文字，所以只会有一个省略号 ——
+/// 效果等价于 HTML 里标题后面套一个 `<span style="color: gray">`。
+fn title_with_subtitle(song: &DemoSong, colors: ColorTokens) -> StyledText {
+    let Some(subtitle) = &song.subtitle else {
+        return StyledText::new(song.title.clone());
+    };
+
+    let subtitle = format!("（{subtitle}）");
+    let title_len = song.title.len();
+    let mut line = song.title.to_string();
+    line.push_str(&subtitle);
+
+    // run 级颜色要先合成成不透明色，原因在 `TextStyle::highlight`：
+    // 它是 `继承色.blend(这里的颜色)`，而 `blend` 是"把 other 叠在 self 上"。
+    // 主题里的灰都是半透明的 ink，半透明灰叠在不透明的标题色上，出来的还是接近标题色
+    // —— 看着就像"副标题根本没变灰"。压在页面底色上算出等价的不透明灰，
+    // 再传进来就会命中 `blend` 的 `other.a >= 1.0` 分支，直接原样使用。
+    let subtitle_color = colors.background.blend(colors.muted_foreground);
+
+    StyledText::new(line).with_highlights([(
+        title_len..title_len + subtitle.len(),
+        HighlightStyle {
+            color: Some(subtitle_color),
+            font_weight: Some(SECONDARY_FONT_WEIGHT),
+            ..Default::default()
+        },
+    )])
 }
 
 impl FavoriteMusicPage {
@@ -276,24 +401,42 @@ impl FavoriteMusicPage {
                     div()
                         .min_w(px(0.))
                         .flex_1()
+                        // 标题行：标题和副标题是同一行文字（见 title_with_subtitle），
+                        // 所以窄了只会出现一个省略号。
                         .child(
-                            // 标题固定 14px：比行内的 ROW_TEXT_SIZE(13) 大一档，但不跟着它联动。
                             div()
-                                .text_size(px(14.))
+                                .text_size(TITLE_TEXT_SIZE)
                                 .truncate()
-                                .child(song.title.clone()),
+                                .child(title_with_subtitle(song, colors)),
                         )
                         .child(
-                            // 不写字号，直接继承行内的 ROW_TEXT_SIZE；和标题的区分靠颜色。
+                            // 歌手/制作人：音质徽章 + 名字。名字不写字号，继承行内的 ROW_TEXT_SIZE。
                             div()
-                                .truncate()
-                                .text_color(colors.muted_foreground)
-                                .child(song.artist.clone()),
+                                .flex()
+                                .items_center()
+                                .gap(px(4.))
+                                .min_w(px(0.))
+                                // 徽章用 img() 才保得住原始配色；宽度由 img() 按图片比例自动定，
+                                // flex_none 是为了让它别被压缩（空间不够时该截断的是歌手名）。
+                                .child(
+                                    img(song.quality.badge())
+                                        .h(QUALITY_BADGE_HEIGHT)
+                                        .flex_none(),
+                                )
+                                .child(
+                                    div()
+                                        .min_w(px(0.))
+                                        .truncate()
+                                        .font_weight(SECONDARY_FONT_WEIGHT)
+                                        .text_color(colors.muted_foreground)
+                                        .child(song.artists.join(" / ")),
+                                ),
                         ),
                 )
                 .into_any_element(),
             div()
                 .truncate()
+                .font_weight(SECONDARY_FONT_WEIGHT)
                 .text_color(colors.secondary_foreground)
                 .child(song.album.clone())
                 .into_any_element(),
@@ -330,7 +473,8 @@ impl FavoriteMusicPage {
                 }))
                 .into_any_element(),
             div()
-                // 时长是辅助信息，比 `muted_foreground`(60%) 再淡一档：45% 的 foreground。
+                // 时长是辅助信息：比 `muted_foreground`(60%) 再淡一档（45%），字重也细一档。
+                .font_weight(SECONDARY_FONT_WEIGHT)
                 .text_color(colors.foreground.alpha(0.45))
                 .child(song.duration.clone())
                 .into_any_element(),
