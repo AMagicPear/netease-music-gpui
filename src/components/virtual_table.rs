@@ -102,15 +102,21 @@ fn table_row(columns: &[TableColumn], cells: impl IntoIterator<Item = AnyElement
 
 /// 跟随祖先滚动的固定行高表格。回调仅为可见范围及上下各四行缓冲创建单元格。
 /// 数据、列的业务含义与顶部页面内容都由调用者决定。
+///
+/// `on_row_hover` 在某一行悬浮状态变化时回调（行号 + 是否进入）。样式层面的 `.hover()`
+/// 改不了子元素结构，所以"hover 时长出额外内容"这类需求要靠调用者记住行号再重绘。
 pub fn virtual_table<V: Render>(
     view: Entity<V>,
     id: impl Into<ElementId>,
     columns: Rc<Vec<TableColumn>>,
     row_count: usize,
     render_cells: impl 'static + Fn(&mut V, usize, &mut Window, &mut Context<V>) -> Vec<AnyElement>,
+    on_row_hover: impl 'static + Fn(&mut V, usize, bool, &mut Context<V>),
     cx: &App,
 ) -> impl IntoElement {
     let colors = Theme::global(cx).tokens.colors;
+    // 每一行都要挂一份回调，所以包成 `Rc`：逐行 clone 的是引用，不是闭包本体。
+    let on_row_hover = Rc::new(on_row_hover);
     let header = table_row(
         &columns,
         columns.iter().map(|column| {
@@ -143,6 +149,14 @@ pub fn virtual_table<V: Render>(
                     .id(("row", index))
                     .h(ROW_HEIGHT)
                     .text_color(colors.foreground)
+                    // 悬浮状态交给调用者：`.hover()` 只能改这一层的样式，变不了子元素结构
+                    // （比如把序号换成播放键、在标题右侧长出操作图标）。
+                    .on_hover({
+                        let on_row_hover = on_row_hover.clone();
+                        cx.listener(move |view, hovered: &bool, _, cx| {
+                            on_row_hover(view, index, *hovered, cx);
+                        })
+                    })
                     // hover 不是「把底色压深」，而是把整行托起来：底色换成项目的表面色
                     // （`colors.surface` = #fafafa，播放栏用的同一层柔和白），配圆角 + 柔和投影。
                     // 不用纯白：纯白是"最亮"而不是"项目的白"，换主题时会跟其它卡片脱节。
@@ -154,14 +168,17 @@ pub fn virtual_table<V: Render>(
                     //
                     // 参数都用上面的常量：`rows_clip()` 直接从它们算出裁剪框要外扩多少。
                     .hover(|style| {
-                        style.bg(colors.surface).rounded(ROW_HOVER_RADIUS).shadow(vec![
-                            BoxShadow::new(
-                                px(0.),
-                                ROW_HOVER_SHADOW_OFFSET_Y,
-                                colors.foreground.alpha(ROW_HOVER_SHADOW_ALPHA),
-                            )
-                            .blur_radius(ROW_HOVER_SHADOW_BLUR),
-                        ])
+                        style
+                            .bg(colors.surface)
+                            .rounded(ROW_HOVER_RADIUS)
+                            .shadow(vec![
+                                BoxShadow::new(
+                                    px(0.),
+                                    ROW_HOVER_SHADOW_OFFSET_Y,
+                                    colors.foreground.alpha(ROW_HOVER_SHADOW_ALPHA),
+                                )
+                                .blur_radius(ROW_HOVER_SHADOW_BLUR),
+                            ])
                     });
                 row.into_any_element()
             })

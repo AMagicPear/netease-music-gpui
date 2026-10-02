@@ -1,3 +1,4 @@
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_kit::base::{Button, ColorTokens, Theme};
 use gpui_kit::component::Sizable;
@@ -120,7 +121,7 @@ use crate::components::{
     TableColumn, virtual_table,
 };
 use crate::state::user::UserProfile;
-use crate::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_OPACITY};
+use crate::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
 
 // 「更多」菜单里的三个命令。
 //
@@ -159,6 +160,11 @@ pub struct FavoriteMusicPage {
     index_width: Pixels,
     /// 专辑列宽：由「标题 / 专辑」之间那条分界线拖出来，所以是要改的状态。
     album_width: Pixels,
+    /// 鼠标当前悬浮在哪一行（`None` = 不在任何行上）。
+    ///
+    /// 行 hover 不只是变色：序号要让位给播放键、标题右侧要长出四个操作图标 ——
+    /// 这些是**内容结构**的变化，`.hover()` 那种纯样式钩子做不到，只能把行号记下来重绘。
+    hovered_row: Option<usize>,
 }
 
 /// 临时示例数据，用于验证长表滚动；接入远程歌单后替换。
@@ -259,6 +265,62 @@ fn title_with_subtitle(song: &DemoSong, colors: ColorTokens) -> StyledText {
     )])
 }
 
+/// 行 hover 时才出现的图标：序号位置的播放键、标题右侧那排操作按钮，共用这一套样式。
+///
+/// 样式与页面 header 右上角那排**完全一致**：60% 的墨色灰、hover 变深到 `foreground`、
+/// 按下换成更浅的按下色。尺寸由调用者给，因为播放键要比操作按钮小一档。
+/// 不抄 header 那排的 `stop_propagation` —— 那是标题栏的诉求（别让点图标变成拖窗），行里没有。
+fn row_hover_icon(
+    id: (&'static str, usize),
+    path: &'static str,
+    label: &'static str,
+    size: Pixels,
+    colors: ColorTokens,
+) -> AnyElement {
+    svg()
+        .path(path)
+        .size(size)
+        .flex_none()
+        .text_color(colors.foreground.alpha(0.6))
+        .hover(|style| style.text_color(colors.foreground))
+        .id(id)
+        .role(Role::Button)
+        .aria_label(label)
+        // active 属于 StatefulInteractiveElement，必须跟在 `.id()` 之后（此时是 Stateful<Svg>）。
+        .active(|style| style.text_color(colors.foreground.alpha(PRESSED_ICON_ALPHA)))
+        .into_any_element()
+}
+
+/// 行 hover 时贴在标题右侧的那排操作图标：下载 / 收藏 / 评论 / 更多。
+///
+/// 单独成函数是因为它要占十来行，塞进 `song_cells` 的链式调用里会深得读不动；
+/// 但它只在这一处用，不属于"通用 UI 件"。
+fn row_actions(index: usize, colors: ColorTokens) -> AnyElement {
+    // 四个图标只有 id / 路径 / 无障碍名不同，其余全都一样：尺寸用 header 那排的
+    // `IconSize::Small`，灰度和三态交互由 `row_hover_icon` 统一给。
+    let icon = |id: &'static str, path: &'static str, label: &'static str| {
+        row_hover_icon((id, index), path, label, IconSize::Small.pixels(), colors)
+    };
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        // 间距抄 header 那排图标（图标之间 10px），左侧再加 10px，免得贴着标题文字。
+        .gap(px(10.))
+        .ml(px(10.))
+        // 下载用勾线版：同排的收藏 / 评论 / 更多都是勾线，`download.svg` 那个实心箭头
+        // 在这一排里是异类（它留给页面上那个带文字的下载按钮用）。
+        .child(icon(
+            "favorite-song-download",
+            "icons/download_outline.svg",
+            "下载",
+        ))
+        .child(icon("favorite-song-collect", "icons/collect.svg", "收藏"))
+        .child(icon("favorite-song-comment", "icons/comment.svg", "评论"))
+        .child(icon("favorite-song-more", "icons/xpoint.svg", "更多"))
+        .into_any_element()
+}
+
 impl FavoriteMusicPage {
     pub fn new(user_profile: Entity<UserProfile>, cx: &mut Context<Self>) -> Self {
         let user_profile_subscription = cx.observe(&user_profile, |_, _, cx| cx.notify());
@@ -281,6 +343,7 @@ impl FavoriteMusicPage {
             songs,
             index_width,
             album_width: ALBUM_WIDTH_DEFAULT,
+            hovered_row: None,
         }
     }
 
@@ -357,20 +420,59 @@ impl FavoriteMusicPage {
             .into_any_element()
     }
 
+    /// 记下鼠标悬浮在哪一行。
+    ///
+    /// 只在真的换了行时 `notify()`：鼠标在同一行内移动会反复触发 hover 事件，
+    /// 每次都重绘整页太浪费。
+    ///
+    /// 「离开」只清掉自己那一行：鼠标从第 3 行移到第 4 行时，两行的 leave / enter 顺序
+    /// 没有保证，无条件置空就会出现"鼠标明明在第 4 行、图标却闪一下没了"。
+    fn set_hovered_row(&mut self, index: usize, hovered: bool, cx: &mut Context<Self>) {
+        let next = if hovered {
+            Some(index)
+        } else if self.hovered_row == Some(index) {
+            None
+        } else {
+            self.hovered_row
+        };
+        if next != self.hovered_row {
+            self.hovered_row = next;
+            cx.notify();
+        }
+    }
+
     fn song_cells(&mut self, index: usize, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let colors = Theme::global(cx).tokens.colors;
         let song = &self.songs[index];
         let liked = song.liked;
+        let hovered = self.hovered_row == Some(index);
+        // 序号格的固定部分：两种内容（序号 / 播放键）共用同一套宽度和对齐方式，
+        // 靠右统一走 flex 的 `justify_end`，不给谁单独算一套。
+        let index_cell = div()
+            .w_full()
+            .flex()
+            .justify_end()
+            .whitespace_nowrap()
+            .font_family(DOLPHIN_FAMILY);
         vec![
-            div()
-                // 铺满单元格后再靠右对齐；nowrap 兜底，序号永远不该折成两行。
-                .w_full()
-                .text_right()
-                .whitespace_nowrap()
-                .text_color(colors.muted_foreground)
-                .font_family(DOLPHIN_FAMILY)
-                .child(format!("{:02}", index + 1))
-                .into_any_element(),
+            if hovered {
+                // hover 时序号让位给播放键
+                // `play.svg` 的三角在画布里右边自带空白，光靠 `justify_end` 贴不到边
+                index_cell
+                    .child(div().mr(px(-3.)).child(row_hover_icon(
+                        ("favorite-song-play", index),
+                        "icons/play.svg",
+                        "播放",
+                        px(20.),
+                        colors,
+                    )))
+                    .into_any_element()
+            } else {
+                index_cell
+                    .text_color(colors.muted_foreground)
+                    .child(format!("{:02}", index + 1))
+                    .into_any_element()
+            },
             div()
                 .flex()
                 .items_center()
@@ -398,40 +500,52 @@ impl FavoriteMusicPage {
                         ),
                 )
                 .child(
+                    // 标题这一格横向分成两块：左边是两行文字，右边是 hover 时才出现的操作图标。
+                    // 文字那块保持 `flex_1 + min_w(0)`，所以宽度不够时先截断文字、列宽不变。
                     div()
                         .min_w(px(0.))
                         .flex_1()
-                        // 标题行：标题和副标题是同一行文字（见 title_with_subtitle），
-                        // 所以窄了只会出现一个省略号。
+                        .flex()
+                        .items_center()
                         .child(
                             div()
-                                .text_size(TITLE_TEXT_SIZE)
-                                .truncate()
-                                .child(title_with_subtitle(song, colors)),
-                        )
-                        .child(
-                            // 歌手/制作人：音质徽章 + 名字。名字不写字号，继承行内的 ROW_TEXT_SIZE。
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(4.))
                                 .min_w(px(0.))
-                                // 徽章用 img() 才保得住原始配色；宽度由 img() 按图片比例自动定，
-                                // flex_none 是为了让它别被压缩（空间不够时该截断的是歌手名）。
-                                .child(
-                                    img(song.quality.badge())
-                                        .h(QUALITY_BADGE_HEIGHT)
-                                        .flex_none(),
-                                )
+                                .flex_1()
+                                // 标题行：标题和副标题是同一行文字（见 title_with_subtitle），
+                                // 所以窄了只会出现一个省略号。
                                 .child(
                                     div()
-                                        .min_w(px(0.))
+                                        .text_size(TITLE_TEXT_SIZE)
                                         .truncate()
-                                        .font_weight(SECONDARY_FONT_WEIGHT)
-                                        .text_color(colors.muted_foreground)
-                                        .child(song.artists.join(" / ")),
+                                        .child(title_with_subtitle(song, colors)),
+                                )
+                                .child(
+                                    // 歌手/制作人：音质徽章 + 名字。名字不写字号，继承行内的 ROW_TEXT_SIZE。
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(4.))
+                                        .min_w(px(0.))
+                                        // 徽章用 img() 才保得住原始配色；宽度由 img() 按图片比例自动定，
+                                        // flex_none 是为了让它别被压缩（空间不够时该截断的是歌手名）。
+                                        .child(
+                                            img(song.quality.badge())
+                                                .h(QUALITY_BADGE_HEIGHT)
+                                                .flex_none(),
+                                        )
+                                        .child(
+                                            div()
+                                                .min_w(px(0.))
+                                                .truncate()
+                                                .font_weight(SECONDARY_FONT_WEIGHT)
+                                                .text_color(colors.muted_foreground)
+                                                .child(song.artists.join(" / ")),
+                                        ),
                                 ),
-                        ),
+                        )
+                        // 只在悬浮这一行时才把图标挂上。这和"渲染出来但隐形"是两回事：
+                        // 隐形元素照样占宽度、也照样能被点到，会凭空吃掉标题宽度和一片点击热区。
+                        .when(hovered, |title| title.child(row_actions(index, colors))),
                 )
                 .into_any_element(),
             div()
@@ -441,11 +555,15 @@ impl FavoriteMusicPage {
                 .child(song.album.clone())
                 .into_any_element(),
             // 裸 SVG，没有圆形底色：已喜欢是实心红心，未喜欢是勾线灰心。
+            // 换这一对（`heart*`）是因为它的勾线和实心是**同一个轮廓**：20px 下墨迹都是
+            // 16.1 × 15.2，切换只变颜色和填充。旧的那对（`like*`）两个版本尺寸不一致
+            // （勾线 17.3 / 实心 16.1），点亮时连大小都会跳一下。
+            // `like.svg` / `like_outline.svg` 仍留给别处（播放栏那个 "10w+" 计数器）。
             svg()
                 .path(if liked {
-                    "icons/like.svg"
+                    "icons/heart.svg"
                 } else {
-                    "icons/like_outline.svg"
+                    "icons/heart_outline.svg"
                 })
                 // 和 header 右上角那排图标同一个尺寸。
                 .size(IconSize::Small.pixels())
@@ -531,6 +649,7 @@ impl Render for FavoriteMusicPage {
                     self.columns(),
                     self.songs.len(),
                     |this, index, _, cx| this.song_cells(index, cx),
+                    |this, index, hovered, cx| this.set_hovered_row(index, hovered, cx),
                     cx,
                 )
                 .into_any_element();
