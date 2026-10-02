@@ -213,11 +213,6 @@ impl Render for PlayerBar {
             .size(play_pause_icon_size)
             .text_color(colors.primary_foreground)
             .into_any_element();
-        let playback = self.playback.read(cx);
-        let playback_message = playback
-            .error
-            .clone()
-            .or_else(|| playback.loading.then(|| "正在加载音频…".to_string()));
 
         div()
             .w_full()
@@ -296,13 +291,7 @@ impl Render for PlayerBar {
                                             .text_color(colors.muted_foreground)
                                             .text_size(px(13.))
                                             .truncate()
-                                            .when_some(
-                                                playback_message.clone(),
-                                                |label, message| label.child(message),
-                                            )
-                                            .when(playback_message.is_none(), |label| {
-                                                label.child(artist)
-                                            }),
+                                            .child(artist),
                                     ),
                             )
                             .child(interaction_count(

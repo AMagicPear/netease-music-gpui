@@ -1,4 +1,4 @@
-use std::{collections::HashMap, io, time::Duration};
+use std::{collections::HashMap, io, sync::Arc, time::Duration};
 
 use gpui::Global;
 use ncm_api_rs::{ApiClient, ApiResponse, NcmError, Query, create_client};
@@ -14,16 +14,25 @@ use crate::state::{
 pub struct MusicApi {
     pub client: ApiClient,
     pub runtime: Runtime,
+    http: Arc<reqwest_client::ReqwestClient>,
     audio_http: reqwest::Client,
 }
 
 impl Global for MusicApi {}
 
+pub struct AudioResponse {
+    pub body: reqwest::Response,
+    pub byte_len: Option<u64>,
+    pub duration: Option<Duration>,
+}
+
 impl MusicApi {
-    pub fn http_client(&self) -> std::sync::Arc<reqwest_client::ReqwestClient> {
-        // 让 GPUI 的图片请求复用现有 Tokio 运行时；不携带账号 COOKIE。
-        let _runtime = self.runtime.enter();
-        std::sync::Arc::new(reqwest_client::ReqwestClient::new())
+    pub fn http_client(&self) -> Arc<reqwest_client::ReqwestClient> {
+        self.http.clone()
+    }
+
+    pub fn audio_http(&self) -> reqwest::Client {
+        self.audio_http.clone()
     }
 
     pub fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
@@ -32,13 +41,23 @@ impl MusicApi {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "COOKIE 环境变量为空").into());
         }
 
+        let runtime = Runtime::new()?;
+        let audio_http = reqwest::Client::builder()
+            .use_rustls_tls()
+            .connect_timeout(Duration::from_secs(10))
+            .read_timeout(Duration::from_secs(20))
+            .build()?;
+        let http = {
+            // GPUI 适配器使用 gpui-pre-reqwest 分支，单独复用图片客户端与 Tokio 运行时。
+            // 图片和音频的 HTTP 客户端都不向资源服务器发送账号 COOKIE。
+            let _runtime = runtime.enter();
+            Arc::new(reqwest_client::ReqwestClient::new())
+        };
         Ok(Self {
             client: create_client(Some(cookie)),
-            runtime: Runtime::new()?,
-            audio_http: reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(10))
-                .timeout(Duration::from_secs(90))
-                .build()?,
+            runtime,
+            http,
+            audio_http,
         })
     }
 
@@ -98,15 +117,11 @@ impl MusicApi {
         ]
     }
 
-    pub fn audio_http(&self) -> reqwest::Client {
-        self.audio_http.clone()
-    }
-
-    pub async fn song_audio(
+    pub async fn song_stream(
         client: ApiClient,
         http: reqwest::Client,
         song_id: u64,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<AudioResponse, String> {
         let response = Self::request(
             client.song_url_v1(
                 &Query::new()
@@ -116,35 +131,30 @@ impl MusicApi {
         )
         .await?;
         let url = song_audio_url(&response.body, song_id)?;
-        let mut response = http
-            .get(url)
-            .send()
+        let track = response.body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|track| track["id"].as_u64() == Some(song_id))
+            .unwrap();
+        let duration = track["time"]
+            .as_u64()
+            .filter(|time| *time > 0)
+            .map(Duration::from_millis);
+        let size = track["size"].as_u64().filter(|size| *size > 0);
+        let response = tokio::time::timeout(Duration::from_secs(20), http.get(url).send())
             .await
-            .and_then(reqwest::Response::error_for_status)
+            .map_err(|_| "音频连接超时".to_string())?
             .map_err(|_| "音频下载失败，请检查网络后重试".to_string())?;
-        // ponytail: 整首下载后播放，最多 100 MiB；需要更快起播时改用可 seek 的流式缓存。
-        const MAX_AUDIO_BYTES: usize = 100 * 1024 * 1024;
-        if response
-            .content_length()
-            .is_some_and(|size| size > MAX_AUDIO_BYTES as u64)
-        {
-            return Err("音频文件过大，暂不支持播放".into());
+        if !response.status().is_success() {
+            return Err(format!("音频服务器返回错误：{}", response.status()));
         }
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| "音频下载中断，请重试".to_string())?
-        {
-            if bytes.len() + chunk.len() > MAX_AUDIO_BYTES {
-                return Err("音频文件过大，暂不支持播放".into());
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        if bytes.is_empty() {
-            return Err("服务器返回了空音频文件".into());
-        }
-        Ok(bytes)
+        let byte_len = response.content_length().or(size);
+        Ok(AudioResponse {
+            body: response,
+            byte_len,
+            duration,
+        })
     }
 
     pub async fn user_playlists(client: &ApiClient, user_id: u64) -> Result<Vec<Playlist>, String> {

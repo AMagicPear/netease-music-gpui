@@ -1,8 +1,9 @@
+use super::audio::StreamingAudio;
 use super::song::Song;
 use crate::api::MusicApi;
 use gpui::{Context, ReadGlobal};
-use rodio::{Decoder, OutputStream, OutputStreamBuilder, Sink, Source};
-use std::{io::Cursor, time::Duration};
+use rodio::{OutputStream, OutputStreamBuilder, Sink};
+use std::time::Duration;
 
 #[derive(Default)]
 pub struct PlaybackState {
@@ -14,6 +15,7 @@ pub struct PlaybackState {
     queue: Vec<Song>,
     stream: Option<OutputStream>,
     sink: Option<Sink>,
+    audio: Option<StreamingAudio>,
     audio_duration: Option<Duration>,
     generation: u64,
     play_when_ready: bool,
@@ -61,6 +63,7 @@ impl PlaybackState {
         }
         // 丢弃旧 Sink 会立即停止旧音频；OutputStream 必须活到整个播放过程结束。
         self.sink = None;
+        self.audio = None;
         self.current_song = Some(song.clone());
         self.position = Duration::ZERO;
         self.audio_duration = None;
@@ -75,7 +78,7 @@ impl PlaybackState {
                     self.stream = Some(stream);
                 }
                 Err(error) => {
-                    self.error = Some(format!("无法打开音频输出设备：{error}"));
+                    self.fail(format!("无法打开音频输出设备：{error}"));
                     cx.notify();
                     return;
                 }
@@ -86,10 +89,8 @@ impl PlaybackState {
         let client = api.client.clone();
         let http = api.audio_http();
         let request = api.runtime.spawn(async move {
-            let bytes = MusicApi::song_audio(client, http, song.id).await?;
-            tokio::task::spawn_blocking(move || decode_audio(bytes))
-                .await
-                .map_err(|_| "音频解码任务失败".to_string())?
+            let response = MusicApi::song_stream(client, http, song.id).await?;
+            StreamingAudio::start(response).await
         });
         self.request = Some(request.abort_handle());
         cx.spawn(async move |this, cx| {
@@ -104,8 +105,8 @@ impl PlaybackState {
                 this.request = None;
                 this.loading = false;
                 match result {
-                    Ok(source) => {
-                        this.audio_duration = source.total_duration();
+                    Ok((audio, source)) => {
+                        this.audio_duration = audio.duration;
                         let sink = Sink::connect_new(this.stream.as_ref().unwrap().mixer());
                         sink.pause();
                         sink.append(source);
@@ -114,8 +115,9 @@ impl PlaybackState {
                             sink.play();
                         }
                         this.sink = Some(sink);
+                        this.audio = Some(audio);
                     }
-                    Err(error) => this.error = Some(error),
+                    Err(error) => this.fail(error),
                 }
                 cx.notify();
             });
@@ -167,6 +169,11 @@ impl PlaybackState {
     }
 
     fn tick(&mut self, cx: &mut Context<Self>) {
+        if let Some(error) = self.audio.as_ref().and_then(StreamingAudio::error) {
+            self.fail(error);
+            cx.notify();
+            return;
+        }
         if !self.is_playing {
             return;
         }
@@ -175,10 +182,15 @@ impl PlaybackState {
             self.position = self.duration();
             self.is_playing = false;
             self.sink = None;
+            self.audio = None;
             self.change_song(1, cx);
         } else {
-            // 从音频输出端读取时间，暂停、seek 后无需维护另一套计时器。
-            self.position = sink.get_pos().min(self.duration());
+            // 只计已输出的歌曲样本，缓冲期间的静音不计入歌曲进度。
+            self.position = self
+                .audio
+                .as_ref()
+                .map_or(Duration::ZERO, StreamingAudio::position)
+                .min(self.duration());
         }
         cx.notify();
     }
@@ -200,13 +212,21 @@ impl PlaybackState {
             return;
         }
         let position = self.duration().mul_f64(f64::from(progress.clamp(0., 1.)));
-        match self.sink.as_ref().unwrap().try_seek(position) {
-            Ok(()) => {
-                self.position = position;
-                self.error = None;
-            }
-            Err(error) => self.error = Some(format!("无法跳转播放位置：{error}")),
+        if let Some(audio) = &self.audio {
+            // 只提交目标，解码线程负责等待下载和 seek，界面线程立即返回。
+            audio.seek(position);
+            self.position = position;
+            self.error = None;
         }
+    }
+
+    fn fail(&mut self, error: String) {
+        eprintln!("{error}");
+        self.error = Some(error);
+        self.loading = false;
+        self.is_playing = false;
+        self.sink = None;
+        self.audio = None;
     }
 
     pub fn progress(&self) -> f32 {
@@ -219,53 +239,19 @@ impl PlaybackState {
     }
 }
 
-fn decode_audio(bytes: Vec<u8>) -> Result<Decoder<Cursor<Vec<u8>>>, String> {
-    // Cursor 的默认解码构造不会声明可 seek，显式提供长度才能可靠跳转和计算时长。
-    let length = bytes.len() as u64;
-    Decoder::builder()
-        .with_data(Cursor::new(bytes))
-        .with_byte_len(length)
-        .build()
-        .map_err(|error| format!("音频解码失败：{error}"))
-}
-
 impl Drop for PlaybackState {
     fn drop(&mut self) {
         if let Some(request) = self.request.take() {
             request.abort();
         }
         self.sink = None;
+        self.audio = None;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn downloaded_audio_can_decode_and_seek_without_an_output_device() {
-        // 一秒、8 kHz、单声道 16-bit PCM 静音 WAV，不依赖网络或声卡。
-        let data_len = 16000_u32;
-        let mut wav = Vec::new();
-        wav.extend_from_slice(b"RIFF");
-        wav.extend_from_slice(&(36 + data_len).to_le_bytes());
-        wav.extend_from_slice(b"WAVEfmt ");
-        wav.extend_from_slice(&16_u32.to_le_bytes());
-        wav.extend_from_slice(&1_u16.to_le_bytes());
-        wav.extend_from_slice(&1_u16.to_le_bytes());
-        wav.extend_from_slice(&8000_u32.to_le_bytes());
-        wav.extend_from_slice(&16000_u32.to_le_bytes());
-        wav.extend_from_slice(&2_u16.to_le_bytes());
-        wav.extend_from_slice(&16_u16.to_le_bytes());
-        wav.extend_from_slice(b"data");
-        wav.extend_from_slice(&data_len.to_le_bytes());
-        wav.resize(44 + data_len as usize, 0);
-        let mut source = decode_audio(wav).unwrap();
-        assert_eq!(source.total_duration(), Some(Duration::from_secs(1)));
-        source.try_seek(Duration::from_millis(500)).unwrap();
-        assert!(source.next().is_some());
-        assert!(decode_audio(vec![0; 32]).is_err());
-    }
 
     #[test]
     fn progress_and_queue_respect_audio_duration_and_boundaries() {
