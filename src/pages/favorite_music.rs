@@ -44,6 +44,7 @@ const DIVIDER_ID: &str = "favorite-title-divider";
 type DividerDragAnchor = Rc<Cell<(Pixels, f32, Pixels)>>;
 
 use super::ContentPage;
+use crate::assets::thumbnail_url;
 use crate::components::{
     CELL_PADDING, COLUMN_GAP, HEADER_HEIGHT, ROW_TEXT_SIZE, ResizeDragPreview, TabBar, TabChanged,
     TabItem, TableColumn, artist_label, virtual_table,
@@ -411,7 +412,13 @@ impl FavoriteMusicPage {
                         .bg(colors.muted)
                         // picUrl 可以直接使用 API 返回的远程地址。
                         .when_some(song.al.pic_url.clone(), |cover, url| {
-                            cover.child(img(url).size_full().object_fit(ObjectFit::Cover))
+                            // GPUI 的 overflow_hidden 按矩形裁剪，圆角需要直接设置在图片上。
+                            cover.child(
+                                img(thumbnail_url(&url, 72))
+                                    .size_full()
+                                    .rounded(px(4.))
+                                    .object_fit(ObjectFit::Cover),
+                            )
                         }),
                 )
                 .child(
@@ -631,8 +638,27 @@ impl Render for FavoriteMusicPage {
         let user_profile = self.user_profile.read(cx);
         let content = match active_tab {
             _ if library.loading => div()
-                .text_color(colors.muted_foreground)
-                .child("正在加载音乐库…")
+                .id("music-library-loading")
+                .aria_label("加载中")
+                .w_full()
+                .py(px(36.))
+                .flex()
+                .justify_center()
+                .child(
+                    svg()
+                        .path("icons/loading.svg")
+                        .size(px(20.))
+                        .text_color(colors.muted_foreground)
+                        .with_animation(
+                            "library-loading",
+                            Animation::new(std::time::Duration::from_millis(900)).repeat(),
+                            |icon, progress| {
+                                icon.with_transformation(Transformation::rotate(percentage(
+                                    progress,
+                                )))
+                            },
+                        ),
+                )
                 .into_any_element(),
             _ if library.error.is_some() => div()
                 .text_color(colors.muted_foreground)
@@ -728,198 +754,177 @@ impl Render for FavoriteMusicPage {
                 .into_any_element(),
         };
 
+        let cover = div()
+            .size(px(170.))
+            .flex_none()
+            .relative()
+            .when_some(cover_url, |cover, url| {
+                cover
+                    .child(
+                        img(thumbnail_url(&url, 340))
+                            .size_full()
+                            .object_fit(ObjectFit::Cover)
+                            .rounded(px(8.)),
+                    )
+                    // 在封面内部从顶部向下渐淡，播放量放在遮罩上方。
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .rounded(px(8.))
+                            .bg(linear_gradient(
+                                180.,
+                                linear_color_stop(black().alpha(0.2), 0.),
+                                linear_color_stop(black().alpha(0.), 0.35),
+                            )),
+                    )
+            })
+            .when_some(play_count, |cover, count| {
+                cover.child(
+                    div()
+                        .absolute()
+                        .top_1()
+                        .right_2()
+                        .flex()
+                        .items_center()
+                        .text_color(white())
+                        .text_size(px(15.))
+                        .font_family(DOLPHIN_FAMILY)
+                        .child(
+                            svg()
+                                .path("icons/headphone.svg")
+                                .size(px(15.))
+                                .text_color(white()),
+                        )
+                        .child(count.to_string()),
+                )
+            });
+
+        let title = div()
+            .text_size(px(24.))
+            .line_height(rems(3.))
+            .font_weight(FontWeight::BOLD)
+            .text_color(colors.foreground)
+            .child(text!(ContentPage::FavoriteMusic.title()));
+
+        let author = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                Avatar::new()
+                    .with_size(px(26.))
+                    .flex_none()
+                    .src(thumbnail_url(&user_profile.avatar_url, 52)),
+            )
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(colors.secondary_foreground)
+                    .child(user_profile.nickname.clone()),
+            )
+            .when_some(created_date, |row, date| {
+                row.child(
+                    div()
+                        .ml_2()
+                        .text_size(px(12.))
+                        .text_color(colors.muted_foreground)
+                        .font_weight(FontWeight::LIGHT)
+                        .child(date),
+                )
+            });
+
         div()
             // 封面标题区域
             .child(
-                div()
-                    .flex()
-                    .justify_start()
-                    .gap_6()
-                    .child(
-                        div()
-                            .w(px(170.))
-                            .h(px(170.))
-                            .flex_none()
-                            .relative()
-                            .overflow_hidden()
-                            // 歌单封面
-                            .when_some(cover_url, |cover, url| {
-                                cover.child(
-                                    img(url)
-                                        .size_full()
-                                        .object_fit(ObjectFit::Cover)
-                                        .rounded(px(8.)),
-                                )
-                            })
-                            // 播放量
-                            .when_some(play_count, |cover, count| {
-                                cover.child(
-                                    div()
-                                        .absolute()
-                                        .top_1()
-                                        .right_2()
+                div().flex().gap_6().child(cover).child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .justify_between()
+                        .child(div().child(title).child(author))
+                        // 操作按钮组：播放全部 / 下载 / 更多
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(12.))
+                                .child(play_all_button(colors).on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        let id =
+                                            this.library.read(cx).songs.first().map(|song| song.id);
+                                        if let Some(id) = id {
+                                            this.select_song(id, cx);
+                                        }
+                                    },
+                                )))
+                                // 下载：宽度自适应，比 muted 更浅的底 + 比 muted 更浅的描边，
+                                // 文字/图标用比 muted_foreground 深一档的灰保证可读
+                                .child(
+                                    Button::new("favorite-download-button")
+                                        .h(ACTION_BUTTON_HEIGHT)
+                                        .flex_none()
                                         .flex()
                                         .items_center()
+                                        .justify_center()
+                                        .gap(px(4.))
+                                        .px(ACTION_BUTTON_PADDING)
+                                        .border_1()
+                                        .border_color(colors.foreground.alpha(0.06))
+                                        .rounded_lg()
+                                        .bg(colors.foreground.alpha(0.03))
+                                        // 底色本身已有 3%，hover 只抬到 8%（+5 个点），
+                                        // 观感与 header 返回键的 0 → accent(6%) 接近；
+                                        // 按下不再换更深的颜色，统一降整体透明度
+                                        .hover(|style| style.bg(colors.foreground.alpha(0.08)))
+                                        .active(|style| style.opacity(PRESSED_OPACITY))
+                                        .text_size(px(13.))
+                                        .text_color(colors.secondary_foreground)
                                         .child(
                                             svg()
-                                                .path("icons/headphone.svg")
-                                                .size(px(15.))
-                                                .text_color(colors.primary_foreground),
+                                                .path("icons/download.svg")
+                                                .size(px(18.))
+                                                .flex_none()
+                                                .text_color(colors.secondary_foreground),
                                         )
-                                        .text_color(colors.primary_foreground)
-                                        .text_size(px(15.))
-                                        .font_family(DOLPHIN_FAMILY)
-                                        .child(count.to_string()),
+                                        .child("下载"),
                                 )
-                            })
-                            // 正中间的爱心图标，仅「我喜欢的音乐」有
-                            .child(
-                                div()
-                                    .absolute()
-                                    .inset_0()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(
-                                        svg()
-                                            .path("icons/like.svg")
-                                            .size(px(96.))
-                                            .text_color(colors.primary_foreground)
-                                            .opacity(0.95),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .child(
-                                        div()
-                                            .text_size(px(24.))
-                                            .line_height(rems(3.))
-                                            .font_weight(FontWeight::BOLD)
-                                            .text_color(colors.foreground)
-                                            .child(text!(ContentPage::FavoriteMusic.title())),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_row()
-                                            .items_center()
-                                            .gap_2()
-                                            .child(
-                                                Avatar::new()
-                                                    .with_size(px(26.))
-                                                    .flex_none()
-                                                    .src(user_profile.avatar_url.clone()),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_size(px(13.))
-                                                    .font_weight(FontWeight::MEDIUM)
-                                                    .text_color(colors.secondary_foreground)
-                                                    .child(user_profile.nickname.clone()),
-                                            )
-                                            .when_some(created_date, |row, date| {
-                                                row.child(
-                                                    div()
-                                                        .ml_2()
-                                                        .text_size(px(12.))
-                                                        .text_color(colors.muted_foreground)
-                                                        .font_weight(FontWeight::LIGHT)
-                                                        .child(date),
+                                // 更多：固定 36×36 的纯图标按钮，靠 flex 居中
+                                .child(
+                                    Button::new("favorite-more-button")
+                                        .size(px(36.))
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .border_1()
+                                        .border_color(colors.foreground.alpha(0.06))
+                                        .rounded_lg()
+                                        .bg(colors.foreground.alpha(0.03))
+                                        .hover(|style| style.bg(colors.foreground.alpha(0.08)))
+                                        .active(|style| style.opacity(PRESSED_OPACITY))
+                                        // 弹出系统原生菜单
+                                        .on_click(|event, window, cx| {
+                                            NativeMenu::new()
+                                                .menu("分享…", Box::new(Share))
+                                                .menu("批量操作", Box::new(BatchOperation))
+                                                .menu(
+                                                    "添加全部至播放列表",
+                                                    Box::new(AddAllToPlaylist),
                                                 )
-                                            }),
-                                    ),
-                            )
-                            // 操作按钮组：播放全部 / 下载 / 更多
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(12.))
-                                    .child(play_all_button(colors).on_click(cx.listener(
-                                        |this, _, _, cx| {
-                                            let id = this
-                                                .library
-                                                .read(cx)
-                                                .songs
-                                                .first()
-                                                .map(|song| song.id);
-                                            if let Some(id) = id {
-                                                this.select_song(id, cx);
-                                            }
-                                        },
-                                    )))
-                                    // 下载：宽度自适应，比 muted 更浅的底 + 比 muted 更浅的描边，
-                                    // 文字/图标用比 muted_foreground 深一档的灰保证可读
-                                    .child(
-                                        Button::new("favorite-download-button")
-                                            .h(ACTION_BUTTON_HEIGHT)
-                                            .flex_none()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .gap(px(4.))
-                                            .px(ACTION_BUTTON_PADDING)
-                                            .border_1()
-                                            .border_color(colors.foreground.alpha(0.06))
-                                            .rounded_lg()
-                                            .bg(colors.foreground.alpha(0.03))
-                                            // 底色本身已有 3%，hover 只抬到 8%（+5 个点），
-                                            // 观感与 header 返回键的 0 → accent(6%) 接近；
-                                            // 按下不再换更深的颜色，统一降整体透明度
-                                            .hover(|style| style.bg(colors.foreground.alpha(0.08)))
-                                            .active(|style| style.opacity(PRESSED_OPACITY))
-                                            .text_size(px(13.))
-                                            .text_color(colors.secondary_foreground)
-                                            .child(
-                                                svg()
-                                                    .path("icons/download.svg")
-                                                    .size(px(18.))
-                                                    .flex_none()
-                                                    .text_color(colors.secondary_foreground),
-                                            )
-                                            .child("下载"),
-                                    )
-                                    // 更多：固定 36×36 的纯图标按钮，靠 flex 居中
-                                    .child(
-                                        Button::new("favorite-more-button")
-                                            .size(px(36.))
-                                            .flex_none()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .border_1()
-                                            .border_color(colors.foreground.alpha(0.06))
-                                            .rounded_lg()
-                                            .bg(colors.foreground.alpha(0.03))
-                                            .hover(|style| style.bg(colors.foreground.alpha(0.08)))
-                                            .active(|style| style.opacity(PRESSED_OPACITY))
-                                            // 弹出系统原生菜单
-                                            .on_click(|event, window, cx| {
-                                                NativeMenu::new()
-                                                    .menu("分享…", Box::new(Share))
-                                                    .menu("批量操作", Box::new(BatchOperation))
-                                                    .menu(
-                                                        "添加全部至播放列表",
-                                                        Box::new(AddAllToPlaylist),
-                                                    )
-                                                    .show(event.position(), window, cx);
-                                            })
-                                            .child(
-                                                svg()
-                                                    .path("icons/xpoint.svg")
-                                                    .size(px(16.))
-                                                    .flex_none()
-                                                    .text_color(colors.secondary_foreground),
-                                            ),
-                                    ),
-                            ),
-                    ),
+                                                .show(event.position(), window, cx);
+                                        })
+                                        .child(
+                                            svg()
+                                                .path("icons/xpoint.svg")
+                                                .size(px(16.))
+                                                .flex_none()
+                                                .text_color(colors.secondary_foreground),
+                                        ),
+                                ),
+                        ),
+                ),
             )
             // 控件区域
             .child(div().mt(px(28.)).child(self.tabs.clone()))

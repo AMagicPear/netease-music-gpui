@@ -4,7 +4,7 @@ use gpui::Global;
 use ncm_api_rs::{ApiClient, ApiResponse, NcmError, Query, create_client};
 use tokio::runtime::Runtime;
 
-use crate::state::user::UserProfile;
+use crate::state::user::{UserProfile, VipInfo};
 use crate::state::{playlist::Playlist, song::Song};
 
 /// GPUI 负责界面，Tokio 负责 SDK 的网络请求。客户端和运行时在应用内复用。
@@ -36,10 +36,22 @@ impl MusicApi {
 
     pub async fn user_profile(client: ApiClient) -> Result<UserProfile, String> {
         let mut response = Self::request(client.user_account(&Query::new())).await?;
-        let profile: UserProfile = serde_json::from_value(response.body["profile"].take())
+        let mut profile: UserProfile = serde_json::from_value(response.body["profile"].take())
             .map_err(|_| "账号资料格式无效，COOKIE 可能已失效".to_string())?;
         if profile.user_id == 0 || profile.nickname.trim().is_empty() {
             return Err("账号资料无效，COOKIE 可能已失效".into());
+        }
+        match Self::request(
+            client.vip_info(&Query::new().param("uid", &profile.user_id.to_string())),
+        )
+        .await
+        {
+            Ok(mut response) => {
+                profile.vip = serde_json::from_value::<VipInfo>(response.body["data"].take())
+                    .map_err(|error| eprintln!("会员资料格式无效：{error}"))
+                    .ok();
+            }
+            Err(message) => eprintln!("获取会员资料失败：{message}"),
         }
         Ok(profile)
     }
@@ -58,6 +70,28 @@ impl MusicApi {
             ));
         }
         Ok(response)
+    }
+
+    pub async fn song_counts(client: ApiClient, song_id: u64) -> [Result<u64, String>; 2] {
+        let query = Query::new()
+            .param("id", &song_id.to_string())
+            .param("limit", "0");
+        let (likes, comments) = tokio::join!(
+            Self::request(client.song_red_count(&query)),
+            Self::request(client.comment_music(&query)),
+        );
+        [
+            likes.and_then(|response| {
+                response.body["data"]["count"]
+                    .as_u64()
+                    .ok_or_else(|| "红心计数格式无效".into())
+            }),
+            comments.and_then(|response| {
+                response.body["total"]
+                    .as_u64()
+                    .ok_or_else(|| "评论计数格式无效".into())
+            }),
+        ]
     }
 
     pub async fn library(
@@ -129,12 +163,29 @@ mod tests {
     #[ignore = "需要 COOKIE 环境变量和网络连接"]
     fn cookie_can_load_real_library() {
         let api = MusicApi::from_env().expect("无法读取 COOKIE 环境变量");
+        let counts = api
+            .runtime
+            .block_on(MusicApi::song_counts(api.client.clone(), 186016));
+        for count in counts {
+            assert!(count.expect("歌曲互动计数请求失败") > 0);
+        }
         let profile = api
             .runtime
             .block_on(MusicApi::user_profile(api.client.clone()))
             .expect("无法获取登录账号");
         assert!(profile.user_id > 0);
         assert!(!profile.nickname.is_empty());
+        let vip = profile.vip.as_ref().expect("会员资料无法加载");
+        if let Some(badge) =
+            vip.badge_path(time::OffsetDateTime::now_utc().unix_timestamp() as u64 * 1000)
+        {
+            assert!(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("assets")
+                    .join(badge)
+                    .is_file()
+            );
+        }
         let (playlists, songs, likes) = api
             .runtime
             .block_on(MusicApi::library(api.client.clone(), profile.user_id))
@@ -157,10 +208,13 @@ mod tests {
             .iter()
             .find_map(|song| song.al.pic_url.as_deref())
             .expect("缺少歌曲封面");
+        let thumbnail = crate::assets::thumbnail_url(cover, 72);
+        let mut downloaded_sizes = Vec::new();
         for url in [
             &profile.avatar_url,
             favorite.cover_img_url.as_deref().expect("缺少歌单封面"),
             cover,
+            &thumbnail,
         ] {
             api.runtime.block_on(async {
                 tokio::time::timeout(Duration::from_secs(20), async {
@@ -179,10 +233,19 @@ mod tests {
                         .await
                         .expect("图片读取失败");
                     assert!(!bytes.is_empty());
+                    downloaded_sizes.push(bytes.len());
                 })
                 .await
                 .expect("图片下载超时");
             });
         }
+        assert!(
+            downloaded_sizes[3] < downloaded_sizes[2],
+            "缩略图应比原图小"
+        );
+        eprintln!(
+            "歌曲封面：原图 {} 字节，72px 缩略图 {} 字节",
+            downloaded_sizes[2], downloaded_sizes[3]
+        );
     }
 }

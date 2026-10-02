@@ -4,6 +4,7 @@ use gpui_kit::base::{Button, ColorTokens, Theme};
 use gpui_kit::component::TitleBar;
 
 use super::{ContentPage, LIBRARY_PAGES, MAIN_PAGES};
+use crate::assets::thumbnail_url;
 use crate::state::{library::MusicLibrary, playlist::Playlist};
 use crate::theme::IconSize;
 
@@ -210,7 +211,13 @@ fn created_playlist(playlist: &Playlist, colors: ColorTokens) -> impl IntoElemen
     sidebar_row(("created-playlist", playlist.id), px(42.))
         .hover(|style| style.bg(colors.accent))
         .when_some(playlist.cover_img_url.clone(), |row, cover| {
-            row.child(img(cover).size(px(32.)).rounded(px(4.)).flex_none())
+            row.child(
+                img(thumbnail_url(&cover, 64))
+                    .size(px(32.))
+                    .rounded(px(4.))
+                    .object_fit(ObjectFit::Cover)
+                    .flex_none(),
+            )
         })
         .child(
             div()
@@ -219,6 +226,7 @@ fn created_playlist(playlist: &Playlist, colors: ColorTokens) -> impl IntoElemen
                 .min_w(px(0.))
                 .text_size(px(12.))
                 .line_height(px(16.))
+                .line_clamp(2)
                 .text_color(colors.secondary_foreground)
                 .child(playlist.name.clone()),
         )

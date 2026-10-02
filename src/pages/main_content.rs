@@ -1,10 +1,11 @@
 use std::{cell::Cell, collections::HashMap, rc::Rc};
 
-use gpui::prelude::StatefulInteractiveElement;
+use gpui::prelude::{FluentBuilder, StatefulInteractiveElement};
 use gpui::*;
 
 use super::ContentPage;
 use super::sidebar_page::{SidebarChanged, SidebarPage};
+use crate::assets::thumbnail_url;
 use crate::components::ResizeDragPreview;
 use crate::state::user::UserProfile;
 use crate::state::{library::MusicLibrary, playback::PlaybackState};
@@ -134,6 +135,7 @@ fn page_header(
     search_input: Entity<InputState>,
     nickname: String,
     avatar_url: String,
+    vip_badge: Option<String>,
 ) -> impl IntoElement {
     TitleBar::new()
         .h(px(72.))
@@ -192,6 +194,9 @@ fn page_header(
                         .text_color(colors.foreground.alpha(0.7))
                         .hover(|style| style.text_color(colors.foreground))
                         .child(nickname)
+                        .when_some(vip_badge, |menu, badge| {
+                            menu.child(img(badge).h(px(16.)).flex_none())
+                        })
                         .child(
                             svg()
                                 .path("icons/unfold.svg")
@@ -255,7 +260,12 @@ impl Render for MainContent {
                         colors,
                         self.search_input.clone(),
                         user_profile.nickname.clone(),
-                        user_profile.avatar_url.clone(),
+                        thumbnail_url(&user_profile.avatar_url, 56),
+                        user_profile.vip.as_ref().and_then(|vip| {
+                            vip.badge_path(
+                                time::OffsetDateTime::now_utc().unix_timestamp() as u64 * 1000,
+                            )
+                        }),
                     ))
                     // 右侧具体页面
                     .child(
