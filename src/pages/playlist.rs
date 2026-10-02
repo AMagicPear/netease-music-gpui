@@ -38,32 +38,32 @@ const DURATION_COLUMN_WIDTH: Pixels = px(66.);
 
 /// 分界线的元素 id，同时用作它作为 hover group 的名字。
 /// 两处必须完全一致 `group_hover` 才会响应，所以抽成常量而不是写两遍字面量。
-const DIVIDER_ID: &str = "favorite-title-divider";
+const DIVIDER_ID: &str = "playlist-title-divider";
 
 /// 起拖时的鼠标 x、专辑占比、两列可用宽度。
 type DividerDragAnchor = Rc<Cell<(Pixels, f32, Pixels)>>;
 
-use super::ContentPage;
 use crate::assets::thumbnail_url;
 use crate::components::{
     CELL_PADDING, COLUMN_GAP, HEADER_HEIGHT, ROW_TEXT_SIZE, ResizeDragPreview, TabBar, TabChanged,
     TabItem, TableColumn, artist_label, virtual_table,
 };
-use crate::state::user::UserProfile;
-use crate::state::{library::MusicLibrary, playback::PlaybackState, song::Song};
+use crate::state::{
+    library::MusicLibrary, playback::PlaybackState, playlist_detail::PlaylistDetail, song::Song,
+};
 use crate::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
 
 // 「更多」菜单里的三个命令。
-actions!(favorite_music, [Share, BatchOperation, AddAllToPlaylist]);
+actions!(playlist, [Share, BatchOperation, AddAllToPlaylist]);
 
 #[derive(Clone, Copy)]
-enum FavoriteMusicTab {
+enum PlaylistTab {
     Songs,
     Comments,
     Collectors,
 }
 
-impl FavoriteMusicTab {
+impl PlaylistTab {
     fn content_title(self) -> &'static str {
         match self {
             Self::Songs => "歌曲列表",
@@ -73,16 +73,17 @@ impl FavoriteMusicTab {
     }
 }
 
-/// 我喜欢的音乐
-pub struct FavoriteMusicPage {
-    user_profile: Entity<UserProfile>,
-    _user_profile_subscription: Subscription,
+/// 所有歌单共享一个 View；歌单数据由独立的 Entity 管理。
+pub struct PlaylistPage {
+    detail: Entity<PlaylistDetail>,
+    _detail_subscription: Subscription,
+    playlist_id: Option<u64>,
     tabs: Entity<TabBar>,
     _tabs_subscription: Subscription,
     library: Entity<MusicLibrary>,
     playback: Entity<PlaybackState>,
     _library_subscription: Subscription,
-    /// 原始歌单顺序保存在 library.songs；这里只保存显示顺序。
+    /// 原始歌单顺序保存在 detail.songs；这里只保存显示顺序。
     display_order: Vec<usize>,
     sort: Option<(SongSort, bool)>,
     album_share: f32,
@@ -164,24 +165,23 @@ fn row_actions(index: u64, colors: ColorTokens) -> AnyElement {
         .gap(px(10.))
         .ml(px(10.))
         .child(icon(
-            "favorite-song-download",
+            "playlist-song-download",
             "icons/download_outline.svg",
             "下载",
         ))
-        .child(icon("favorite-song-collect", "icons/collect.svg", "收藏"))
-        .child(icon("favorite-song-comment", "icons/comment.svg", "评论"))
-        .child(icon("favorite-song-more", "icons/xpoint.svg", "更多"))
+        .child(icon("playlist-song-collect", "icons/collect.svg", "收藏"))
+        .child(icon("playlist-song-comment", "icons/comment.svg", "评论"))
+        .child(icon("playlist-song-more", "icons/xpoint.svg", "更多"))
         .into_any_element()
 }
 
-impl FavoriteMusicPage {
+impl PlaylistPage {
     pub fn new(
-        user_profile: Entity<UserProfile>,
         library: Entity<MusicLibrary>,
         playback: Entity<PlaybackState>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let user_profile_subscription = cx.observe(&user_profile, |_, _, cx| cx.notify());
+        let detail = cx.new(|_| PlaylistDetail::default());
         let tabs = cx.new(|_| {
             TabBar::new(vec![
                 TabItem::new("歌曲"),
@@ -190,21 +190,31 @@ impl FavoriteMusicPage {
             ])
         });
         let tabs_subscription = cx.subscribe(&tabs, |_, _, _: &TabChanged, cx| cx.notify());
-        let library_subscription = cx.observe(&library, |this, library, cx| {
-            let library = library.read(cx);
+        let library_subscription = cx.observe(&library, |_, _, cx| cx.notify());
+        let detail_subscription = cx.observe(&detail, |this, detail, cx| {
+            let detail = detail.read(cx);
+            let changed = this.playlist_id != detail.id;
+            if changed {
+                this.playlist_id = detail.id;
+                this.sort = None;
+                this.hovered_row = None;
+            }
             this.display_order = this.sort.map_or_else(
-                || (0..library.songs.len()).collect(),
-                |(key, descending)| song_order(&library.songs, key, descending),
+                || (0..detail.songs.len()).collect(),
+                |(key, descending)| song_order(&detail.songs, key, descending),
             );
-            let playlist = library.favorite_playlist();
+            let playlist = detail.playlist.as_ref();
             let counts = [
-                Some(library.songs.len().to_string()),
+                playlist.map(|playlist| playlist.track_count.to_string()),
                 playlist
                     .and_then(|playlist| playlist.comment_count)
                     .map(|count| count.to_string()),
                 playlist.map(|playlist| playlist.subscribed_count.to_string()),
             ];
             this.tabs.update(cx, |tabs, cx| {
+                if changed {
+                    tabs.select(0, cx);
+                }
                 for (index, count) in counts.into_iter().enumerate() {
                     tabs.set_count(index, count, cx);
                 }
@@ -212,8 +222,9 @@ impl FavoriteMusicPage {
             cx.notify();
         });
         Self {
-            user_profile,
-            _user_profile_subscription: user_profile_subscription,
+            detail,
+            _detail_subscription: detail_subscription,
+            playlist_id: None,
             tabs,
             _tabs_subscription: tabs_subscription,
             library,
@@ -224,6 +235,18 @@ impl FavoriteMusicPage {
             album_share: 0.35,
             hovered_row: None,
         }
+    }
+
+    pub fn open(&mut self, id: Option<u64>, cx: &mut Context<Self>) {
+        let summary = self
+            .library
+            .read(cx)
+            .playlists
+            .iter()
+            .find(|playlist| Some(playlist.id) == id)
+            .cloned();
+        self.detail
+            .update(cx, |detail, cx| detail.open(id, summary, cx));
     }
 
     fn columns(&self) -> Rc<Vec<TableColumn>> {
@@ -238,7 +261,7 @@ impl FavoriteMusicPage {
 
     fn toggle_sort(&mut self, column: SongSort, cx: &mut Context<Self>) {
         self.sort = next_sort(self.sort, column);
-        let songs = &self.library.read(cx).songs;
+        let songs = &self.detail.read(cx).songs;
         self.display_order = self.sort.map_or_else(
             || (0..songs.len()).collect(),
             |(key, descending)| song_order(songs, key, descending),
@@ -248,7 +271,7 @@ impl FavoriteMusicPage {
 
     fn select_song(&mut self, song_id: u64, cx: &mut Context<Self>) {
         let song = self
-            .library
+            .detail
             .read(cx)
             .songs
             .iter()
@@ -256,9 +279,7 @@ impl FavoriteMusicPage {
             .cloned();
         if let Some(song) = song {
             self.playback.update(cx, |playback, cx| {
-                playback.current_song = Some(song);
-                playback.position = std::time::Duration::ZERO;
-                playback.is_playing = false;
+                playback.select_song(song);
                 cx.notify();
             });
         }
@@ -354,7 +375,8 @@ impl FavoriteMusicPage {
     fn song_cells(&mut self, index: usize, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let colors = Theme::global(cx).tokens.colors;
         let library = self.library.read(cx);
-        let song = &library.songs[self.display_order[index]];
+        let detail = self.detail.read(cx);
+        let song = &detail.songs[self.display_order[index]];
         let song_id = song.id;
         let liked = library.liked_song_ids.contains(&song_id);
         let album_name = song
@@ -378,13 +400,13 @@ impl FavoriteMusicPage {
                 index_cell
                     .child(
                         div()
-                            .id(("favorite-select-song", song_id))
+                            .id(("playlist-select-song", song_id))
                             .mr(px(-3.))
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.select_song(song_id, cx)),
                             )
                             .child(row_hover_icon(
-                                ("favorite-song-play", song_id),
+                                ("playlist-song-play", song_id),
                                 "icons/play.svg",
                                 "播放",
                                 px(20.),
@@ -501,7 +523,7 @@ impl FavoriteMusicPage {
                         style.text_color(colors.foreground)
                     }
                 })
-                .id(("favorite-song-like", song_id))
+                .id(("playlist-song-like", song_id))
                 .aria_label(if liked { "已喜欢" } else { "未喜欢" })
                 .into_any_element(),
             div()
@@ -585,7 +607,7 @@ fn resized_album_share(start: f32, movement: f32, available: f32) -> f32 {
 
 /// 「播放全部」：主题红实心按钮，白字白图标，无边框。
 fn play_all_button(colors: ColorTokens) -> Button {
-    Button::new("favorite-play-all-button")
+    Button::new("playlist-play-all-button")
         .h(ACTION_BUTTON_HEIGHT)
         .flex_none()
         .flex()
@@ -611,16 +633,17 @@ fn play_all_button(colors: ColorTokens) -> Button {
         .child("播放全部")
 }
 
-impl Render for FavoriteMusicPage {
+impl Render for PlaylistPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = Theme::global(cx).tokens.colors;
         let active_tab = [
-            FavoriteMusicTab::Songs,
-            FavoriteMusicTab::Comments,
-            FavoriteMusicTab::Collectors,
+            PlaylistTab::Songs,
+            PlaylistTab::Comments,
+            PlaylistTab::Collectors,
         ][self.tabs.read(cx).selected_index()];
         let library = self.library.read(cx);
-        let playlist = library.favorite_playlist();
+        let detail = self.detail.read(cx);
+        let playlist = detail.playlist.as_ref();
         let cover_url = playlist.and_then(|playlist| playlist.cover_img_url.clone());
         let play_count = playlist.map(|playlist| playlist.play_count);
         let created_date = playlist.and_then(|playlist| {
@@ -635,10 +658,20 @@ impl Render for FavoriteMusicPage {
                     )
                 })
         });
-        let user_profile = self.user_profile.read(cx);
+        let error = detail
+            .error
+            .as_ref()
+            .or_else(|| {
+                if detail.id.is_none() {
+                    library.error.as_ref()
+                } else {
+                    None
+                }
+            })
+            .cloned();
         let content = match active_tab {
-            _ if library.loading => div()
-                .id("music-library-loading")
+            _ if detail.loading || (detail.id.is_none() && library.loading) => div()
+                .id("playlist-loading")
                 .aria_label("加载中")
                 .w_full()
                 .py(px(36.))
@@ -650,7 +683,7 @@ impl Render for FavoriteMusicPage {
                         .size(px(20.))
                         .text_color(colors.muted_foreground)
                         .with_animation(
-                            "library-loading",
+                            "playlist-loading-animation",
                             Animation::new(std::time::Duration::from_millis(900)).repeat(),
                             |icon, progress| {
                                 icon.with_transformation(Transformation::rotate(percentage(
@@ -660,19 +693,39 @@ impl Render for FavoriteMusicPage {
                         ),
                 )
                 .into_any_element(),
-            _ if library.error.is_some() => div()
+            _ if error.is_some() => div()
                 .text_color(colors.muted_foreground)
-                .child(library.error.clone().unwrap())
+                .child(error.unwrap())
+                .when(detail.id.is_some() || library.user_id != 0, |message| {
+                    message.child(Button::new("playlist-retry").ml_2().child("重试").on_click(
+                        cx.listener(|this, _, _, cx| {
+                            if this.detail.read(cx).id.is_some() {
+                                this.open(this.playlist_id, cx);
+                            } else {
+                                this.library.update(cx, |library, cx| library.retry(cx));
+                            }
+                        }),
+                    ))
+                })
                 .into_any_element(),
-            FavoriteMusicTab::Songs => {
+            _ if detail.id.is_none() => div()
+                .text_color(colors.muted_foreground)
+                .child("暂无歌单")
+                .into_any_element(),
+            PlaylistTab::Songs if self.display_order.is_empty() => div()
+                .py_8()
+                .text_color(colors.muted_foreground)
+                .child("这个歌单还没有歌曲")
+                .into_any_element(),
+            PlaylistTab::Songs => {
                 let header_layout = Rc::new(Cell::new([Bounds::default(); 2]));
                 let table = virtual_table(
                     cx.entity(),
-                    "favorite-songs",
+                    "playlist-songs",
                     self.columns(),
                     self.display_order.len(),
                     |this, index, _, cx| this.song_cells(index, cx),
-                    |this, index, cx| this.library.read(cx).songs[this.display_order[index]].id,
+                    |this, index, cx| this.detail.read(cx).songs[this.display_order[index]].id,
                     {
                         let view = cx.entity();
                         let sort = self.sort;
@@ -685,12 +738,12 @@ impl Render for FavoriteMusicPage {
                             if let Some(key) = key {
                                 let view = view.clone();
                                 let group = if index == 1 {
-                                    "favorite-title-header"
+                                    "playlist-title-header"
                                 } else {
-                                    "favorite-album-header"
+                                    "playlist-album-header"
                                 };
                                 let (icon, label) = sort_label(sort, key);
-                                Button::new(("favorite-sort", index))
+                                Button::new(("playlist-sort", index))
                                     .group(group)
                                     .w_full()
                                     .h(px(30.))
@@ -803,31 +856,43 @@ impl Render for FavoriteMusicPage {
         let title = div()
             .text_size(px(24.))
             .line_height(rems(3.))
+            .line_clamp(2)
             .font_weight(FontWeight::BOLD)
             .text_color(colors.foreground)
-            .child(text!(ContentPage::FavoriteMusic.title()));
+            .child(
+                playlist
+                    .map(|playlist| playlist.name.clone())
+                    .unwrap_or_else(|| "歌单".into()),
+            );
 
         let author = div()
             .flex()
+            .min_w(px(0.))
             .items_center()
             .gap_2()
-            .child(
-                Avatar::new()
-                    .with_size(px(26.))
-                    .flex_none()
-                    .src(thumbnail_url(&user_profile.avatar_url, 52)),
-            )
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(colors.secondary_foreground)
-                    .child(user_profile.nickname.clone()),
-            )
+            .when_some(playlist, |author, playlist| {
+                author
+                    .child(
+                        Avatar::new()
+                            .with_size(px(26.))
+                            .flex_none()
+                            .src(thumbnail_url(&playlist.creator.avatar_url, 52)),
+                    )
+                    .child(
+                        div()
+                            .min_w(px(0.))
+                            .truncate()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(colors.secondary_foreground)
+                            .child(playlist.creator.nickname.clone()),
+                    )
+            })
             .when_some(created_date, |row, date| {
                 row.child(
                     div()
                         .ml_2()
+                        .flex_none()
                         .text_size(px(12.))
                         .text_color(colors.muted_foreground)
                         .font_weight(FontWeight::LIGHT)
@@ -842,6 +907,8 @@ impl Render for FavoriteMusicPage {
                     div()
                         .flex()
                         .flex_col()
+                        .flex_1()
+                        .min_w(px(0.))
                         .justify_between()
                         .child(div().child(title).child(author))
                         // 操作按钮组：播放全部 / 下载 / 更多
@@ -852,8 +919,12 @@ impl Render for FavoriteMusicPage {
                                 .gap(px(12.))
                                 .child(play_all_button(colors).on_click(cx.listener(
                                     |this, _, _, cx| {
-                                        let id =
-                                            this.library.read(cx).songs.first().map(|song| song.id);
+                                        let id = this
+                                            .detail
+                                            .read(cx)
+                                            .songs
+                                            .get(*this.display_order.first().unwrap_or(&0))
+                                            .map(|song| song.id);
                                         if let Some(id) = id {
                                             this.select_song(id, cx);
                                         }
@@ -862,7 +933,7 @@ impl Render for FavoriteMusicPage {
                                 // 下载：宽度自适应，比 muted 更浅的底 + 比 muted 更浅的描边，
                                 // 文字/图标用比 muted_foreground 深一档的灰保证可读
                                 .child(
-                                    Button::new("favorite-download-button")
+                                    Button::new("playlist-download-button")
                                         .h(ACTION_BUTTON_HEIGHT)
                                         .flex_none()
                                         .flex()
@@ -892,7 +963,7 @@ impl Render for FavoriteMusicPage {
                                 )
                                 // 更多：固定 36×36 的纯图标按钮，靠 flex 居中
                                 .child(
-                                    Button::new("favorite-more-button")
+                                    Button::new("playlist-more-button")
                                         .size(px(36.))
                                         .flex_none()
                                         .flex()
@@ -929,13 +1000,49 @@ impl Render for FavoriteMusicPage {
             // 控件区域
             .child(div().mt(px(28.)).child(self.tabs.clone()))
             // 具体内容区域
+            .when_some(library.likes_error.as_ref(), |page, message| {
+                page.child(
+                    div()
+                        .text_color(colors.muted_foreground)
+                        .text_size(px(12.))
+                        .child(format!("喜欢状态暂不可用：{message}")),
+                )
+            })
             .child(content)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ALBUM_SHARE_MAX, ALBUM_SHARE_MIN, resized_album_share};
+    use super::{
+        ALBUM_SHARE_MAX, ALBUM_SHARE_MIN, Song, SongSort, next_sort, resized_album_share,
+        song_order,
+    };
+
+    #[test]
+    fn sorting_keeps_source_order_and_returns_to_default() {
+        let songs = vec![
+            Song {
+                id: 1,
+                name: "b".into(),
+                ..Default::default()
+            },
+            Song {
+                id: 2,
+                name: "a".into(),
+                ..Default::default()
+            },
+        ];
+        assert_eq!(song_order(&songs, SongSort::Title, false), [1, 0]);
+        assert_eq!(song_order(&songs, SongSort::Title, true), [0, 1]);
+        assert_eq!(songs[0].id, 1);
+        let mut sort = None;
+        for _ in 0..4 {
+            sort = next_sort(sort, SongSort::Title);
+            assert!(sort.is_some());
+        }
+        assert!(next_sort(sort, SongSort::Title).is_none());
+    }
 
     #[test]
     fn resize_preserves_ratio_and_bounds() {

@@ -8,6 +8,13 @@ pub struct PlaybackState {
 }
 
 impl PlaybackState {
+    /// 页面只提交歌曲，换歌时的位置和播放状态由播放器统一重置。
+    pub fn select_song(&mut self, song: Song) {
+        self.current_song = Some(song);
+        self.position = Duration::ZERO;
+        self.is_playing = false;
+    }
+
     /// Slider 使用 0..=1 的进度；实际播放器接入后在这里提交 seek。
     pub fn seek_to_progress(&mut self, progress: f32) {
         if !progress.is_finite() {
@@ -65,5 +72,14 @@ mod tests {
         playback.current_song = None;
         playback.seek_to_progress(0.5);
         assert_eq!(playback.position, Duration::ZERO);
+        playback.is_playing = true;
+        playback.position = Duration::from_secs(4);
+        playback.select_song(Song {
+            id: 42,
+            ..Default::default()
+        });
+        assert_eq!(playback.current_song.as_ref().unwrap().id, 42);
+        assert_eq!(playback.position, Duration::ZERO);
+        assert!(!playback.is_playing);
     }
 }

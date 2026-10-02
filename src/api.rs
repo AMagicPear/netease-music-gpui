@@ -1,11 +1,14 @@
-use std::{io, time::Duration};
+use std::{collections::HashMap, io, time::Duration};
 
 use gpui::Global;
 use ncm_api_rs::{ApiClient, ApiResponse, NcmError, Query, create_client};
 use tokio::runtime::Runtime;
 
 use crate::state::user::{UserProfile, VipInfo};
-use crate::state::{playlist::Playlist, song::Song};
+use crate::state::{
+    playlist::{Playlist, TrackId},
+    song::Song,
+};
 
 /// GPUI 负责界面，Tokio 负责 SDK 的网络请求。客户端和运行时在应用内复用。
 pub struct MusicApi {
@@ -36,24 +39,20 @@ impl MusicApi {
 
     pub async fn user_profile(client: ApiClient) -> Result<UserProfile, String> {
         let mut response = Self::request(client.user_account(&Query::new())).await?;
-        let mut profile: UserProfile = serde_json::from_value(response.body["profile"].take())
+        let profile: UserProfile = serde_json::from_value(response.body["profile"].take())
             .map_err(|_| "账号资料格式无效，COOKIE 可能已失效".to_string())?;
         if profile.user_id == 0 || profile.nickname.trim().is_empty() {
             return Err("账号资料无效，COOKIE 可能已失效".into());
         }
-        match Self::request(
-            client.vip_info(&Query::new().param("uid", &profile.user_id.to_string())),
-        )
-        .await
-        {
-            Ok(mut response) => {
-                profile.vip = serde_json::from_value::<VipInfo>(response.body["data"].take())
-                    .map_err(|error| eprintln!("会员资料格式无效：{error}"))
-                    .ok();
-            }
-            Err(message) => eprintln!("获取会员资料失败：{message}"),
-        }
         Ok(profile)
+    }
+
+    pub async fn vip_info(client: ApiClient, user_id: u64) -> Result<VipInfo, String> {
+        let mut response =
+            Self::request(client.vip_info(&Query::new().param("uid", &user_id.to_string())))
+                .await?;
+        serde_json::from_value(response.body["data"].take())
+            .map_err(|error| format!("会员资料格式无效：{error}"))
     }
 
     async fn request(
@@ -94,10 +93,7 @@ impl MusicApi {
         ]
     }
 
-    pub async fn library(
-        client: ApiClient,
-        user_id: u64,
-    ) -> Result<(Vec<Playlist>, Vec<Song>, Vec<u64>), String> {
+    pub async fn user_playlists(client: &ApiClient, user_id: u64) -> Result<Vec<Playlist>, String> {
         let mut playlists = Vec::new();
         loop {
             let mut response = Self::request(
@@ -119,38 +115,51 @@ impl MusicApi {
             }
         }
 
+        Ok(playlists)
+    }
+
+    pub async fn liked_song_ids(client: &ApiClient, user_id: u64) -> Result<Vec<u64>, String> {
         let like_query = Query::new().param("uid", &user_id.to_string());
         let mut likes = Self::request(client.likelist(&like_query)).await?;
-        let liked_song_ids = serde_json::from_value(likes.body["ids"].take())
-            .map_err(|_| "喜欢的歌曲列表格式无效".to_string())?;
-        let mut songs = Vec::new();
-        if let Some(index) = playlists
-            .iter()
-            .position(|playlist| playlist.special_type == 5)
-        {
-            let mut response = Self::request(
-                client.playlist_detail(&Query::new().param("id", &playlists[index].id.to_string())),
-            )
-            .await?;
-            let playlist: Playlist = serde_json::from_value(response.body["playlist"].take())
-                .map_err(|error| format!("歌单详情格式无效：{error}"))?;
-            // 分批获取所有 trackIds，避免 SDK playlist_track_all 默认只取 1000 首。
-            for tracks in playlist.track_ids.chunks(200) {
-                let ids = tracks
-                    .iter()
-                    .map(|track| track.id.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let mut response =
-                    Self::request(client.song_detail(&Query::new().param("ids", &ids))).await?;
-                let batch: Vec<Song> = serde_json::from_value(response.body["songs"].take())
-                    .map_err(|error| format!("歌曲详情格式无效：{error}"))?;
-                songs.extend(batch);
-            }
-            playlists[index] = playlist;
-        }
-        Ok((playlists, songs, liked_song_ids))
+        serde_json::from_value(likes.body["ids"].take())
+            .map_err(|_| "喜欢的歌曲列表格式无效".to_string())
     }
+
+    pub async fn playlist(
+        client: ApiClient,
+        playlist_id: u64,
+    ) -> Result<(Playlist, Vec<Song>), String> {
+        let mut response = Self::request(
+            client.playlist_detail(&Query::new().param("id", &playlist_id.to_string())),
+        )
+        .await?;
+        let playlist: Playlist = serde_json::from_value(response.body["playlist"].take())
+            .map_err(|error| format!("歌单详情格式无效：{error}"))?;
+        let mut songs = Vec::new();
+        // 每个歌单沿用同一条链路，分批加载全部 trackIds。
+        for tracks in playlist.track_ids.chunks(200) {
+            let ids = tracks
+                .iter()
+                .map(|track| track.id.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut response =
+                Self::request(client.song_detail(&Query::new().param("ids", &ids))).await?;
+            let batch: Vec<Song> = serde_json::from_value(response.body["songs"].take())
+                .map_err(|error| format!("歌曲详情格式无效：{error}"))?;
+            songs.extend(ordered_playlist_songs(tracks, batch));
+        }
+        Ok((playlist, songs))
+    }
+}
+
+/// song_detail 的响应顺序不作为歌单顺序；缺失和额外的歌曲不补造。
+fn ordered_playlist_songs(tracks: &[TrackId], songs: Vec<Song>) -> Vec<Song> {
+    let mut by_id: HashMap<_, _> = songs.into_iter().map(|song| (song.id, song)).collect();
+    tracks
+        .iter()
+        .filter_map(|track| by_id.remove(&track.id))
+        .collect()
 }
 
 #[cfg(test)]
@@ -158,6 +167,23 @@ mod tests {
     use super::*;
     use futures::AsyncReadExt;
     use gpui::http_client::HttpClient;
+
+    #[test]
+    fn playlist_order_follows_track_ids_and_skips_unavailable_songs() {
+        let tracks: Vec<_> = [3, 2, 1].into_iter().map(|id| TrackId { id }).collect();
+        let songs = [5, 1, 3]
+            .into_iter()
+            .map(|id| Song {
+                id,
+                ..Default::default()
+            })
+            .collect();
+        let ordered = ordered_playlist_songs(&tracks, songs);
+        assert_eq!(
+            ordered.iter().map(|song| song.id).collect::<Vec<_>>(),
+            [3, 1]
+        );
+    }
 
     #[test]
     #[ignore = "需要 COOKIE 环境变量和网络连接"]
@@ -175,7 +201,10 @@ mod tests {
             .expect("无法获取登录账号");
         assert!(profile.user_id > 0);
         assert!(!profile.nickname.is_empty());
-        let vip = profile.vip.as_ref().expect("会员资料无法加载");
+        let vip = api
+            .runtime
+            .block_on(MusicApi::vip_info(api.client.clone(), profile.user_id))
+            .expect("会员资料无法加载");
         if let Some(badge) =
             vip.badge_path(time::OffsetDateTime::now_utc().unix_timestamp() as u64 * 1000)
         {
@@ -186,14 +215,22 @@ mod tests {
                     .is_file()
             );
         }
-        let (playlists, songs, likes) = api
+        let playlists = api
             .runtime
-            .block_on(MusicApi::library(api.client.clone(), profile.user_id))
+            .block_on(MusicApi::user_playlists(&api.client, profile.user_id))
             .expect("无法加载真实音乐库");
-        let favorite = playlists
+        let likes = api
+            .runtime
+            .block_on(MusicApi::liked_song_ids(&api.client, profile.user_id))
+            .expect("无法加载喜欢状态");
+        let favorite_summary = playlists
             .iter()
             .find(|playlist| playlist.special_type == 5)
             .expect("缺少喜欢的音乐歌单");
+        let (favorite, songs) = api
+            .runtime
+            .block_on(MusicApi::playlist(api.client.clone(), favorite_summary.id))
+            .expect("无法加载收藏歌单");
         assert_eq!(songs.len(), favorite.track_ids.len());
         assert!(
             songs
@@ -202,6 +239,32 @@ mod tests {
                 .all(|(song, track)| song.id == track.id)
         );
         assert!(songs.iter().all(|song| likes.contains(&song.id)));
+        // 普通歌单也走相同接口，并显示 API 返回的创建者。
+        for summary in [
+            playlists.iter().find(|playlist| {
+                playlist.special_type != 5 && playlist.creator.user_id == profile.user_id
+            }),
+            playlists
+                .iter()
+                .filter(|playlist| playlist.creator.user_id != profile.user_id)
+                .min_by_key(|playlist| playlist.track_count),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let (playlist, tracks) = api
+                .runtime
+                .block_on(MusicApi::playlist(api.client.clone(), summary.id))
+                .expect("无法加载普通歌单");
+            assert_eq!(playlist.id, summary.id);
+            assert_eq!(playlist.name, summary.name);
+            assert_eq!(playlist.creator.user_id, summary.creator.user_id);
+            assert!(
+                tracks
+                    .iter()
+                    .all(|song| playlist.track_ids.iter().any(|track| track.id == song.id))
+            );
+        }
         // 使用与应用相同的客户端验证真实头像、歌单封面和歌曲封面可下载。
         let http = api.http_client();
         let cover = songs

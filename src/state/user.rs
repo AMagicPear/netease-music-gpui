@@ -75,17 +75,42 @@ impl UserProfile {
             let result = request
                 .await
                 .unwrap_or_else(|_| Err("账号请求任务失败".into()));
-            let _ = this.update(cx, |profile, cx| {
-                match result {
-                    Ok(loaded) => *profile = loaded,
-                    Err(message) => {
-                        eprintln!("{message}");
+            let loaded = match result {
+                Ok(profile) => profile,
+                Err(message) => {
+                    eprintln!("{message}");
+                    let _ = this.update(cx, |profile, cx| {
                         profile.nickname = "未登录".into();
-                    }
+                        cx.notify();
+                    });
+                    return;
                 }
-                // 已有观察者会同步刷新页头和「我喜欢的音乐」中的用户资料。
+            };
+            let user_id = loaded.user_id;
+            let Ok(request) = this.update(cx, |profile, cx| {
+                *profile = loaded;
+                // 账号就绪立即触发音乐库加载，会员请求不阻塞歌单索引。
                 cx.notify();
-            });
+                let api = MusicApi::global(cx);
+                api.runtime
+                    .spawn(MusicApi::vip_info(api.client.clone(), user_id))
+            }) else {
+                return;
+            };
+            match request
+                .await
+                .unwrap_or_else(|_| Err("会员请求任务失败".into()))
+            {
+                Ok(vip) => {
+                    let _ = this.update(cx, |profile, cx| {
+                        if profile.user_id == user_id {
+                            profile.vip = Some(vip);
+                            cx.notify();
+                        }
+                    });
+                }
+                Err(message) => eprintln!("{message}"),
+            }
         })
         .detach();
 

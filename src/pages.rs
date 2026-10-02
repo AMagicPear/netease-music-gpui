@@ -1,17 +1,15 @@
-mod favorite_music;
 mod featured;
 mod following;
 mod main_content;
 mod my_collection;
 mod my_podcast;
+mod playlist;
 mod podcast;
 mod recent;
 mod recommend;
 mod roaming;
 mod sidebar_page;
 
-use crate::state::user::UserProfile;
-use crate::state::{library::MusicLibrary, playback::PlaybackState};
 use gpui::*;
 
 pub use main_content::MainContent;
@@ -25,9 +23,12 @@ pub(super) enum ContentPage {
     Roaming,
     Following,
     FavoriteMusic,
+    Playlist(u64),
     Recent,
     MyPodcast,
     MyCollection,
+    DownloadManagement,
+    MyCloud,
 }
 
 /// 顶部导航分组：推荐、精选、播客、漫游、关注。
@@ -40,27 +41,33 @@ const MAIN_PAGES: [ContentPage; 5] = [
 ];
 
 /// 「我的音乐库」分组，展示在分隔线下方。
-const LIBRARY_PAGES: [ContentPage; 4] = [
+const LIBRARY_PAGES: [ContentPage; 6] = [
     ContentPage::FavoriteMusic,
     ContentPage::Recent,
     ContentPage::MyPodcast,
     ContentPage::MyCollection,
+    ContentPage::DownloadManagement,
+    ContentPage::MyCloud,
 ];
 
 impl ContentPage {
     /// 同时作为元素 id，GPUI 靠它来匹配状态与事件。
-    fn id(self) -> &'static str {
-        match self {
+    fn id(self) -> SharedString {
+        let id = match self {
             Self::Recommend => "recommend",
             Self::Featured => "featured",
             Self::Podcast => "podcast",
             Self::Roaming => "roaming",
             Self::Following => "following",
             Self::FavoriteMusic => "favorite-music",
+            Self::Playlist(id) => return format!("playlist-{id}").into(),
             Self::Recent => "recent",
             Self::MyPodcast => "my-podcast",
             Self::MyCollection => "my-collection",
-        }
+            Self::DownloadManagement => "download-management",
+            Self::MyCloud => "my-cloud",
+        };
+        id.into()
     }
 
     pub(super) fn title(self) -> &'static str {
@@ -71,23 +78,29 @@ impl ContentPage {
             Self::Roaming => "漫游",
             Self::Following => "关注",
             Self::FavoriteMusic => "我喜欢的音乐",
+            Self::Playlist(_) => "歌单",
             Self::Recent => "最近播放",
             Self::MyPodcast => "我的播客",
             Self::MyCollection => "我的收藏",
+            Self::DownloadManagement => "下载管理",
+            Self::MyCloud => "我的音乐云盘",
         }
     }
 
     fn icon(self) -> &'static str {
         match self {
-            Self::Recommend => "icons/sidebar_home.svg",
-            Self::Featured => "icons/sidebar_featured.svg",
-            Self::Podcast => "icons/sidebar_podcast.svg",
-            Self::Roaming => "icons/sidebar_fm.svg",
-            Self::Following => "icons/sidebar_community.svg",
-            Self::FavoriteMusic => "icons/sidebar_like.svg",
-            Self::Recent => "icons/sidebar_history.svg",
-            Self::MyPodcast => "icons/sidebar_my_podcast.svg",
-            Self::MyCollection => "icons/sidebar_favourite.svg",
+            Self::Recommend => "icons/sidebar/sidebar_home.svg",
+            Self::Featured => "icons/sidebar/sidebar_featured.svg",
+            Self::Podcast => "icons/sidebar/sidebar_podcast.svg",
+            Self::Roaming => "icons/sidebar/sidebar_fm.svg",
+            Self::Following => "icons/sidebar/sidebar_community.svg",
+            Self::FavoriteMusic => "icons/sidebar/sidebar_like.svg",
+            Self::Playlist(_) => "icons/playlist.svg",
+            Self::Recent => "icons/sidebar/sidebar_history.svg",
+            Self::MyPodcast => "icons/sidebar/sidebar_my_podcast.svg",
+            Self::MyCollection => "icons/sidebar/sidebar_favourite.svg",
+            Self::DownloadManagement => "icons/sidebar/sidebar_download.svg",
+            Self::MyCloud => "icons/sidebar/sidebar_cloud.svg",
         }
     }
 
@@ -103,29 +116,27 @@ impl ContentPage {
 
     /// 创建该导航项对应的页面 View。
     ///
-    /// 9 个页面是不同的类型，用 `AnyView` 抹平后才能放进同一张表里；
-    /// 这样 `MainContent` 可以一直持有它们，切走再切回不会丢 View 自身的状态。
-    fn build(
-        self,
-        user_profile: Entity<UserProfile>,
-        library: Entity<MusicLibrary>,
-        playback: Entity<PlaybackState>,
-        cx: &mut App,
-    ) -> AnyView {
-        match self {
+    /// 静态页面长期持有；带 ID 的歌单由 MainContent 的单个 PlaylistPage 承接。
+    fn build(self, cx: &mut App) -> Option<AnyView> {
+        Some(match self {
             Self::Recommend => cx.new(|_| recommend::RecommendPage).into(),
             Self::Featured => cx.new(|_| featured::FeaturedPage).into(),
             Self::Podcast => cx.new(|_| podcast::PodcastPage).into(),
             Self::Roaming => cx.new(|_| roaming::RoamingPage).into(),
             Self::Following => cx.new(|_| following::FollowingPage).into(),
-            Self::FavoriteMusic => cx
-                .new(|cx| {
-                    favorite_music::FavoriteMusicPage::new(user_profile, library, playback, cx)
-                })
-                .into(),
+            Self::FavoriteMusic | Self::Playlist(_) => return None,
             Self::Recent => cx.new(|_| recent::RecentPage).into(),
             Self::MyPodcast => cx.new(|_| my_podcast::MyPodcastPage).into(),
             Self::MyCollection => cx.new(|_| my_collection::MyCollectionPage).into(),
-        }
+            Self::DownloadManagement | Self::MyCloud => cx.new(|_| PlaceholderPage(self)).into(),
+        })
+    }
+}
+
+struct PlaceholderPage(ContentPage);
+
+impl Render for PlaceholderPage {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div().child(self.0.title())
     }
 }

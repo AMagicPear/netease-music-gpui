@@ -57,7 +57,7 @@ impl TabBar {
         cx.notify();
     }
 
-    fn select(&mut self, index: usize, cx: &mut Context<Self>) {
+    pub fn select(&mut self, index: usize, cx: &mut Context<Self>) {
         if self.selected_index == index {
             return;
         }

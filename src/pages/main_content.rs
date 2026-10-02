@@ -4,6 +4,7 @@ use gpui::prelude::{FluentBuilder, StatefulInteractiveElement};
 use gpui::*;
 
 use super::ContentPage;
+use super::playlist::PlaylistPage;
 use super::sidebar_page::{SidebarChanged, SidebarPage};
 use crate::assets::thumbnail_url;
 use crate::components::ResizeDragPreview;
@@ -23,15 +24,19 @@ const SEARCH_BOX_WIDTH: Pixels = px(258.);
 const SEARCH_BOX_MIN_WIDTH: Pixels = px(40.);
 
 pub struct MainContent {
+    active_page: ContentPage,
     sidebar_width: Pixels,
     sidebar: Entity<SidebarPage>,
     search_input: Entity<InputState>,
     user_profile: Entity<UserProfile>,
     /// 每个导航项对应一个页面 View，一次创建后长期持有。
     pages: HashMap<ContentPage, AnyView>,
+    playlist_page: Entity<PlaylistPage>,
+    library: Entity<MusicLibrary>,
     page_scroll: HashMap<ContentPage, ScrollHandle>,
     _sidebar_subscription: Subscription,
     _user_profile_subscription: Subscription,
+    _library_subscription: Subscription,
 }
 
 impl MainContent {
@@ -43,7 +48,13 @@ impl MainContent {
         cx: &mut Context<Self>,
     ) -> Self {
         let sidebar = cx.new(|cx| SidebarPage::new(library.clone(), cx));
-        let sidebar_subscription = cx.subscribe(&sidebar, |_, _, _: &SidebarChanged, cx| {
+        let sidebar_subscription = cx.subscribe(&sidebar, |this, _, event: &SidebarChanged, cx| {
+            this.navigate(event.0, cx);
+        });
+        let playlist_page = cx.new(|cx| PlaylistPage::new(library.clone(), playback, cx));
+        let library_subscription = cx.observe(&library, |this, _, cx| {
+            // 收藏歌单的 ID 要等账号索引返回后才能解析。
+            this.open_playlist(this.active_page, cx);
             cx.notify();
         });
         let search_input = cx.new(|cx| {
@@ -57,27 +68,49 @@ impl MainContent {
 
         // 页面在这里全部建好；切走再切回仍是同一个 View 实例。
         let pages = ContentPage::all()
-            .map(|page| {
-                (
-                    page,
-                    page.build(user_profile.clone(), library.clone(), playback.clone(), cx),
-                )
-            })
+            .filter_map(|page| page.build(cx).map(|view| (page, view)))
             .collect();
         let user_profile_subscription = cx.observe(&user_profile, |_, _, cx| cx.notify());
 
         Self {
+            active_page: ContentPage::Recommend,
             sidebar_width: MIN_SIDEBAR_WIDTH,
             sidebar,
             search_input,
             user_profile,
             pages,
+            playlist_page,
+            library,
             page_scroll: ContentPage::all()
                 .map(|page| (page, ScrollHandle::default()))
                 .collect(),
             _sidebar_subscription: sidebar_subscription,
             _user_profile_subscription: user_profile_subscription,
+            _library_subscription: library_subscription,
         }
+    }
+
+    /// 所有入口统一提交导航，侧栏负责显示选中项和发出请求。
+    pub(super) fn navigate(&mut self, page: ContentPage, cx: &mut Context<Self>) {
+        self.active_page = page;
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.set_active_page(page, cx));
+        self.page_scroll.entry(page).or_default();
+        self.open_playlist(page, cx);
+        cx.notify();
+    }
+
+    fn open_playlist(&mut self, page: ContentPage, cx: &mut Context<Self>) {
+        let id = match page {
+            ContentPage::FavoriteMusic => self
+                .library
+                .read(cx)
+                .favorite_playlist()
+                .map(|playlist| playlist.id),
+            ContentPage::Playlist(id) => Some(id),
+            _ => return,
+        };
+        self.playlist_page.update(cx, |view, cx| view.open(id, cx));
     }
 }
 
@@ -233,8 +266,14 @@ impl Render for MainContent {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = Theme::global(cx).tokens.colors;
         let user_profile = self.user_profile.read(cx);
-        let active_page = self.sidebar.read(cx).active_page();
+        let active_page = self.active_page;
         let page_scroll = &self.page_scroll[&active_page];
+        let page = match active_page {
+            ContentPage::FavoriteMusic | ContentPage::Playlist(_) => {
+                Some(self.playlist_page.clone().into())
+            }
+            _ => self.pages.get(&active_page).cloned(),
+        };
         let drag_offset = Rc::new(Cell::new(px(0.)));
 
         div()
@@ -288,7 +327,7 @@ impl Render for MainContent {
                                     .py(px(18.))
                                     .overflow_y_scroll()
                                     .track_scroll(page_scroll)
-                                    .children(self.pages.get(&active_page).cloned()),
+                                    .children(page),
                             )
                             // 滚动条放在外层，避免它的边界被计入滚动内容高度。
                             .child(Scrollbar::vertical(page_scroll).mode(ScrollbarMode::Always)),

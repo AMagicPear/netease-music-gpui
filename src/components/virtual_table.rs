@@ -87,6 +87,10 @@ fn table_row(columns: &[TableColumn], cells: impl IntoIterator<Item = AnyElement
 }
 
 /// 跟随祖先滚动的固定行高表格。回调仅为可见范围及上下各四行缓冲创建单元格。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "各回调职责独立，保留显式参数，避免为一个调用方引入配置层"
+)]
 pub fn virtual_table<V: Render>(
     view: Entity<V>,
     id: impl Into<ElementId>,
@@ -169,10 +173,12 @@ pub fn virtual_table<V: Render>(
     })
 }
 
+type RenderRow = dyn FnMut(usize, &mut Window, &mut App) -> AnyElement;
+
 struct VirtualRows {
     id: ElementId,
     row_count: usize,
-    render_row: Box<dyn FnMut(usize, &mut Window, &mut App) -> AnyElement>,
+    render_row: Box<RenderRow>,
 }
 
 impl IntoElement for VirtualRows {

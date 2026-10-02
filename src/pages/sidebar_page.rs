@@ -9,7 +9,7 @@ use crate::state::{library::MusicLibrary, playlist::Playlist};
 use crate::theme::IconSize;
 
 /// 选中项变化时发出的事件，`MainContent` 订阅它来重新渲染右侧内容。
-pub(super) struct SidebarChanged;
+pub(super) struct SidebarChanged(pub ContentPage);
 
 pub(super) struct SidebarPage {
     active_page: ContentPage,
@@ -29,8 +29,15 @@ impl SidebarPage {
         }
     }
 
-    pub(super) fn active_page(&self) -> ContentPage {
-        self.active_page
+    pub(super) fn set_active_page(&mut self, page: ContentPage, cx: &mut Context<Self>) {
+        if self.active_page != page {
+            self.active_page = page;
+            cx.notify();
+        }
+    }
+
+    fn navigate(&mut self, page: ContentPage, cx: &mut Context<Self>) {
+        cx.emit(SidebarChanged(page));
     }
 }
 
@@ -161,9 +168,7 @@ fn page_nav_item(
             )
         })
         .on_click(cx.listener(move |this, _, _, cx| {
-            this.active_page = page;
-            cx.notify();
-            cx.emit(SidebarChanged);
+            this.navigate(page, cx);
         }))
 }
 
@@ -207,9 +212,26 @@ fn library_navigation(
     group
 }
 
-fn created_playlist(playlist: &Playlist, colors: ColorTokens) -> impl IntoElement {
-    sidebar_row(("created-playlist", playlist.id), px(42.))
-        .hover(|style| style.bg(colors.accent))
+fn playlist_nav_item(
+    playlist: &Playlist,
+    active_page: ContentPage,
+    colors: ColorTokens,
+    cx: &mut Context<SidebarPage>,
+) -> impl IntoElement {
+    let page = ContentPage::Playlist(playlist.id);
+    let active = active_page == page;
+    Button::new(("playlist-nav", playlist.id))
+        .w_full()
+        .h(px(42.))
+        .gap(px(8.))
+        .px(px(8.))
+        .rounded(px(8.))
+        .justify_start()
+        .accessibility_label(playlist.name.clone())
+        .selected(active)
+        .styles(|styles| styles.selected(|style| style.bg(colors.primary)))
+        .when(!active, |row| row.hover(|style| style.bg(colors.accent)))
+        .on_click(cx.listener(move |this, _, _, cx| this.navigate(page, cx)))
         .when_some(playlist.cover_img_url.clone(), |row, cover| {
             row.child(
                 img(thumbnail_url(&cover, 64))
@@ -227,40 +249,65 @@ fn created_playlist(playlist: &Playlist, colors: ColorTokens) -> impl IntoElemen
                 .text_size(px(12.))
                 .line_height(px(16.))
                 .line_clamp(2)
-                .text_color(colors.secondary_foreground)
+                .text_color(if active {
+                    colors.primary_foreground
+                } else {
+                    colors.secondary_foreground
+                })
                 .child(playlist.name.clone()),
         )
 }
 
-fn created_playlists(library: &MusicLibrary, colors: ColorTokens) -> Div {
-    let playlists: Vec<_> = library
-        .playlists
-        .iter()
-        .filter(|playlist| {
-            playlist.creator.user_id == library.user_id && playlist.special_type != 5
-        })
-        .collect();
-    div()
+fn playlist_group(
+    id: &'static str,
+    title: &'static str,
+    playlists: &[Playlist],
+    active_page: ContentPage,
+    colors: ColorTokens,
+    cx: &mut Context<SidebarPage>,
+) -> Div {
+    let mut group = div()
         .w_full()
         .flex()
         .flex_col()
         .gap(px(4.))
         .child(section_heading(
-            "created-playlists-heading",
-            format!("创建的歌单 {}", playlists.len()),
+            id,
+            format!("{title} {}", playlists.len()),
             colors,
-        ))
-        .children(
-            playlists
-                .iter()
-                .map(|playlist| created_playlist(playlist, colors)),
-        )
+        ));
+    for playlist in playlists {
+        group = group.child(playlist_nav_item(playlist, active_page, colors, cx));
+    }
+    group
 }
 
 impl Render for SidebarPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = Theme::global(cx).tokens.colors;
-        let playlists = created_playlists(self.library.read(cx), colors);
+        let library = self.library.read(cx);
+        let (created, subscribed): (Vec<_>, Vec<_>) = library
+            .playlists
+            .iter()
+            .filter(|playlist| playlist.special_type != 5)
+            .cloned()
+            .partition(|playlist| playlist.creator.user_id == library.user_id);
+        let created = playlist_group(
+            "created-playlists-heading",
+            "创建的歌单",
+            &created,
+            self.active_page,
+            colors,
+            cx,
+        );
+        let subscribed = playlist_group(
+            "subscribed-playlists-heading",
+            "收藏的歌单",
+            &subscribed,
+            self.active_page,
+            colors,
+            cx,
+        );
 
         div()
             .size_full()
@@ -286,7 +333,9 @@ impl Render for SidebarPage {
                             .child(divider(colors))
                             .child(library_navigation(self.active_page, colors, cx))
                             .child(divider(colors))
-                            .child(playlists),
+                            .child(created)
+                            .child(divider(colors))
+                            .child(subscribed),
                     ),
             )
     }
