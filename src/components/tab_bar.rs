@@ -25,11 +25,6 @@ impl TabItem {
             count: None,
         }
     }
-
-    pub fn count(mut self, count: impl Into<SharedString>) -> Self {
-        self.count = Some(count.into());
-        self
-    }
 }
 
 /// 仅在选项改变时发出，动画帧不会触发页面内容的更新。
@@ -55,6 +50,11 @@ impl TabBar {
 
     pub fn selected_index(&self) -> usize {
         self.selected_index
+    }
+
+    pub fn set_count(&mut self, index: usize, count: Option<String>, cx: &mut Context<Self>) {
+        self.items[index].count = count.map(Into::into);
+        cx.notify();
     }
 
     fn select(&mut self, index: usize, cx: &mut Context<Self>) {

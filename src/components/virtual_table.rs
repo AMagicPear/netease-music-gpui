@@ -93,10 +93,10 @@ pub fn virtual_table<V: Render>(
     columns: Rc<Vec<TableColumn>>,
     row_count: usize,
     render_cells: impl 'static + Fn(&mut V, usize, &mut Window, &mut Context<V>) -> Vec<AnyElement>,
-    row_key: impl 'static + Fn(&V, usize) -> usize,
+    row_key: impl 'static + Fn(&V, usize, &App) -> u64,
     render_header: impl 'static + Fn(&TableColumn, usize) -> AnyElement,
     on_header_layout: impl 'static + Fn(Vec<Bounds<Pixels>>),
-    on_row_hover: impl 'static + Fn(&mut V, usize, bool, &mut Context<V>),
+    on_row_hover: impl 'static + Fn(&mut V, u64, bool, &mut Context<V>),
     cx: &App,
 ) -> impl IntoElement {
     let colors = Theme::global(cx).tokens.colors;
@@ -123,7 +123,7 @@ pub fn virtual_table<V: Render>(
         row_count,
         render_row: Box::new(move |index, window, cx| {
             view.update(cx, |view, cx| {
-                let key = row_key(view, index);
+                let key = row_key(view, index, cx);
                 let cells = render_cells(view, index, window, cx);
                 assert_eq!(
                     cells.len(),

@@ -4,6 +4,7 @@ use gpui_kit::base::{Button, ColorTokens, Theme};
 use gpui_kit::component::TitleBar;
 
 use super::{ContentPage, LIBRARY_PAGES, MAIN_PAGES};
+use crate::state::{library::MusicLibrary, playlist::Playlist};
 use crate::theme::IconSize;
 
 /// 选中项变化时发出的事件，`MainContent` 订阅它来重新渲染右侧内容。
@@ -11,26 +12,19 @@ pub(super) struct SidebarChanged;
 
 pub(super) struct SidebarPage {
     active_page: ContentPage,
-    /// 假数据，格式是 `(歌单名, 封面路径)`。
-    playlists: Vec<(&'static str, &'static str)>,
+    library: Entity<MusicLibrary>,
+    _library_subscription: Subscription,
 }
 
 impl EventEmitter<SidebarChanged> for SidebarPage {}
 
 impl SidebarPage {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(library: Entity<MusicLibrary>, cx: &mut Context<Self>) -> Self {
+        let subscription = cx.observe(&library, |_, _, cx| cx.notify());
         Self {
             active_page: ContentPage::Recommend,
-            playlists: vec![
-                (
-                    "would u wanna ride with me",
-                    "/Users/amagicpear/Pictures/Perry Origin Character/ChatGPT Image 2026年9月29日 15_39_30.png",
-                ),
-                (
-                    "回声之境 | Echoesphere",
-                    "/Users/amagicpear/Pictures/Perry Origin Character/ChatGPT Image 2026年9月20日 22_25_55.png",
-                ),
-            ],
+            library,
+            _library_subscription: subscription,
         }
     }
 
@@ -97,16 +91,16 @@ fn sidebar_row(id: impl Into<ElementId>, height: Pixels) -> Stateful<Div> {
         .rounded(px(8.))
 }
 
-/// 分组标题，例如「我的」「创建的歌单 25」。
+/// 导航和歌单分组标题。
 fn section_heading(
     id: impl Into<ElementId>,
-    text: &'static str,
+    text: impl Into<SharedString>,
     colors: ColorTokens,
 ) -> impl IntoElement {
     sidebar_row(id, px(36.))
         .text_size(px(12.))
         .text_color(colors.muted_foreground)
-        .child(text)
+        .child(text.into())
 }
 
 /// 分组之间的分隔线。
@@ -212,14 +206,12 @@ fn library_navigation(
     group
 }
 
-fn created_playlist(
-    title: &'static str,
-    cover: &'static str,
-    colors: ColorTokens,
-) -> impl IntoElement {
-    sidebar_row(title, px(42.))
+fn created_playlist(playlist: &Playlist, colors: ColorTokens) -> impl IntoElement {
+    sidebar_row(("created-playlist", playlist.id), px(42.))
         .hover(|style| style.bg(colors.accent))
-        .child(img(cover).size(px(32.)).rounded(px(4.)).flex_none())
+        .when_some(playlist.cover_img_url.clone(), |row, cover| {
+            row.child(img(cover).size(px(32.)).rounded(px(4.)).flex_none())
+        })
         .child(
             div()
                 .flex_1()
@@ -228,14 +220,18 @@ fn created_playlist(
                 .text_size(px(12.))
                 .line_height(px(16.))
                 .text_color(colors.secondary_foreground)
-                .child(title),
+                .child(playlist.name.clone()),
         )
 }
 
-fn created_playlists(
-    playlists: &[(&'static str, &'static str)],
-    colors: ColorTokens,
-) -> impl IntoElement {
+fn created_playlists(library: &MusicLibrary, colors: ColorTokens) -> Div {
+    let playlists: Vec<_> = library
+        .playlists
+        .iter()
+        .filter(|playlist| {
+            playlist.creator.user_id == library.user_id && playlist.special_type != 5
+        })
+        .collect();
     div()
         .w_full()
         .flex()
@@ -243,19 +239,20 @@ fn created_playlists(
         .gap(px(4.))
         .child(section_heading(
             "created-playlists-heading",
-            "创建的歌单 25",
+            format!("创建的歌单 {}", playlists.len()),
             colors,
         ))
         .children(
             playlists
                 .iter()
-                .map(|(title, cover)| created_playlist(title, cover, colors)),
+                .map(|playlist| created_playlist(playlist, colors)),
         )
 }
 
 impl Render for SidebarPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = Theme::global(cx).tokens.colors;
+        let playlists = created_playlists(self.library.read(cx), colors);
 
         div()
             .size_full()
@@ -281,7 +278,7 @@ impl Render for SidebarPage {
                             .child(divider(colors))
                             .child(library_navigation(self.active_page, colors, cx))
                             .child(divider(colors))
-                            .child(created_playlists(&self.playlists, colors)),
+                            .child(playlists),
                     ),
             )
     }

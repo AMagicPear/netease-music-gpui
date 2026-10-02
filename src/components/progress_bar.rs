@@ -90,7 +90,7 @@ impl Render for ProgressBar {
         let duration = playback
             .current_song
             .as_ref()
-            .map_or(Duration::ZERO, |song| song.duration);
+            .map_or(Duration::ZERO, |song| song.duration());
         let enabled = !duration.is_zero();
         let elapsed = if self.dragging {
             duration.mul_f64(f64::from(progress))

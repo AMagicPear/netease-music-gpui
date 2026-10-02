@@ -5,9 +5,18 @@ edition = "2024"
 
 [dependencies]
 gpui = { package = "gpui-pre", version = "=0.3.7" }
+reqwest-client = { package = "gpui-pre-reqwest-client", version = "=0.3.7" }
 gpui-kit = { git = "https://github.com/longbridge/gpui-kit", default-features = false, features = [
     "component",
 ] }
+ncm-api-rs = { git = "https://github.com/SPlayer-Dev/ncm-api-rs.git" }
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+time = "0.3"
+
+[dev-dependencies]
+futures = "0.3"
 
 [profile.dev.package]
 gpui-pre = { opt-level = 3 }

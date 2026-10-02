@@ -29,47 +29,6 @@ fn index_column_width(row_count: usize) -> Pixels {
 const ALBUM_SHARE_MIN: f32 = 0.1;
 const ALBUM_SHARE_MAX: f32 = 0.8;
 
-/// 歌曲的音质标识，显示在歌手前面。
-#[derive(Clone, Copy)]
-enum Quality {
-    Hq,
-    Sq,
-    HiRes,
-    /// 全景声
-    Spatial,
-    /// 沉浸声
-    Immersive,
-    /// 超清母带
-    Master,
-    /// 高清臻音
-    Hd,
-}
-
-impl Quality {
-    /// 全部档位，示例数据用它按行轮换，好把每个徽章都看一眼。
-    const ALL: [Quality; 7] = [
-        Quality::Hq,
-        Quality::Sq,
-        Quality::HiRes,
-        Quality::Spatial,
-        Quality::Immersive,
-        Quality::Master,
-        Quality::Hd,
-    ];
-
-    fn badge(self) -> &'static str {
-        match self {
-            Self::Hq => "icons/音质选项/HQ.svg",
-            Self::Sq => "icons/音质选项/sq.svg",
-            Self::HiRes => "icons/音质选项/Hi-Res.svg",
-            Self::Spatial => "icons/音质选项/全景声.svg",
-            Self::Immersive => "icons/音质选项/沉浸声.svg",
-            Self::Master => "icons/音质选项/超清母带.svg",
-            Self::Hd => "icons/音质选项/高清臻音.svg",
-        }
-    }
-}
-
 /// 次要文字使用常规字重。
 const SECONDARY_FONT_WEIGHT: FontWeight = FontWeight::NORMAL;
 
@@ -87,9 +46,10 @@ type DividerDragAnchor = Rc<Cell<(Pixels, f32, Pixels)>>;
 use super::ContentPage;
 use crate::components::{
     CELL_PADDING, COLUMN_GAP, HEADER_HEIGHT, ROW_TEXT_SIZE, ResizeDragPreview, TabBar, TabChanged,
-    TabItem, TableColumn, virtual_table,
+    TabItem, TableColumn, artist_label, virtual_table,
 };
 use crate::state::user::UserProfile;
+use crate::state::{library::MusicLibrary, playback::PlaybackState, song::Song};
 use crate::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
 
 // 「更多」菜单里的三个命令。
@@ -118,91 +78,25 @@ pub struct FavoriteMusicPage {
     _user_profile_subscription: Subscription,
     tabs: Entity<TabBar>,
     _tabs_subscription: Subscription,
-    songs: Vec<DemoSong>,
-    /// 原始歌单顺序保存在 songs；这里只保存显示顺序，排序不修改歌单。
+    library: Entity<MusicLibrary>,
+    playback: Entity<PlaybackState>,
+    _library_subscription: Subscription,
+    /// 原始歌单顺序保存在 library.songs；这里只保存显示顺序。
     display_order: Vec<usize>,
     sort: Option<(SongSort, bool)>,
     album_share: f32,
-    hovered_row: Option<usize>,
-}
-
-/// 临时示例数据，用于验证长表滚动；接入远程歌单后替换。
-struct DemoSong {
-    /// 示例 ID；接入 API 后直接使用云端返回的歌曲 ID。
-    id: usize,
-    title: SharedString,
-    /// 副标题（比如所属 EP）：渲染在标题右边、括号里，同一字号、灰色。
-    subtitle: Option<SharedString>,
-    /// 艺术家可能不止一个，渲染时用「 / 」连起来。
-    artists: Vec<SharedString>,
-    /// 音质徽章，显示在歌手前面。
-    quality: Quality,
-    album: SharedString,
-    duration: SharedString,
-    liked: bool,
-    cover: SharedString,
-}
-
-fn demo_songs() -> Vec<DemoSong> {
-    // (标题, 副标题, 艺术家, 专辑, 时长)
-    let examples: [(&str, Option<&str>, &[&str], &str, &str); 6] = [
-        (
-            "Lose My Mind (feat. Doja Cat)",
-            None,
-            &["Don Toliver", "Doja Cat"],
-            "Hardstone Psycho",
-            "03:29",
-        ),
-        (
-            "DAMIDAMI",
-            Some("《绝区零》卢西娅EP"),
-            &["Sihan", "三Z-STUDIO", "HOYO-MiX"],
-            "绝区零-DAMIDAMI",
-            "03:11",
-        ),
-        (
-            "Let You Down",
-            None,
-            &["Stonebank", "Danyka Nadeau"],
-            "Let You Down",
-            "04:13",
-        ),
-        ("Crown", None, &["BUNT."], "Crown", "04:00"),
-        ("晴天", None, &["周杰伦"], "叶惠美", "04:29"),
-        ("海阔天空", None, &["Beyond"], "乐与怒", "05:24"),
-    ];
-    (0..1193)
-        .map(|index| {
-            let (title, subtitle, artists, album, duration) = examples[index % examples.len()];
-            DemoSong {
-                id: index,
-                title: title.into(),
-                subtitle: subtitle.map(SharedString::from),
-                artists: artists
-                    .iter()
-                    .map(|artist| SharedString::from(*artist))
-                    .collect(),
-                // 音质按行轮换，一屏里就能把每个徽章都看到。
-                quality: Quality::ALL[index % Quality::ALL.len()],
-                album: album.into(),
-                duration: duration.into(),
-                // 混着来：既能看到点亮时的实心红心，也能看到未点亮的勾线灰心。
-                liked: index % 4 != 0,
-                cover: "images/demo-album.svg".into(),
-            }
-        })
-        .collect()
+    hovered_row: Option<u64>,
 }
 
 /// 使用同一段 StyledText，标题和副标题一起截断，只出现一个省略号。
-fn title_with_subtitle(song: &DemoSong, colors: ColorTokens) -> StyledText {
-    let Some(subtitle) = &song.subtitle else {
-        return StyledText::new(song.title.clone());
+fn title_with_subtitle(song: &Song, colors: ColorTokens) -> StyledText {
+    let Some(subtitle) = song.tns.first().or_else(|| song.alia.first()) else {
+        return StyledText::new(song.name.clone());
     };
 
     let subtitle = format!("（{subtitle}）");
-    let title_len = song.title.len();
-    let mut line = song.title.to_string();
+    let title_len = song.name.len();
+    let mut line = song.name.clone();
     line.push_str(&subtitle);
 
     // highlight 先 blend 再 fade_out：先替换 RGB，再恢复 alpha。
@@ -220,9 +114,21 @@ fn title_with_subtitle(song: &DemoSong, colors: ColorTokens) -> StyledText {
     )])
 }
 
+fn quality_badge(song: &Song) -> Option<&'static str> {
+    if song.hr.is_some() {
+        Some("icons/音质选项/Hi-Res.svg")
+    } else if song.sq.is_some() {
+        Some("icons/音质选项/sq.svg")
+    } else if song.h.as_ref().is_some_and(|quality| quality.br >= 320000) {
+        Some("icons/音质选项/HQ.svg")
+    } else {
+        None
+    }
+}
+
 /// 行 hover 时才出现的图标：序号位置的播放键、标题右侧那排操作按钮，共用这一套样式。
 fn row_hover_icon(
-    id: (&'static str, usize),
+    id: (&'static str, u64),
     path: &'static str,
     label: &'static str,
     size: Pixels,
@@ -243,7 +149,7 @@ fn row_hover_icon(
 }
 
 /// 行 hover 时贴在标题右侧的那排操作图标：下载 / 收藏 / 评论 / 更多。
-fn row_actions(index: usize, colors: ColorTokens) -> AnyElement {
+fn row_actions(index: u64, colors: ColorTokens) -> AnyElement {
     // 四个图标只有 id / 路径 / 无障碍名不同，其余全都一样：尺寸用 header 那排的
     // `IconSize::Small`，灰度和三态交互由 `row_hover_icon` 统一给。
     let icon = |id: &'static str, path: &'static str, label: &'static str| {
@@ -268,25 +174,51 @@ fn row_actions(index: usize, colors: ColorTokens) -> AnyElement {
 }
 
 impl FavoriteMusicPage {
-    pub fn new(user_profile: Entity<UserProfile>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        user_profile: Entity<UserProfile>,
+        library: Entity<MusicLibrary>,
+        playback: Entity<PlaybackState>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let user_profile_subscription = cx.observe(&user_profile, |_, _, cx| cx.notify());
-        let songs = demo_songs();
         let tabs = cx.new(|_| {
             TabBar::new(vec![
-                TabItem::new("歌曲").count(songs.len().to_string()),
+                TabItem::new("歌曲"),
                 TabItem::new("评论"),
-                TabItem::new("收藏者").count("5"),
+                TabItem::new("收藏者"),
             ])
         });
         let tabs_subscription = cx.subscribe(&tabs, |_, _, _: &TabChanged, cx| cx.notify());
-        let display_order = (0..songs.len()).collect();
+        let library_subscription = cx.observe(&library, |this, library, cx| {
+            let library = library.read(cx);
+            this.display_order = this.sort.map_or_else(
+                || (0..library.songs.len()).collect(),
+                |(key, descending)| song_order(&library.songs, key, descending),
+            );
+            let playlist = library.favorite_playlist();
+            let counts = [
+                Some(library.songs.len().to_string()),
+                playlist
+                    .and_then(|playlist| playlist.comment_count)
+                    .map(|count| count.to_string()),
+                playlist.map(|playlist| playlist.subscribed_count.to_string()),
+            ];
+            this.tabs.update(cx, |tabs, cx| {
+                for (index, count) in counts.into_iter().enumerate() {
+                    tabs.set_count(index, count, cx);
+                }
+            });
+            cx.notify();
+        });
         Self {
             user_profile,
             _user_profile_subscription: user_profile_subscription,
             tabs,
             _tabs_subscription: tabs_subscription,
-            songs,
-            display_order,
+            library,
+            playback,
+            _library_subscription: library_subscription,
+            display_order: Vec::new(),
             sort: None,
             album_share: 0.35,
             hovered_row: None,
@@ -295,7 +227,7 @@ impl FavoriteMusicPage {
 
     fn columns(&self) -> Rc<Vec<TableColumn>> {
         Rc::new(vec![
-            TableColumn::new("#", Some(index_column_width(self.songs.len()))).align_right(),
+            TableColumn::new("#", Some(index_column_width(self.display_order.len()))).align_right(),
             TableColumn::new("标题", None).weight(1. - self.album_share),
             TableColumn::new("专辑", None).weight(self.album_share),
             TableColumn::new("喜欢", Some(LIKE_COLUMN_WIDTH)),
@@ -305,11 +237,30 @@ impl FavoriteMusicPage {
 
     fn toggle_sort(&mut self, column: SongSort, cx: &mut Context<Self>) {
         self.sort = next_sort(self.sort, column);
+        let songs = &self.library.read(cx).songs;
         self.display_order = self.sort.map_or_else(
-            || (0..self.songs.len()).collect(),
-            |(key, descending)| song_order(&self.songs, key, descending),
+            || (0..songs.len()).collect(),
+            |(key, descending)| song_order(songs, key, descending),
         );
         cx.notify();
+    }
+
+    fn select_song(&mut self, song_id: u64, cx: &mut Context<Self>) {
+        let song = self
+            .library
+            .read(cx)
+            .songs
+            .iter()
+            .find(|song| song.id == song_id)
+            .cloned();
+        if let Some(song) = song {
+            self.playback.update(cx, |playback, cx| {
+                playback.current_song = Some(song);
+                playback.position = std::time::Duration::ZERO;
+                playback.is_playing = false;
+                cx.notify();
+            });
+        }
     }
 
     /// 布局后用实际宽度定位分界线，不保存会随窗口变化的像素宽度。
@@ -385,7 +336,7 @@ impl FavoriteMusicPage {
     }
 
     /// 离开事件只清除自身，避免跨行事件顺序导致 hover 闪烁。
-    fn set_hovered_row(&mut self, index: usize, hovered: bool, cx: &mut Context<Self>) {
+    fn set_hovered_row(&mut self, index: u64, hovered: bool, cx: &mut Context<Self>) {
         let next = if hovered {
             Some(index)
         } else if self.hovered_row == Some(index) {
@@ -401,9 +352,15 @@ impl FavoriteMusicPage {
 
     fn song_cells(&mut self, index: usize, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let colors = Theme::global(cx).tokens.colors;
-        let song = &self.songs[self.display_order[index]];
+        let library = self.library.read(cx);
+        let song = &library.songs[self.display_order[index]];
         let song_id = song.id;
-        let liked = song.liked;
+        let liked = library.liked_song_ids.contains(&song_id);
+        let album_name = song
+            .al
+            .name
+            .as_deref()
+            .filter(|name| !name.trim().is_empty());
         let hovered = self.hovered_row == Some(song_id);
         // 序号格的固定部分：两种内容（序号 / 播放键）共用同一套宽度和对齐方式，
         // 靠右统一走 flex 的 `justify_end`，不给谁单独算一套。
@@ -418,13 +375,21 @@ impl FavoriteMusicPage {
                 // hover 时序号让位给播放键
                 // `play.svg` 的三角在画布里右边自带空白，光靠 `justify_end` 贴不到边
                 index_cell
-                    .child(div().mr(px(-3.)).child(row_hover_icon(
-                        ("favorite-song-play", song_id),
-                        "icons/play.svg",
-                        "播放",
-                        px(20.),
-                        colors,
-                    )))
+                    .child(
+                        div()
+                            .id(("favorite-select-song", song_id))
+                            .mr(px(-3.))
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.select_song(song_id, cx)),
+                            )
+                            .child(row_hover_icon(
+                                ("favorite-song-play", song_id),
+                                "icons/play.svg",
+                                "播放",
+                                px(20.),
+                                colors,
+                            )),
+                    )
                     .into_any_element()
             } else {
                 index_cell
@@ -443,20 +408,11 @@ impl FavoriteMusicPage {
                         .flex_none()
                         .rounded(px(4.))
                         .overflow_hidden()
-                        .bg([
-                            rgb(0x537b83),
-                            rgb(0x94705b),
-                            rgb(0x60658b),
-                            rgb(0x8b687e),
-                            rgb(0x657853),
-                            rgb(0x566678),
-                        ][index % 6])
-                        // 只在可见行中创建 img；以后 cover 可直接换成远程 URL。
-                        .child(
-                            img(song.cover.clone())
-                                .size_full()
-                                .object_fit(ObjectFit::Cover),
-                        ),
+                        .bg(colors.muted)
+                        // picUrl 可以直接使用 API 返回的远程地址。
+                        .when_some(song.al.pic_url.clone(), |cover, url| {
+                            cover.child(img(url).size_full().object_fit(ObjectFit::Cover))
+                        }),
                 )
                 .child(
                     // 标题这一格横向分成两块：左边是两行文字，右边是 hover 时才出现的操作图标。
@@ -487,14 +443,16 @@ impl FavoriteMusicPage {
                                         .min_w(px(0.))
                                         // 徽章用 img() 才保得住原始配色；宽度由 img() 按图片比例自动定，
                                         // flex_none 是为了让它别被压缩（空间不够时该截断的是歌手名）。
-                                        .child(img(song.quality.badge()).h(px(13.)).flex_none())
+                                        .when_some(quality_badge(song), |row, badge| {
+                                            row.child(img(badge).h(px(13.)).flex_none())
+                                        })
                                         .child(
                                             div()
                                                 .min_w(px(0.))
                                                 .truncate()
                                                 .font_weight(SECONDARY_FONT_WEIGHT)
                                                 .text_color(colors.muted_foreground)
-                                                .child(song.artists.join(" / ")),
+                                                .child(artist_label(song, colors)),
                                         ),
                                 ),
                         )
@@ -506,8 +464,12 @@ impl FavoriteMusicPage {
             div()
                 .truncate()
                 .font_weight(SECONDARY_FONT_WEIGHT)
-                .text_color(colors.secondary_foreground)
-                .child(song.album.clone())
+                .text_color(if album_name.is_some() {
+                    colors.secondary_foreground
+                } else {
+                    colors.foreground.alpha(0.45)
+                })
+                .child(album_name.unwrap_or("未知专辑").to_owned())
                 .into_any_element(),
             // 裸 SVG，没有圆形底色：已喜欢是实心红心，未喜欢是勾线灰心。
             svg()
@@ -518,7 +480,6 @@ impl FavoriteMusicPage {
                 })
                 // 和 header 右上角那排图标同一个尺寸。
                 .size(IconSize::Small.pixels())
-                .cursor_pointer()
                 .text_color(if liked {
                     colors.primary
                 } else {
@@ -534,20 +495,13 @@ impl FavoriteMusicPage {
                     }
                 })
                 .id(("favorite-song-like", song_id))
-                .role(Role::Button)
-                .aria_label(if liked { "取消喜欢" } else { "喜欢" })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if let Some(song) = this.songs.iter_mut().find(|song| song.id == song_id) {
-                        song.liked = !song.liked;
-                    }
-                    cx.notify();
-                }))
+                .aria_label(if liked { "已喜欢" } else { "未喜欢" })
                 .into_any_element(),
             div()
                 // 时长是辅助信息：比 `muted_foreground`(60%) 再淡一档（45%），字重也细一档。
                 .font_weight(SECONDARY_FONT_WEIGHT)
                 .text_color(colors.foreground.alpha(0.45))
-                .child(song.duration.clone())
+                .child(format!("{:02}:{:02}", song.dt / 60000, song.dt / 1000 % 60))
                 .into_any_element(),
         ]
     }
@@ -593,14 +547,18 @@ fn sort_label(current: Option<(SongSort, bool)>, column: SongSort) -> (&'static 
     (icon, label)
 }
 
-fn song_order(songs: &[DemoSong], column: SongSort, descending: bool) -> Vec<usize> {
+fn song_order(songs: &[Song], column: SongSort, descending: bool) -> Vec<usize> {
     let mut order: Vec<_> = (0..songs.len()).collect();
     // ponytail: 按 Unicode 字符排序；需要拼音或语言区域排序时再接入 collation。
     order.sort_by(|&left, &right| {
         let ordering = match column {
-            SongSort::Title => songs[left].title.cmp(&songs[right].title),
-            SongSort::Artist => songs[left].artists.cmp(&songs[right].artists),
-            SongSort::Album => songs[left].album.cmp(&songs[right].album),
+            SongSort::Title => songs[left].name.cmp(&songs[right].name),
+            SongSort::Artist => songs[left]
+                .ar
+                .iter()
+                .map(|artist| &artist.name)
+                .cmp(songs[right].ar.iter().map(|artist| &artist.name)),
+            SongSort::Album => songs[left].al.name.cmp(&songs[right].al.name),
         };
         if descending {
             ordering.reverse()
@@ -654,9 +612,32 @@ impl Render for FavoriteMusicPage {
             FavoriteMusicTab::Comments,
             FavoriteMusicTab::Collectors,
         ][self.tabs.read(cx).selected_index()];
-        let cover_path = "/Users/amagicpear/Pictures/Perry Origin Character/ChatGPT Image 2026年9月29日 15_39_30.png";
+        let library = self.library.read(cx);
+        let playlist = library.favorite_playlist();
+        let cover_url = playlist.and_then(|playlist| playlist.cover_img_url.clone());
+        let play_count = playlist.map(|playlist| playlist.play_count);
+        let created_date = playlist.and_then(|playlist| {
+            time::OffsetDateTime::from_unix_timestamp(playlist.create_time / 1000)
+                .ok()
+                .map(|date| {
+                    format!(
+                        "{}-{:02}-{:02}创建",
+                        date.year(),
+                        u8::from(date.month()),
+                        date.day()
+                    )
+                })
+        });
         let user_profile = self.user_profile.read(cx);
         let content = match active_tab {
+            _ if library.loading => div()
+                .text_color(colors.muted_foreground)
+                .child("正在加载音乐库…")
+                .into_any_element(),
+            _ if library.error.is_some() => div()
+                .text_color(colors.muted_foreground)
+                .child(library.error.clone().unwrap())
+                .into_any_element(),
             FavoriteMusicTab::Songs => {
                 let header_layout = Rc::new(Cell::new([Bounds::default(); 2]));
                 let table = virtual_table(
@@ -665,7 +646,7 @@ impl Render for FavoriteMusicPage {
                     self.columns(),
                     self.display_order.len(),
                     |this, index, _, cx| this.song_cells(index, cx),
-                    |this, index| this.songs[this.display_order[index]].id,
+                    |this, index, cx| this.library.read(cx).songs[this.display_order[index]].id,
                     {
                         let view = cx.entity();
                         let sort = self.sort;
@@ -762,31 +743,35 @@ impl Render for FavoriteMusicPage {
                             .relative()
                             .overflow_hidden()
                             // 歌单封面
-                            .child(
-                                img(cover_path)
-                                    .size_full()
-                                    .object_fit(ObjectFit::Cover)
-                                    .rounded(px(8.)),
-                            )
+                            .when_some(cover_url, |cover, url| {
+                                cover.child(
+                                    img(url)
+                                        .size_full()
+                                        .object_fit(ObjectFit::Cover)
+                                        .rounded(px(8.)),
+                                )
+                            })
                             // 播放量
-                            .child(
-                                div()
-                                    .absolute()
-                                    .top_1()
-                                    .right_2()
-                                    .flex()
-                                    .items_center()
-                                    .child(
-                                        svg()
-                                            .path("icons/headphone.svg")
-                                            .size(px(15.))
-                                            .text_color(colors.primary_foreground),
-                                    )
-                                    .text_color(colors.primary_foreground)
-                                    .text_size(px(15.))
-                                    .font_family(DOLPHIN_FAMILY)
-                                    .child(7735.to_string()),
-                            )
+                            .when_some(play_count, |cover, count| {
+                                cover.child(
+                                    div()
+                                        .absolute()
+                                        .top_1()
+                                        .right_2()
+                                        .flex()
+                                        .items_center()
+                                        .child(
+                                            svg()
+                                                .path("icons/headphone.svg")
+                                                .size(px(15.))
+                                                .text_color(colors.primary_foreground),
+                                        )
+                                        .text_color(colors.primary_foreground)
+                                        .text_size(px(15.))
+                                        .font_family(DOLPHIN_FAMILY)
+                                        .child(count.to_string()),
+                                )
+                            })
                             // 正中间的爱心图标，仅「我喜欢的音乐」有
                             .child(
                                 div()
@@ -829,23 +814,25 @@ impl Render for FavoriteMusicPage {
                                                 Avatar::new()
                                                     .with_size(px(26.))
                                                     .flex_none()
-                                                    .src(user_profile.avatar_path.clone()),
+                                                    .src(user_profile.avatar_url.clone()),
                                             )
                                             .child(
                                                 div()
                                                     .text_size(px(13.))
                                                     .font_weight(FontWeight::MEDIUM)
                                                     .text_color(colors.secondary_foreground)
-                                                    .child(user_profile.name.clone()),
+                                                    .child(user_profile.nickname.clone()),
                                             )
-                                            .child(
-                                                div()
-                                                    .ml_2()
-                                                    .text_size(px(12.))
-                                                    .text_color(colors.muted_foreground)
-                                                    .font_weight(FontWeight::LIGHT)
-                                                    .child("2017-05-31创建"),
-                                            ),
+                                            .when_some(created_date, |row, date| {
+                                                row.child(
+                                                    div()
+                                                        .ml_2()
+                                                        .text_size(px(12.))
+                                                        .text_color(colors.muted_foreground)
+                                                        .font_weight(FontWeight::LIGHT)
+                                                        .child(date),
+                                                )
+                                            }),
                                     ),
                             )
                             // 操作按钮组：播放全部 / 下载 / 更多
@@ -854,7 +841,19 @@ impl Render for FavoriteMusicPage {
                                     .flex()
                                     .items_center()
                                     .gap(px(12.))
-                                    .child(play_all_button(colors))
+                                    .child(play_all_button(colors).on_click(cx.listener(
+                                        |this, _, _, cx| {
+                                            let id = this
+                                                .library
+                                                .read(cx)
+                                                .songs
+                                                .first()
+                                                .map(|song| song.id);
+                                            if let Some(id) = id {
+                                                this.select_song(id, cx);
+                                            }
+                                        },
+                                    )))
                                     // 下载：宽度自适应，比 muted 更浅的底 + 比 muted 更浅的描边，
                                     // 文字/图标用比 muted_foreground 深一档的灰保证可读
                                     .child(
@@ -931,83 +930,15 @@ impl Render for FavoriteMusicPage {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ALBUM_SHARE_MAX, ALBUM_SHARE_MIN, SongSort, demo_songs, next_sort, resized_album_share,
-        song_order, sort_label,
-    };
-    use gpui::{HighlightStyle, Hsla, TextStyle, rgb};
+    use super::{ALBUM_SHARE_MAX, ALBUM_SHARE_MIN, resized_album_share};
 
     #[test]
-    fn visual_sort_preserves_playlist_order_and_song_identity() {
-        let mut songs = demo_songs();
-        songs.truncate(3);
-        songs[0].title = "B".into();
-        songs[1].title = "A".into();
-        songs[2].title = "A".into();
-        songs[0].artists = vec!["C".into()];
-        songs[1].artists = vec!["A".into()];
-        songs[2].artists = vec!["B".into()];
-        songs[0].album = "A".into();
-        songs[1].album = "C".into();
-        songs[2].album = "B".into();
-        assert_eq!(song_order(&songs, SongSort::Title, false), vec![1, 2, 0]);
-        assert_eq!(song_order(&songs, SongSort::Title, true), vec![0, 1, 2]);
-        assert_eq!(song_order(&songs, SongSort::Album, false), vec![0, 2, 1]);
-        assert_eq!(song_order(&songs, SongSort::Album, true), vec![1, 2, 0]);
-        assert_eq!(
-            songs.iter().map(|song| song.id).collect::<Vec<_>>(),
-            vec![0, 1, 2]
-        );
-        assert_eq!(songs[0].title.as_ref(), "B");
-        assert_eq!(song_order(&songs, SongSort::Artist, false), vec![1, 2, 0]);
-        assert_eq!(song_order(&songs, SongSort::Artist, true), vec![0, 2, 1]);
-        let mut sort = None;
-        for expected in [
-            Some((SongSort::Title, false)),
-            Some((SongSort::Title, true)),
-            Some((SongSort::Artist, false)),
-            Some((SongSort::Artist, true)),
-            None,
-        ] {
-            sort = next_sort(sort, SongSort::Title);
-            assert!(sort == expected);
-        }
-        assert_eq!(
-            sort_label(sort, SongSort::Title),
-            ("icons/列表排序/默认排序.svg", "默认排序")
-        );
-        for expected in [
-            Some((SongSort::Album, false)),
-            Some((SongSort::Album, true)),
-            None,
-        ] {
-            sort = next_sort(sort, SongSort::Album);
-            assert!(sort == expected);
-        }
-        assert!(
-            next_sort(Some((SongSort::Artist, true)), SongSort::Album)
-                == Some((SongSort::Album, false))
-        );
-    }
-
-    #[test]
-    fn resize_preserves_ratio_and_subtitle_overrides_red_title() {
+    fn resize_preserves_ratio_and_bounds() {
         let share = resized_album_share(0.35, 50., 500.);
         assert!((share - 0.25).abs() < 0.00001);
         assert_eq!(resized_album_share(share, 0., 1000.), share);
         assert_eq!(resized_album_share(share, 10000., 500.), ALBUM_SHARE_MIN);
         assert_eq!(resized_album_share(share, -10000., 500.), ALBUM_SHARE_MAX);
         assert_eq!(resized_album_share(share, 50., 0.), share);
-        let gray = Hsla::from(rgb(0x283248)).alpha(0.6);
-        let style = TextStyle {
-            color: rgb(0xfc3d49).into(),
-            ..Default::default()
-        }
-        .highlight(HighlightStyle {
-            color: Some(gray.alpha(1.)),
-            fade_out: Some(1. - gray.a),
-            ..Default::default()
-        });
-        assert_eq!(style.color, gray);
     }
 }

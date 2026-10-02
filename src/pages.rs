@@ -11,6 +11,7 @@ mod roaming;
 mod sidebar_page;
 
 use crate::state::user::UserProfile;
+use crate::state::{library::MusicLibrary, playback::PlaybackState};
 use gpui::*;
 
 pub use main_content::MainContent;
@@ -104,7 +105,13 @@ impl ContentPage {
     ///
     /// 9 个页面是不同的类型，用 `AnyView` 抹平后才能放进同一张表里；
     /// 这样 `MainContent` 可以一直持有它们，切走再切回不会丢 View 自身的状态。
-    fn build(self, user_profile: Entity<UserProfile>, cx: &mut App) -> AnyView {
+    fn build(
+        self,
+        user_profile: Entity<UserProfile>,
+        library: Entity<MusicLibrary>,
+        playback: Entity<PlaybackState>,
+        cx: &mut App,
+    ) -> AnyView {
         match self {
             Self::Recommend => cx.new(|_| recommend::RecommendPage).into(),
             Self::Featured => cx.new(|_| featured::FeaturedPage).into(),
@@ -112,7 +119,9 @@ impl ContentPage {
             Self::Roaming => cx.new(|_| roaming::RoamingPage).into(),
             Self::Following => cx.new(|_| following::FollowingPage).into(),
             Self::FavoriteMusic => cx
-                .new(|cx| favorite_music::FavoriteMusicPage::new(user_profile, cx))
+                .new(|cx| {
+                    favorite_music::FavoriteMusicPage::new(user_profile, library, playback, cx)
+                })
                 .into(),
             Self::Recent => cx.new(|_| recent::RecentPage).into(),
             Self::MyPodcast => cx.new(|_| my_podcast::MyPodcastPage).into(),

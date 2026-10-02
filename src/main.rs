@@ -1,3 +1,4 @@
+mod api;
 mod assets;
 mod components;
 mod pages;
@@ -10,10 +11,7 @@ use assets::Assets;
 use components::PlayerBar;
 use gpui::*;
 use pages::MainContent;
-use state::{
-    playback::{PlaybackState, Song},
-    user::UserProfile,
-};
+use state::{library::MusicLibrary, playback::PlaybackState, user::UserProfile};
 use std::time::Duration;
 
 struct MainWindow {
@@ -34,12 +32,15 @@ impl Render for MainWindow {
     }
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let api = api::MusicApi::from_env()?;
     gpui_kit::application()
+        .with_http_client(api.http_client())
         .with_assets(Assets {
             base: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets"),
         })
-        .run(|cx: &mut App| {
+        .run(move |cx: &mut App| {
+            cx.set_global(api);
             theme::load_fonts(cx);
             gpui_kit::init(cx);
             theme::init(cx);
@@ -57,19 +58,15 @@ fn main() {
                 cx,
                 |window, cx| {
                     let playback = cx.new(|_| PlaybackState {
-                        current_song: Some(Song {
-                            title: "Run Away With Me".into(),
-                            artist: "Carly Rae Jepsen".into(),
-                            duration: Duration::from_secs(210),
-                        }),
-                        position: Duration::from_secs(74),
+                        current_song: None,
+                        position: Duration::ZERO,
                         is_playing: false,
                     });
-                    let user_profile = cx.new(|_| UserProfile {
-                        name: "一只会魔法的梨".into(),
-                        avatar_path: "/Users/amagicpear/Pictures/Perry Origin Character/IMG_20240601_133150.jpeg".into(),
+                    let user_profile = cx.new(UserProfile::new);
+                    let library = cx.new(|cx| MusicLibrary::new(user_profile.clone(), cx));
+                    let main_content = cx.new(|cx| {
+                        MainContent::new(window, user_profile, library, playback.clone(), cx)
                     });
-                    let main_content = cx.new(|cx| MainContent::new(window, user_profile, cx));
                     let player_bar = cx.new(|cx| PlayerBar::new(playback, window, cx));
                     cx.new(|_| MainWindow {
                         main_content,
@@ -79,4 +76,5 @@ fn main() {
             )
             .unwrap();
         });
+    Ok(())
 }

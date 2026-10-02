@@ -7,6 +7,7 @@ use super::ContentPage;
 use super::sidebar_page::{SidebarChanged, SidebarPage};
 use crate::components::ResizeDragPreview;
 use crate::state::user::UserProfile;
+use crate::state::{library::MusicLibrary, playback::PlaybackState};
 use crate::theme::{IconSize, PRESSED_ICON_ALPHA};
 use gpui_kit::base::input::{Input, InputState};
 use gpui_kit::base::{Button, ColorTokens, Scrollbar, ScrollbarMode, Theme};
@@ -36,9 +37,11 @@ impl MainContent {
     pub fn new(
         window: &mut Window,
         user_profile: Entity<UserProfile>,
+        library: Entity<MusicLibrary>,
+        playback: Entity<PlaybackState>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let sidebar = cx.new(|_| SidebarPage::new());
+        let sidebar = cx.new(|cx| SidebarPage::new(library.clone(), cx));
         let sidebar_subscription = cx.subscribe(&sidebar, |_, _, _: &SidebarChanged, cx| {
             cx.notify();
         });
@@ -53,7 +56,12 @@ impl MainContent {
 
         // 页面在这里全部建好；切走再切回仍是同一个 View 实例。
         let pages = ContentPage::all()
-            .map(|page| (page, page.build(user_profile.clone(), cx)))
+            .map(|page| {
+                (
+                    page,
+                    page.build(user_profile.clone(), library.clone(), playback.clone(), cx),
+                )
+            })
             .collect();
         let user_profile_subscription = cx.observe(&user_profile, |_, _, cx| cx.notify());
 
@@ -124,8 +132,8 @@ fn hover_icon(id: &'static str, path: &'static str, colors: ColorTokens) -> impl
 fn page_header(
     colors: ColorTokens,
     search_input: Entity<InputState>,
-    user_name: String,
-    avatar_path: String,
+    nickname: String,
+    avatar_url: String,
 ) -> impl IntoElement {
     TitleBar::new()
         .h(px(72.))
@@ -165,12 +173,7 @@ fn page_header(
                         .ml_auto()
                         .flex_none()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(
-                            Avatar::new()
-                                .with_size(px(28.))
-                                .flex_none()
-                                .src(avatar_path),
-                        ),
+                        .child(Avatar::new().with_size(px(28.)).flex_none().src(avatar_url)),
                 )
                 .child(
                     div()
@@ -188,8 +191,7 @@ fn page_header(
                         // 所以这里的 hover 一并让昵称变深到 foreground。
                         .text_color(colors.foreground.alpha(0.7))
                         .hover(|style| style.text_color(colors.foreground))
-                        .child(user_name)
-                        .child(img("icons/vip-level.svg").w(px(48.)).h(px(16.)).flex_none())
+                        .child(nickname)
                         .child(
                             svg()
                                 .path("icons/unfold.svg")
@@ -252,8 +254,8 @@ impl Render for MainContent {
                     .child(page_header(
                         colors,
                         self.search_input.clone(),
-                        user_profile.name.clone(),
-                        user_profile.avatar_path.clone(),
+                        user_profile.nickname.clone(),
+                        user_profile.avatar_url.clone(),
                     ))
                     // 右侧具体页面
                     .child(

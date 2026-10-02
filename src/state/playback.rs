@@ -1,10 +1,5 @@
+use super::song::Song;
 use std::time::Duration;
-
-pub struct Song {
-    pub title: String,
-    pub artist: String,
-    pub duration: Duration,
-}
 
 pub struct PlaybackState {
     pub current_song: Option<Song>,
@@ -19,7 +14,7 @@ impl PlaybackState {
             return;
         }
         self.position = self.current_song.as_ref().map_or(Duration::ZERO, |song| {
-            song.duration.mul_f64(f64::from(progress.clamp(0., 1.)))
+            song.duration().mul_f64(f64::from(progress.clamp(0., 1.)))
         });
     }
 
@@ -28,7 +23,7 @@ impl PlaybackState {
             return 0.;
         };
 
-        let duration = song.duration.as_secs_f32();
+        let duration = song.duration().as_secs_f32();
         if duration == 0. {
             0.
         } else {
@@ -51,9 +46,8 @@ mod tests {
         assert_eq!(playback.progress(), 0.);
 
         playback.current_song = Some(Song {
-            title: String::new(),
-            artist: String::new(),
-            duration: Duration::from_secs(10),
+            dt: 10000,
+            ..Default::default()
         });
         assert_eq!(playback.progress(), 0.5);
 

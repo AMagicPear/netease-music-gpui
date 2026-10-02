@@ -1,11 +1,13 @@
 use std::time::Duration;
 
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_kit::base::{Button, ColorTokens, Theme, Transition, transition};
 
+use super::artist_label;
 use super::progress_bar::ProgressBar;
 use crate::state::playback::PlaybackState;
-use crate::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
+use crate::theme::{IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
 
 pub struct PlayerBar {
     playback: Entity<PlaybackState>,
@@ -34,43 +36,6 @@ impl PlayerBar {
             _progress_subscription: progress_subscription,
         }
     }
-}
-
-fn interaction_count(
-    icon_path: &'static str,
-    count: &'static str,
-    color: Hsla,
-    colors: ColorTokens,
-) -> impl IntoElement {
-    div()
-        .ml_0p5()
-        .w(px(28.))
-        .h(px(24.))
-        .flex_none()
-        .child(
-            svg()
-                .path(icon_path)
-                .absolute()
-                .left_0()
-                .bottom_0()
-                .size(IconSize::Large.pixels())
-                .text_color(color),
-        )
-        .child(
-            div()
-                .absolute()
-                .top_0()
-                .left(px(16.))
-                .px(px(2.))
-                .rounded_full()
-                .bg(colors.surface)
-                .text_color(color)
-                .text_size(px(9.))
-                .font_family(DOLPHIN_FAMILY)
-                .font_weight(FontWeight::SEMIBOLD)
-                .line_height(px(10.))
-                .child(count),
-        )
 }
 
 fn hover_icon(
@@ -115,13 +80,27 @@ impl Render for PlayerBar {
         } else {
             IconSize::Large.pixels()
         };
-        let (title, artist, is_playing) = {
+        let (title, artist, cover_url, is_playing) = {
             let playback = self.playback.read(cx);
             playback
                 .current_song
                 .as_ref()
-                .map(|song| (song.title.clone(), song.artist.clone(), playback.is_playing))
-                .unwrap_or_else(|| (String::new(), String::new(), playback.is_playing))
+                .map(|song| {
+                    (
+                        song.name.clone(),
+                        artist_label(song, colors),
+                        song.al.pic_url.clone(),
+                        playback.is_playing,
+                    )
+                })
+                .unwrap_or_else(|| {
+                    (
+                        String::new(),
+                        StyledText::new(""),
+                        None,
+                        playback.is_playing,
+                    )
+                })
         };
         let play_pause_icon_path = if is_playing {
             "icons/pause.svg"
@@ -171,8 +150,15 @@ impl Render for PlayerBar {
                             .flex()
                             .items_center()
                             .gap(px(10.))
-                            // 旋转黑胶封面
-                            .child(img("images/miniVinyl.png").size(px(60.)).flex_none())
+                            .when_some(cover_url, |row, url| {
+                                row.child(
+                                    img(url)
+                                        .size(px(60.))
+                                        .rounded(px(4.))
+                                        .object_fit(ObjectFit::Cover)
+                                        .flex_none(),
+                                )
+                            })
                             .child(
                                 div()
                                     .flex()
@@ -197,19 +183,7 @@ impl Render for PlayerBar {
                                             .truncate()
                                             .child(artist),
                                     ),
-                            )
-                            .child(interaction_count(
-                                "icons/like.svg",
-                                "10w+",
-                                colors.primary,
-                                colors,
-                            ))
-                            .child(interaction_count(
-                                "icons/comment.svg",
-                                "999+",
-                                colors.muted_foreground,
-                                colors,
-                            )),
+                            ),
                     )
                     // 中间：收藏与播放控制
                     .child(
@@ -315,13 +289,6 @@ impl Render for PlayerBar {
                             .justify_end()
                             .gap(px(18.))
                             .text_color(colors.muted_foreground)
-                            .child(hover_icon(
-                                "player-sq-button",
-                                "icons/音质选项/sq.svg",
-                                IconSize::Middle.pixels(),
-                                colors.muted_foreground,
-                                colors,
-                            ))
                             .child(hover_icon(
                                 "player-collect-button",
                                 "icons/collect.svg",
