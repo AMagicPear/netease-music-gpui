@@ -87,11 +87,8 @@ impl Render for ProgressBar {
         let colors = Theme::global(cx).tokens.colors;
         let progress = self.slider.read(cx).percentage().end;
         let playback = self.playback.read(cx);
-        let duration = playback
-            .current_song
-            .as_ref()
-            .map_or(Duration::ZERO, |song| song.duration());
-        let enabled = !duration.is_zero();
+        let duration = playback.duration();
+        let enabled = playback.can_seek();
         let elapsed = if self.dragging {
             duration.mul_f64(f64::from(progress))
         } else {

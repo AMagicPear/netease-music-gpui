@@ -12,7 +12,6 @@ use components::PlayerBar;
 use gpui::*;
 use pages::MainContent;
 use state::{library::MusicLibrary, playback::PlaybackState, user::UserProfile};
-use std::time::Duration;
 
 struct MainWindow {
     main_content: Entity<MainContent>,
@@ -57,11 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 cx,
                 |window, cx| {
-                    let playback = cx.new(|_| PlaybackState {
-                        current_song: None,
-                        position: Duration::ZERO,
-                        is_playing: false,
-                    });
+                    let playback = cx.new(PlaybackState::new);
                     let user_profile = cx.new(UserProfile::new);
                     let library = cx.new(|cx| MusicLibrary::new(user_profile.clone(), cx));
                     let main_content = cx.new(|cx| {

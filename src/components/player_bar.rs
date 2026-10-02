@@ -191,7 +191,7 @@ impl Render for PlayerBar {
                         song.name.clone(),
                         artist_label(song, colors),
                         song.al.pic_url.clone(),
-                        playback.is_playing,
+                        playback.is_play_requested(),
                     )
                 })
                 .unwrap_or_else(|| {
@@ -199,7 +199,7 @@ impl Render for PlayerBar {
                         String::new(),
                         StyledText::new(""),
                         None,
-                        playback.is_playing,
+                        playback.is_play_requested(),
                     )
                 })
         };
@@ -213,6 +213,11 @@ impl Render for PlayerBar {
             .size(play_pause_icon_size)
             .text_color(colors.primary_foreground)
             .into_any_element();
+        let playback = self.playback.read(cx);
+        let playback_message = playback
+            .error
+            .clone()
+            .or_else(|| playback.loading.then(|| "正在加载音频…".to_string()));
 
         div()
             .w_full()
@@ -291,7 +296,13 @@ impl Render for PlayerBar {
                                             .text_color(colors.muted_foreground)
                                             .text_size(px(13.))
                                             .truncate()
-                                            .child(artist),
+                                            .when_some(
+                                                playback_message.clone(),
+                                                |label, message| label.child(message),
+                                            )
+                                            .when(playback_message.is_none(), |label| {
+                                                label.child(artist)
+                                            }),
                                     ),
                             )
                             .child(interaction_count(
@@ -324,13 +335,24 @@ impl Render for PlayerBar {
                                 colors.muted_foreground,
                                 colors,
                             ))
-                            .child(hover_icon(
-                                "player-previous-button",
-                                "icons/pre.svg",
-                                IconSize::Large.pixels(),
-                                colors.secondary_foreground,
-                                colors,
-                            ))
+                            .child(
+                                div()
+                                    .id("player-previous-control")
+                                    .role(Role::Button)
+                                    .aria_label("上一首")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.playback.update(cx, |playback, cx| {
+                                            playback.change_song(-1, cx)
+                                        });
+                                    }))
+                                    .child(hover_icon(
+                                        "player-previous-button",
+                                        "icons/pre.svg",
+                                        IconSize::Large.pixels(),
+                                        colors.secondary_foreground,
+                                        colors,
+                                    )),
+                            )
                             .child(
                                 div()
                                     .id("play-pause-hover-region")
@@ -369,6 +391,11 @@ impl Render for PlayerBar {
                                     }))
                                     .child(
                                         Button::new("play-pause-button")
+                                            .aria_label(if is_playing {
+                                                "暂停"
+                                            } else {
+                                                "播放"
+                                            })
                                             .absolute()
                                             .left(px(if play_button_enlarged { -1. } else { 0. }))
                                             .top(px(if play_button_enlarged { -1. } else { 0. }))
@@ -382,20 +409,29 @@ impl Render for PlayerBar {
                                             .active(|style| style.opacity(PRESSED_OPACITY))
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 this.playback.update(cx, |playback, cx| {
-                                                    playback.is_playing = !playback.is_playing;
-                                                    cx.notify();
+                                                    playback.toggle_playing(cx);
                                                 });
                                             }))
                                             .child(play_pause_icon),
                                     ),
                             )
-                            .child(hover_icon(
-                                "player-next-button",
-                                "icons/next.svg",
-                                IconSize::Large.pixels(),
-                                colors.secondary_foreground,
-                                colors,
-                            ))
+                            .child(
+                                div()
+                                    .id("player-next-control")
+                                    .role(Role::Button)
+                                    .aria_label("下一首")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.playback
+                                            .update(cx, |playback, cx| playback.change_song(1, cx));
+                                    }))
+                                    .child(hover_icon(
+                                        "player-next-button",
+                                        "icons/next.svg",
+                                        IconSize::Large.pixels(),
+                                        colors.secondary_foreground,
+                                        colors,
+                                    )),
+                            )
                             .child(hover_icon(
                                 "player-playlist-button",
                                 "icons/playlist.svg",

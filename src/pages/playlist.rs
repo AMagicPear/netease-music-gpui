@@ -304,19 +304,15 @@ impl PlaylistPage {
     }
 
     fn select_song(&mut self, song_id: u64, cx: &mut Context<Self>) {
-        let song = self
-            .detail
-            .read(cx)
-            .songs
+        let detail = self.detail.read(cx);
+        let songs = self
+            .display_order
             .iter()
-            .find(|song| song.id == song_id)
-            .cloned();
-        if let Some(song) = song {
-            self.playback.update(cx, |playback, cx| {
-                playback.select_song(song);
-                cx.notify();
-            });
-        }
+            .map(|&index| detail.songs[index].clone())
+            .collect();
+        self.playback.update(cx, |playback, cx| {
+            playback.play_from_queue(songs, song_id, cx);
+        });
     }
 
     /// 布局后用实际宽度定位分界线，不保存会随窗口变化的像素宽度。
@@ -441,8 +437,7 @@ impl PlaylistPage {
                             .id(("playlist-pause-song", song_id))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.playback.update(cx, |playback, cx| {
-                                    playback.is_playing = false;
-                                    cx.notify();
+                                    playback.set_playing(false, cx);
                                 });
                             }))
                             .child(row_hover_icon(

@@ -14,6 +14,7 @@ use crate::state::{
 pub struct MusicApi {
     pub client: ApiClient,
     pub runtime: Runtime,
+    audio_http: reqwest::Client,
 }
 
 impl Global for MusicApi {}
@@ -34,6 +35,10 @@ impl MusicApi {
         Ok(Self {
             client: create_client(Some(cookie)),
             runtime: Runtime::new()?,
+            audio_http: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(90))
+                .build()?,
         })
     }
 
@@ -91,6 +96,55 @@ impl MusicApi {
                     .ok_or_else(|| "评论计数格式无效".into())
             }),
         ]
+    }
+
+    pub fn audio_http(&self) -> reqwest::Client {
+        self.audio_http.clone()
+    }
+
+    pub async fn song_audio(
+        client: ApiClient,
+        http: reqwest::Client,
+        song_id: u64,
+    ) -> Result<Vec<u8>, String> {
+        let response = Self::request(
+            client.song_url_v1(
+                &Query::new()
+                    .param("id", &song_id.to_string())
+                    .param("level", "standard"),
+            ),
+        )
+        .await?;
+        let url = song_audio_url(&response.body, song_id)?;
+        let mut response = http
+            .get(url)
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(|_| "音频下载失败，请检查网络后重试".to_string())?;
+        // ponytail: 整首下载后播放，最多 100 MiB；需要更快起播时改用可 seek 的流式缓存。
+        const MAX_AUDIO_BYTES: usize = 100 * 1024 * 1024;
+        if response
+            .content_length()
+            .is_some_and(|size| size > MAX_AUDIO_BYTES as u64)
+        {
+            return Err("音频文件过大，暂不支持播放".into());
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| "音频下载中断，请重试".to_string())?
+        {
+            if bytes.len() + chunk.len() > MAX_AUDIO_BYTES {
+                return Err("音频文件过大，暂不支持播放".into());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        if bytes.is_empty() {
+            return Err("服务器返回了空音频文件".into());
+        }
+        Ok(bytes)
     }
 
     pub async fn user_playlists(client: &ApiClient, user_id: u64) -> Result<Vec<Playlist>, String> {
@@ -153,6 +207,26 @@ impl MusicApi {
     }
 }
 
+fn song_audio_url(body: &serde_json::Value, song_id: u64) -> Result<reqwest::Url, String> {
+    let track = body["data"]
+        .as_array()
+        .and_then(|tracks| {
+            tracks
+                .iter()
+                .find(|track| track["id"].as_u64() == Some(song_id))
+        })
+        .ok_or_else(|| "播放地址响应缺少当前歌曲".to_string())?;
+    let url = track["url"]
+        .as_str()
+        .filter(|url| !url.is_empty())
+        .ok_or_else(|| "这首歌暂无播放权限或已下架".to_string())?;
+    let url = reqwest::Url::parse(url).map_err(|_| "歌曲播放地址无效".to_string())?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("歌曲播放地址协议不受支持".into());
+    }
+    Ok(url)
+}
+
 /// song_detail 的响应顺序不作为歌单顺序；缺失和额外的歌曲不补造。
 fn ordered_playlist_songs(tracks: &[TrackId], songs: Vec<Song>) -> Vec<Song> {
     let mut by_id: HashMap<_, _> = songs.into_iter().map(|song| (song.id, song)).collect();
@@ -167,6 +241,19 @@ mod tests {
     use super::*;
     use futures::AsyncReadExt;
     use gpui::http_client::HttpClient;
+
+    #[test]
+    fn playback_url_requires_matching_song_and_http_address() {
+        let body = serde_json::json!({"data": [
+            {"id": 1, "url": "https://example.com/song.mp3"},
+            {"id": 2, "url": null},
+            {"id": 3, "url": "file:///song.mp3"}
+        ]});
+        assert_eq!(song_audio_url(&body, 1).unwrap().scheme(), "https");
+        for id in [2, 3, 4] {
+            assert!(song_audio_url(&body, id).is_err());
+        }
+    }
 
     #[test]
     fn playlist_order_follows_track_ids_and_skips_unavailable_songs() {
