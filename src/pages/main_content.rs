@@ -213,7 +213,12 @@ fn page_header(
                     "icons/setting.svg",
                     colors,
                 ))
-                .child(hover_icon("header-skin-button", "icons/skin.svg", colors)),
+                .child(hover_icon("header-skin-button", "icons/skin.svg", colors))
+                .child(hover_icon(
+                    "header-mini-button",
+                    "icons/menu_mini.svg",
+                    colors,
+                )),
         )
 }
 
