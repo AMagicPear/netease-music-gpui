@@ -15,7 +15,6 @@ const DOLPHIN_BOLD: &[u8] = include_bytes!("../assets/font/dolphin_bold.ttf");
 
 #[derive(Clone, Copy)]
 pub enum IconSize {
-    #[allow(dead_code)]
     Small,
     Middle,
     Large,

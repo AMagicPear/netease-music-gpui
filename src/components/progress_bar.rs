@@ -8,6 +8,7 @@ use gpui_kit::base::{
 use gpui_kit::component::slider::{SliderEvent, SliderState};
 
 use crate::state::playback::PlaybackState;
+use crate::theme::DOLPHIN_FAMILY;
 
 /// 轨道静止 / 悬浮时的高度
 const REST_HEIGHT: f32 = 2.;
@@ -214,7 +215,7 @@ impl Render for ProgressBar {
                                                         .rounded_full()
                                                         .bg(colors.surface)
                                                         .text_color(colors.foreground)
-                                                        .font_family("Dolphin")
+                                                        .font_family(DOLPHIN_FAMILY)
                                                         .font_weight(FontWeight::BOLD)
                                                         .text_size(px(13.5))
                                                         .line_height(px(16.))

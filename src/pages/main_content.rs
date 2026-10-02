@@ -5,6 +5,7 @@ use gpui::*;
 
 use super::ContentPage;
 use super::sidebar_page::{SidebarChanged, SidebarPage};
+use crate::components::ResizeDragPreview;
 use crate::state::user::UserProfile;
 use crate::theme::{IconSize, PRESSED_ICON_ALPHA};
 use gpui_kit::base::input::{Input, InputState};
@@ -297,13 +298,5 @@ impl Render for MainContent {
                         },
                     )),
             )
-    }
-}
-
-struct ResizeDragPreview;
-
-impl Render for ResizeDragPreview {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div().size(px(0.))
     }
 }

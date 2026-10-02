@@ -3,6 +3,7 @@ use gpui_kit::base::{Button, ColorTokens, Theme};
 use gpui_kit::component::Sizable;
 use gpui_kit::component::avatar::Avatar;
 use gpui_kit::component::native_menu::NativeMenu;
+use std::cell::Cell;
 use std::rc::Rc;
 
 /// 操作按钮的统一高度
@@ -10,10 +11,55 @@ const ACTION_BUTTON_HEIGHT: Pixels = px(36.);
 /// 带文字按钮的左右内边距，宽度靠它 + 内容自适应
 const ACTION_BUTTON_PADDING: Pixels = px(12.);
 
+/// Dolphin 里最宽的数字是 600/1000 em。
+///
+/// 字体内嵌在二进制里、字号也固定，所以这些数事先就能知道：查 `assets/font/dolphin.ttf`
+/// 的 `hmtx` 表，数字占 520 或 600 units（em = 1000 units）。取最宽的 0.6em 就是所有
+/// 数字的上界 —— 管它渲染出来是 `1` 还是 `7`，按最宽的算都不会挤到换行。
+const DOLPHIN_WIDEST_DIGIT_EM: f32 = 0.6;
+
+/// 序号列宽：字体和字号都是我们定的，一位数字占多宽是个已知常数，乘位数即可。
+///
+/// 不能交给布局自己撑开：`virtual_table` 为了虚拟化，表头和每一行都是**各自独立**的
+/// 布局根，由内容撑开的话每行都会算出不同宽度，列就错位了。所以只能算一次再复用。
+fn index_column_width(row_count: usize) -> Pixels {
+    // 末行渲染的是 `format!("{:02}", row_count)`，它就是最长的那个序号。
+    let digits = format!("{:02}", row_count).chars().count() as f32;
+    // 字号跟行内保持一致（ROW_TEXT_SIZE），以后改字号不用回来动这里。
+    let width = digits * DOLPHIN_WIDEST_DIGIT_EM * f32::from(ROW_TEXT_SIZE);
+    // 向上取整：小数宽度按设备像素取整后可能差一丁点，而这点差距就够让数字折行。
+    px(width.ceil())
+}
+
+/// 「专辑」列固定宽度，且由分界线的拖动决定；「标题」列则是弹性的（`None`），
+/// 窗口变宽时多余的空间归它 —— 和原版一致。这个组合也是分界线能拖的前提，
+/// 见 `divider_right_offset`。
+const ALBUM_WIDTH_DEFAULT: Pixels = px(230.);
+const ALBUM_WIDTH_MIN: Pixels = px(80.);
+/// 上限是防止专辑列把弹性的标题列挤没，那样整行会溢出。
+const ALBUM_WIDTH_MAX: Pixels = px(400.);
+
+/// 「喜欢」「时长」的固定宽度：两列都在分界线右边，反推分界线位置要用到它们。
+const LIKE_COLUMN_WIDTH: Pixels = px(64.);
+const DURATION_COLUMN_WIDTH: Pixels = px(72.);
+
+/// 分界线的元素 id，同时用作它作为 hover group 的名字。
+/// 两处必须完全一致 `group_hover` 才会响应，所以抽成常量而不是写两遍字面量。
+const DIVIDER_ID: &str = "favorite-title-divider";
+
+/// 拖动分界线时随 drag 传递的载荷 `(起拖时的鼠标 x, 起拖时的专辑列宽)`。
+///
+/// 用位移换算而不是鼠标的绝对坐标：表格不在窗口的 x=0 处，它的左边距（侧边栏 + 页面
+/// 内边距）页面拿不到；而且位移是幂等的，一帧里来几个鼠标事件重复算也不会漂。
+type DividerDragAnchor = Rc<Cell<(Pixels, Pixels)>>;
+
 use super::ContentPage;
-use crate::components::{TabBar, TabChanged, TabItem, TableColumn, virtual_table};
+use crate::components::{
+    COLUMN_GAP, HEADER_HEIGHT, ROW_TEXT_SIZE, ResizeDragPreview, TabBar, TabChanged, TabItem,
+    TableColumn, virtual_table,
+};
 use crate::state::user::UserProfile;
-use crate::theme::{DOLPHIN_FAMILY, PRESSED_OPACITY};
+use crate::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_OPACITY};
 
 // 「更多」菜单里的三个命令。
 //
@@ -47,7 +93,11 @@ pub struct FavoriteMusicPage {
     tabs: Entity<TabBar>,
     _tabs_subscription: Subscription,
     songs: Vec<DemoSong>,
-    columns: Rc<Vec<TableColumn>>,
+    /// 序号列宽：构造时按当前数据量（最长序号有几位）算一次。
+    /// 它不随每帧重算，所以以后接入真实歌单、行数变了，要在这里重算。
+    index_width: Pixels,
+    /// 专辑列宽：由「标题 / 专辑」之间那条分界线拖出来，所以是要改的状态。
+    album_width: Pixels,
 }
 
 /// 临时示例数据，用于验证长表滚动；接入远程歌单后替换。
@@ -95,28 +145,105 @@ impl FavoriteMusicPage {
             ])
         });
         let tabs_subscription = cx.subscribe(&tabs, |_, _, _: &TabChanged, cx| cx.notify());
+        // 序号列宽依赖数据量（最长序号的位数），所以先建数据再算宽度。
+        let songs = demo_songs();
+        let index_width = index_column_width(songs.len());
         Self {
             user_profile,
             _user_profile_subscription: user_profile_subscription,
             tabs,
             _tabs_subscription: tabs_subscription,
-            songs: demo_songs(),
-            columns: Rc::new(vec![
-                TableColumn::new("序号", Some(px(56.))),
-                TableColumn::new("标题", None),
-                TableColumn::new("专辑", None),
-                TableColumn::new("喜欢", Some(px(64.))),
-                TableColumn::new("时长", Some(px(72.))),
-            ]),
+            songs,
+            index_width,
+            album_width: ALBUM_WIDTH_DEFAULT,
         }
+    }
+
+    /// 列定义。只有「专辑」的宽度会被分界线改，所以每次渲染现算一份，
+    /// 省得改宽度时还要记得同步刷新一个 `columns` 字段。一共 5 项，成本可以忽略。
+    fn columns(&self) -> Rc<Vec<TableColumn>> {
+        Rc::new(vec![
+            TableColumn::new("#", Some(self.index_width)).align_right(),
+            // 标题列弹性：多出来的宽度归它，和原版一样。
+            TableColumn::new("标题", None),
+            TableColumn::new("专辑", Some(self.album_width)),
+            TableColumn::new("喜欢", Some(LIKE_COLUMN_WIDTH)),
+            TableColumn::new("时长", Some(DURATION_COLUMN_WIDTH)),
+        ])
+    }
+
+    /// 分界线到行右边缘的距离：`专辑宽 + 间距 + 喜欢宽 + 间距 + 时长宽`，
+    /// 正好是标题与专辑之间那个间距的右边缘。
+    ///
+    /// 右边这三列都是固定宽度，所以从**右边**量是确定的；左边是弹性的标题列，宽度由布局
+    /// 算出来、页面拿不到。这就是分界线用 `.right()` 而不是 `.left()` 定位的原因，也是
+    /// 「标题弹性 + 专辑固定」这个组合能拖的前提 —— 两侧都弹性的话位置就无从算起了。
+    fn divider_right_offset(&self) -> Pixels {
+        self.album_width + COLUMN_GAP + LIKE_COLUMN_WIDTH + COLUMN_GAP + DURATION_COLUMN_WIDTH
+    }
+
+    /// 「标题 / 专辑」之间的分界线：拖动它，专辑列变窄/变宽（我们存着的固定宽度），
+    /// 弹性的标题列反向伸缩，视觉上这条边界就跟着鼠标走。位置见 `divider_right_offset`。
+    ///
+    /// 它必须是表格的**兄弟节点**并绝对定位：每一行都是独立的布局根，塞进某一行的单元格里
+    /// 只会影响那一行；而单元格都带 `overflow_hidden`，塞进去的东西一超出格子就被裁掉。
+    ///
+    /// 高度只盖住表头（行区域不拦鼠标），平时完全透明、靠光标变化提示可拖；悬停时露出一小段
+    /// 竖条，形状抄 `TabBar` 选中项下面那根小横条，只是转了 90° 并换成灰色。
+    fn title_divider(&self, colors: ColorTokens, cx: &Context<Self>) -> AnyElement {
+        let anchor: DividerDragAnchor = Rc::new(Cell::new((px(0.), self.album_width)));
+        div()
+            .id(DIVIDER_ID)
+            .group(DIVIDER_ID)
+            .absolute()
+            .top_0()
+            .h(HEADER_HEIGHT)
+            .right(self.divider_right_offset())
+            .w(COLUMN_GAP)
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_col_resize()
+            .child(
+                // 3 宽 × 16 高的小竖条，flex 居中后正好落在两条列边界中间。
+                div()
+                    .w(px(3.))
+                    .h(px(16.))
+                    .rounded(px(1.5))
+                    .group_hover(DIVIDER_ID, |style| style.bg(colors.border)),
+            )
+            .on_drag(anchor.clone(), move |_, _, window, cx| {
+                // 起拖这一刻记下鼠标位置和当时的专辑列宽，之后按位移换算新宽度。
+                let (_, start_width) = anchor.get();
+                anchor.set((window.mouse_position().x, start_width));
+                cx.new(|_| ResizeDragPreview)
+            })
+            .on_drag_move(cx.listener(
+                move |this, event: &DragMoveEvent<DividerDragAnchor>, _, cx| {
+                    let (start_x, start_width) = event.drag(cx).get();
+                    let moved = event.event.position.x - start_x;
+                    // 往右拖 = 分界线右移 = 专辑列变窄（它的右边缘被后面的固定列钉住了），
+                    // 少掉的那部分正好加给弹性的标题列。
+                    this.album_width =
+                        (start_width - moved).clamp(ALBUM_WIDTH_MIN, ALBUM_WIDTH_MAX);
+                    cx.notify();
+                },
+            ))
+            .into_any_element()
     }
 
     fn song_cells(&mut self, index: usize, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let colors = Theme::global(cx).tokens.colors;
         let song = &self.songs[index];
+        let liked = song.liked;
         vec![
             div()
+                // 铺满单元格后再靠右对齐；nowrap 兜底，序号永远不该折成两行。
+                .w_full()
+                .text_right()
+                .whitespace_nowrap()
                 .text_color(colors.muted_foreground)
+                .font_family(DOLPHIN_FAMILY)
                 .child(format!("{:02}", index + 1))
                 .into_any_element(),
             div()
@@ -149,11 +276,17 @@ impl FavoriteMusicPage {
                     div()
                         .min_w(px(0.))
                         .flex_1()
-                        .child(div().truncate().child(song.title.clone()))
                         .child(
+                            // 标题固定 14px：比行内的 ROW_TEXT_SIZE(13) 大一档，但不跟着它联动。
+                            div()
+                                .text_size(px(14.))
+                                .truncate()
+                                .child(song.title.clone()),
+                        )
+                        .child(
+                            // 不写字号，直接继承行内的 ROW_TEXT_SIZE；和标题的区分靠颜色。
                             div()
                                 .truncate()
-                                .text_size(px(11.))
                                 .text_color(colors.muted_foreground)
                                 .child(song.artist.clone()),
                         ),
@@ -164,28 +297,41 @@ impl FavoriteMusicPage {
                 .text_color(colors.secondary_foreground)
                 .child(song.album.clone())
                 .into_any_element(),
-            Button::new(("favorite-song-like", index))
-                .size(px(28.))
-                .rounded_full()
-                .accessibility_label(if song.liked { "取消喜欢" } else { "喜欢" })
-                .hover(|style| style.bg(colors.foreground.alpha(0.08)))
+            // 裸 SVG，没有圆形底色：已喜欢是实心红心，未喜欢是勾线灰心。
+            svg()
+                .path(if liked {
+                    "icons/like.svg"
+                } else {
+                    "icons/like_outline.svg"
+                })
+                // 和 header 右上角那排图标同一个尺寸。
+                .size(IconSize::Small.pixels())
+                .cursor_pointer()
+                .text_color(if liked {
+                    colors.primary
+                } else {
+                    // 和表头那排图标同一档灰。
+                    colors.foreground.alpha(0.6)
+                })
+                // 和其它图标一样，hover 只改颜色：没点亮时变深，已点亮时按主题红的惯例淡一档。
+                .hover(move |style| {
+                    if liked {
+                        style.text_color(colors.primary.alpha(0.88))
+                    } else {
+                        style.text_color(colors.foreground)
+                    }
+                })
+                .id(("favorite-song-like", index))
+                .role(Role::Button)
+                .aria_label(if liked { "取消喜欢" } else { "喜欢" })
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.songs[index].liked = !this.songs[index].liked;
                     cx.notify();
                 }))
-                .child(
-                    svg()
-                        .path("icons/like.svg")
-                        .size(px(16.))
-                        .text_color(if song.liked {
-                            colors.primary
-                        } else {
-                            colors.muted_foreground
-                        }),
-                )
                 .into_any_element(),
             div()
-                .text_color(colors.muted_foreground)
+                // 时长是辅助信息，比 `muted_foreground`(60%) 再淡一档：45% 的 foreground。
+                .text_color(colors.foreground.alpha(0.45))
                 .child(song.duration.clone())
                 .into_any_element(),
         ]
@@ -234,15 +380,23 @@ impl Render for FavoriteMusicPage {
         let cover_path = "/Users/amagicpear/Pictures/Perry Origin Character/ChatGPT Image 2026年9月29日 15_39_30.png";
         let user_profile = self.user_profile.read(cx);
         let content = match active_tab {
-            FavoriteMusicTab::Songs => virtual_table(
-                cx.entity(),
-                "favorite-songs",
-                self.columns.clone(),
-                self.songs.len(),
-                |this, index, _, cx| this.song_cells(index, cx),
-                cx,
-            )
-            .into_any_element(),
+            FavoriteMusicTab::Songs => {
+                let table = virtual_table(
+                    cx.entity(),
+                    "favorite-songs",
+                    self.columns(),
+                    self.songs.len(),
+                    |this, index, _, cx| this.song_cells(index, cx),
+                    cx,
+                )
+                .into_any_element();
+                // 分界线要绝对定位在列边界上，所以表格外面要有一层 position: relative。
+                div()
+                    .relative()
+                    .child(table)
+                    .child(self.title_divider(colors, cx))
+                    .into_any_element()
+            }
             _ => div()
                 .text_size(px(14.))
                 .text_color(colors.muted_foreground)
@@ -428,6 +582,6 @@ impl Render for FavoriteMusicPage {
             // 控件区域
             .child(div().mt(px(28.)).child(self.tabs.clone()))
             // 具体内容区域
-            .child(div().mt(px(16.)).child(content))
+            .child(content)
     }
 }

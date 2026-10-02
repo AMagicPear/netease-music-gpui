@@ -5,11 +5,25 @@ use gpui_kit::base::Theme;
 
 const OVERSCAN_ROWS: usize = 4;
 const ROW_HEIGHT: Pixels = px(56.);
+/// 表头行高。调用者要在表头上叠东西（比如可拖动的分界线）时，用同一个值对齐。
+pub const HEADER_HEIGHT: Pixels = px(36.);
+/// 行与表头的文字字号。
+///
+/// 表格内字体大小
+pub const ROW_TEXT_SIZE: Pixels = px(13.);
+/// 列与列之间的间距。表头与每一行用同一个值，列的边界才对得齐。
+///
+/// 它落在列宽**之外**（列宽只描述这一列自己的盒子）：调用者要在某两条列边界之间放东西，
+/// 比如可拖动的分界线，间距就是天然的落点 —— 那时它同时也是拖动热区的宽度，别调太小。
+pub const COLUMN_GAP: Pixels = px(24.);
 
 /// 固定宽度列传 Some；None 列平分剩余宽度。表头与单元格共用同一套宽度。
 pub struct TableColumn {
     pub title: SharedString,
     pub width: Option<Pixels>,
+    /// 表头的水平对齐。单元格内容由调用者自己构建，组件替它对齐不了，所以这里描述的
+    /// 其实是「这一列按什么方式对齐」；调用者应让单元格内容用同样的对齐，两边才对得上。
+    pub align: TextAlign,
 }
 
 impl TableColumn {
@@ -17,16 +31,19 @@ impl TableColumn {
         Self {
             title: title.into(),
             width,
+            align: TextAlign::Left,
         }
+    }
+
+    /// 表头靠右对齐，配套右对齐的数字类列使用。
+    pub fn align_right(mut self) -> Self {
+        self.align = TextAlign::Right;
+        self
     }
 }
 
 fn cell(column: &TableColumn, content: AnyElement) -> Div {
-    let cell = div()
-        .min_w(px(0.))
-        .px(px(12.))
-        .overflow_hidden()
-        .child(content);
+    let cell = div().min_w(px(0.)).overflow_hidden().child(content);
     match column.width {
         Some(width) => cell.w(width).flex_none(),
         None => cell.flex_1(),
@@ -46,18 +63,27 @@ pub fn virtual_table<V: Render>(
     let colors = Theme::global(cx).tokens.colors;
     let header = div()
         .w_full()
-        .h(px(36.))
+        .h(HEADER_HEIGHT)
         .flex()
         .items_center()
-        .text_size(px(12.))
+        .gap(COLUMN_GAP)
+        .text_size(ROW_TEXT_SIZE)
         .text_color(colors.muted_foreground)
         .border_b_1()
         .border_color(colors.foreground.alpha(0.06))
-        .children(
-            columns
-                .iter()
-                .map(|column| cell(column, div().child(column.title.clone()).into_any_element())),
-        );
+        .children(columns.iter().map(|column| {
+            cell(
+                column,
+                div()
+                    // 撑满单元格后按列的对齐方式摆表头，「#」这类右对齐列才跟数字对齐。
+                    .w_full()
+                    .text_align(column.align)
+                    // 表头就是一行标签，列再窄也不该折成两行。
+                    .whitespace_nowrap()
+                    .child(column.title.clone())
+                    .into_any_element(),
+            )
+        }));
     div().w_full().child(header).child(VirtualRows {
         id: id.into(),
         row_count,
@@ -75,7 +101,8 @@ pub fn virtual_table<V: Render>(
                     .h(ROW_HEIGHT)
                     .flex()
                     .items_center()
-                    .text_size(px(13.))
+                    .gap(COLUMN_GAP)
+                    .text_size(ROW_TEXT_SIZE)
                     .text_color(colors.foreground)
                     .hover(|style| style.bg(colors.foreground.alpha(0.06)));
                 row.children(
