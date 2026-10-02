@@ -13,48 +13,23 @@ const ACTION_BUTTON_HEIGHT: Pixels = px(36.);
 const ACTION_BUTTON_PADDING: Pixels = px(12.);
 
 /// Dolphin 里最宽的数字是 600/1000 em。
-///
-/// 字体内嵌在二进制里、字号也固定，所以这些数事先就能知道：查 `assets/font/dolphin.ttf`
-/// 的 `hmtx` 表，数字占 520 或 600 units（em = 1000 units）。取最宽的 0.6em 就是所有
-/// 数字的上界 —— 管它渲染出来是 `1` 还是 `7`，按最宽的算都不会挤到换行。
 const DOLPHIN_WIDEST_DIGIT_EM: f32 = 0.6;
 
-/// 序号列宽：字体和字号都是我们定的，一位数字占多宽是个已知常数，乘位数即可。
-///
-/// 不能交给布局自己撑开：`virtual_table` 为了虚拟化，表头和每一行都是**各自独立**的
-/// 布局根，由内容撑开的话每行都会算出不同宽度，列就错位了。所以只能算一次再复用。
+/// 表头和虚拟行独立布局，序号列必须共用宽度，并容得下播放图标。
 fn index_column_width(row_count: usize) -> Pixels {
     // 末行渲染的是 `format!("{:02}", row_count)`，它就是最长的那个序号。
     let digits = format!("{:02}", row_count).chars().count() as f32;
     // 字号跟行内保持一致（ROW_TEXT_SIZE），以后改字号不用回来动这里。
     let width = digits * DOLPHIN_WIDEST_DIGIT_EM * f32::from(ROW_TEXT_SIZE);
     // 向上取整：小数宽度按设备像素取整后可能差一丁点，而这点差距就够让数字折行。
-    px(width.ceil())
+    px(width.ceil().max(20.))
 }
 
-/// 「专辑」列固定宽度，且由分界线的拖动决定；「标题」列则是弹性的（`None`），
-/// 窗口变宽时多余的空间归它 —— 和原版一致。这个组合也是分界线能拖的前提，
-/// 见 `divider_right_offset`。
-const ALBUM_WIDTH_DEFAULT: Pixels = px(230.);
-const ALBUM_WIDTH_MIN: Pixels = px(80.);
-/// 上限是防止专辑列把弹性的标题列挤没，那样整行会溢出。
-const ALBUM_WIDTH_MAX: Pixels = px(400.);
-
-/// 歌曲标题和它右边副标题的字号。固定值，不跟着行内的 `ROW_TEXT_SIZE` 联动；
-/// 两者必须是同一个值，否则副标题看起来会被"降级"。
-const TITLE_TEXT_SIZE: Pixels = px(14.);
-
-/// 音质徽章的显示高度，宽度交给 `img()` 按各自比例算（见 `Quality` 的注释）。
-///
-/// 7 个图标都是**原生 13 高**：它们取自网易云同一套徽章的小号版本（大号是 16 高），
-/// 所以按 13 显示就是 1:1 —— 描边和字都不会被重采样，这是选这套图标的理由，别随手改。
-/// 想整体放大只管改这里，但要知道那就不是原尺寸了。
-const QUALITY_BADGE_HEIGHT: Pixels = px(13.);
+/// 标题、专辑按剩余宽度的比例分配；拖动后保留该比例。
+const ALBUM_SHARE_MIN: f32 = 0.1;
+const ALBUM_SHARE_MAX: f32 = 0.8;
 
 /// 歌曲的音质标识，显示在歌手前面。
-///
-/// 这些徽章图标自带配色（金色描边），而且宽高各不相同，所以必须用 `img()` 渲染：
-/// `svg()` 会把它当成单色遮罩、用 `text_color` 重绘，原始配色会丢。
 #[derive(Clone, Copy)]
 enum Quality {
     Hq,
@@ -95,10 +70,7 @@ impl Quality {
     }
 }
 
-/// 次要文字（副标题、艺术家、专辑、时长）的字重：比正文细一档。
-///
-/// `FontWeight` 就是 f32 的包装，想取 Light/Regular 之间的中间值可以写
-/// `FontWeight::from(350.)`（能不能落到真正的中间字面取决于系统字体有没有那一档）。
+/// 次要文字使用常规字重。
 const SECONDARY_FONT_WEIGHT: FontWeight = FontWeight::NORMAL;
 
 /// 「喜欢」「时长」的固定宽度：两列都在分界线右边，反推分界线位置要用到它们。
@@ -109,26 +81,18 @@ const DURATION_COLUMN_WIDTH: Pixels = px(66.);
 /// 两处必须完全一致 `group_hover` 才会响应，所以抽成常量而不是写两遍字面量。
 const DIVIDER_ID: &str = "favorite-title-divider";
 
-/// 拖动分界线时随 drag 传递的载荷 `(起拖时的鼠标 x, 起拖时的专辑列宽)`。
-///
-/// 用位移换算而不是鼠标的绝对坐标：表格不在窗口的 x=0 处，它的左边距（侧边栏 + 页面
-/// 内边距）页面拿不到；而且位移是幂等的，一帧里来几个鼠标事件重复算也不会漂。
-type DividerDragAnchor = Rc<Cell<(Pixels, Pixels)>>;
+/// 起拖时的鼠标 x、专辑占比、两列可用宽度。
+type DividerDragAnchor = Rc<Cell<(Pixels, f32, Pixels)>>;
 
 use super::ContentPage;
 use crate::components::{
-    COLUMN_GAP, HEADER_HEIGHT, ROW_TEXT_SIZE, ResizeDragPreview, TabBar, TabChanged, TabItem,
-    TableColumn, virtual_table,
+    CELL_PADDING, COLUMN_GAP, HEADER_HEIGHT, ROW_TEXT_SIZE, ResizeDragPreview, TabBar, TabChanged,
+    TabItem, TableColumn, virtual_table,
 };
 use crate::state::user::UserProfile;
 use crate::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
 
 // 「更多」菜单里的三个命令。
-//
-// `NativeMenu` 的每一项都挂一个 GPUI `Action`，选中后由 `Window::dispatch_action`
-// 派发 —— 和系统菜单栏、快捷键走的是同一套机制，所以将来只要在某个视图上
-// `on_action(...)` 就能接住，不必改菜单代码。现在还没有任何监听者，
-// 选中即派发到空处，等于什么都不做。
 actions!(favorite_music, [Share, BatchOperation, AddAllToPlaylist]);
 
 #[derive(Clone, Copy)]
@@ -155,20 +119,17 @@ pub struct FavoriteMusicPage {
     tabs: Entity<TabBar>,
     _tabs_subscription: Subscription,
     songs: Vec<DemoSong>,
-    /// 序号列宽：构造时按当前数据量（最长序号有几位）算一次。
-    /// 它不随每帧重算，所以以后接入真实歌单、行数变了，要在这里重算。
-    index_width: Pixels,
-    /// 专辑列宽：由「标题 / 专辑」之间那条分界线拖出来，所以是要改的状态。
-    album_width: Pixels,
-    /// 鼠标当前悬浮在哪一行（`None` = 不在任何行上）。
-    ///
-    /// 行 hover 不只是变色：序号要让位给播放键、标题右侧要长出四个操作图标 ——
-    /// 这些是**内容结构**的变化，`.hover()` 那种纯样式钩子做不到，只能把行号记下来重绘。
+    /// 原始歌单顺序保存在 songs；这里只保存显示顺序，排序不修改歌单。
+    display_order: Vec<usize>,
+    sort: Option<(SongSort, bool)>,
+    album_share: f32,
     hovered_row: Option<usize>,
 }
 
 /// 临时示例数据，用于验证长表滚动；接入远程歌单后替换。
 struct DemoSong {
+    /// 示例 ID；接入 API 后直接使用云端返回的歌曲 ID。
+    id: usize,
     title: SharedString,
     /// 副标题（比如所属 EP）：渲染在标题右边、括号里，同一字号、灰色。
     subtitle: Option<SharedString>,
@@ -214,6 +175,7 @@ fn demo_songs() -> Vec<DemoSong> {
         .map(|index| {
             let (title, subtitle, artists, album, duration) = examples[index % examples.len()];
             DemoSong {
+                id: index,
                 title: title.into(),
                 subtitle: subtitle.map(SharedString::from),
                 artists: artists
@@ -232,12 +194,7 @@ fn demo_songs() -> Vec<DemoSong> {
         .collect()
 }
 
-/// 把标题和（可选）副标题拼成**一整行**文字，副标题那段换成灰色 + 细字重。
-///
-/// 为什么用 `StyledText` + highlights 而不是两个元素并排：并排的两个文本元素各截各的，
-/// 收缩时会出现两个省略号。highlights 是在排版时叠加到**继承来的**文字样式上的
-/// （字号、家族都跟随父级），整串仍是一行文字，所以只会有一个省略号 ——
-/// 效果等价于 HTML 里标题后面套一个 `<span style="color: gray">`。
+/// 使用同一段 StyledText，标题和副标题一起截断，只出现一个省略号。
 fn title_with_subtitle(song: &DemoSong, colors: ColorTokens) -> StyledText {
     let Some(subtitle) = &song.subtitle else {
         return StyledText::new(song.title.clone());
@@ -248,28 +205,22 @@ fn title_with_subtitle(song: &DemoSong, colors: ColorTokens) -> StyledText {
     let mut line = song.title.to_string();
     line.push_str(&subtitle);
 
-    // run 级颜色要先合成成不透明色，原因在 `TextStyle::highlight`：
-    // 它是 `继承色.blend(这里的颜色)`，而 `blend` 是"把 other 叠在 self 上"。
-    // 主题里的灰都是半透明的 ink，半透明灰叠在不透明的标题色上，出来的还是接近标题色
-    // —— 看着就像"副标题根本没变灰"。压在页面底色上算出等价的不透明灰，
-    // 再传进来就会命中 `blend` 的 `other.a >= 1.0` 分支，直接原样使用。
-    let subtitle_color = colors.background.blend(colors.muted_foreground);
+    // highlight 先 blend 再 fade_out：先替换 RGB，再恢复 alpha。
+    // 因此播放中的红色标题不会污染副标题，也无需预合成背景色。
+    let subtitle_color = colors.muted_foreground;
 
     StyledText::new(line).with_highlights([(
         title_len..title_len + subtitle.len(),
         HighlightStyle {
-            color: Some(subtitle_color),
+            color: Some(subtitle_color.alpha(1.)),
             font_weight: Some(SECONDARY_FONT_WEIGHT),
+            fade_out: Some(1. - subtitle_color.a),
             ..Default::default()
         },
     )])
 }
 
 /// 行 hover 时才出现的图标：序号位置的播放键、标题右侧那排操作按钮，共用这一套样式。
-///
-/// 样式与页面 header 右上角那排**完全一致**：60% 的墨色灰、hover 变深到 `foreground`、
-/// 按下换成更浅的按下色。尺寸由调用者给，因为播放键要比操作按钮小一档。
-/// 不抄 header 那排的 `stop_propagation` —— 那是标题栏的诉求（别让点图标变成拖窗），行里没有。
 fn row_hover_icon(
     id: (&'static str, usize),
     path: &'static str,
@@ -292,9 +243,6 @@ fn row_hover_icon(
 }
 
 /// 行 hover 时贴在标题右侧的那排操作图标：下载 / 收藏 / 评论 / 更多。
-///
-/// 单独成函数是因为它要占十来行，塞进 `song_cells` 的链式调用里会深得读不动；
-/// 但它只在这一处用，不属于"通用 UI 件"。
 fn row_actions(index: usize, colors: ColorTokens) -> AnyElement {
     // 四个图标只有 id / 路径 / 无障碍名不同，其余全都一样：尺寸用 header 那排的
     // `IconSize::Small`，灰度和三态交互由 `row_hover_icon` 统一给。
@@ -308,8 +256,6 @@ fn row_actions(index: usize, colors: ColorTokens) -> AnyElement {
         // 间距抄 header 那排图标（图标之间 10px），左侧再加 10px，免得贴着标题文字。
         .gap(px(10.))
         .ml(px(10.))
-        // 下载用勾线版：同排的收藏 / 评论 / 更多都是勾线，`download.svg` 那个实心箭头
-        // 在这一排里是异类（它留给页面上那个带文字的下载按钮用）。
         .child(icon(
             "favorite-song-download",
             "icons/download_outline.svg",
@@ -324,109 +270,121 @@ fn row_actions(index: usize, colors: ColorTokens) -> AnyElement {
 impl FavoriteMusicPage {
     pub fn new(user_profile: Entity<UserProfile>, cx: &mut Context<Self>) -> Self {
         let user_profile_subscription = cx.observe(&user_profile, |_, _, cx| cx.notify());
+        let songs = demo_songs();
         let tabs = cx.new(|_| {
             TabBar::new(vec![
-                TabItem::new("歌曲").count("1193"),
+                TabItem::new("歌曲").count(songs.len().to_string()),
                 TabItem::new("评论"),
                 TabItem::new("收藏者").count("5"),
             ])
         });
         let tabs_subscription = cx.subscribe(&tabs, |_, _, _: &TabChanged, cx| cx.notify());
-        // 序号列宽依赖数据量（最长序号的位数），所以先建数据再算宽度。
-        let songs = demo_songs();
-        let index_width = index_column_width(songs.len());
+        let display_order = (0..songs.len()).collect();
         Self {
             user_profile,
             _user_profile_subscription: user_profile_subscription,
             tabs,
             _tabs_subscription: tabs_subscription,
             songs,
-            index_width,
-            album_width: ALBUM_WIDTH_DEFAULT,
+            display_order,
+            sort: None,
+            album_share: 0.35,
             hovered_row: None,
         }
     }
 
-    /// 列定义。只有「专辑」的宽度会被分界线改，所以每次渲染现算一份，
-    /// 省得改宽度时还要记得同步刷新一个 `columns` 字段。一共 5 项，成本可以忽略。
     fn columns(&self) -> Rc<Vec<TableColumn>> {
         Rc::new(vec![
-            TableColumn::new("#", Some(self.index_width)).align_right(),
-            // 标题列弹性：多出来的宽度归它，和原版一样。
-            TableColumn::new("标题", None),
-            TableColumn::new("专辑", Some(self.album_width)),
+            TableColumn::new("#", Some(index_column_width(self.songs.len()))).align_right(),
+            TableColumn::new("标题", None).weight(1. - self.album_share),
+            TableColumn::new("专辑", None).weight(self.album_share),
             TableColumn::new("喜欢", Some(LIKE_COLUMN_WIDTH)),
             TableColumn::new("时长", Some(DURATION_COLUMN_WIDTH)),
         ])
     }
 
-    /// 分界线到行右边缘的距离：`专辑宽 + 间距 + 喜欢宽 + 间距 + 时长宽`，
-    /// 正好是标题与专辑之间那个间距的右边缘。
-    ///
-    /// 右边这三列都是固定宽度，所以从**右边**量是确定的；左边是弹性的标题列，宽度由布局
-    /// 算出来、页面拿不到。这就是分界线用 `.right()` 而不是 `.left()` 定位的原因，也是
-    /// 「标题弹性 + 专辑固定」这个组合能拖的前提 —— 两侧都弹性的话位置就无从算起了。
-    fn divider_right_offset(&self) -> Pixels {
-        self.album_width + COLUMN_GAP + LIKE_COLUMN_WIDTH + COLUMN_GAP + DURATION_COLUMN_WIDTH
+    fn toggle_sort(&mut self, column: SongSort, cx: &mut Context<Self>) {
+        self.sort = next_sort(self.sort, column);
+        self.display_order = self.sort.map_or_else(
+            || (0..self.songs.len()).collect(),
+            |(key, descending)| song_order(&self.songs, key, descending),
+        );
+        cx.notify();
     }
 
-    /// 「标题 / 专辑」之间的分界线：拖动它，专辑列变窄/变宽（我们存着的固定宽度），
-    /// 弹性的标题列反向伸缩，视觉上这条边界就跟着鼠标走。位置见 `divider_right_offset`。
-    ///
-    /// 它必须是表格的**兄弟节点**并绝对定位：每一行都是独立的布局根，塞进某一行的单元格里
-    /// 只会影响那一行；而单元格都带 `overflow_hidden`，塞进去的东西一超出格子就被裁掉。
-    ///
-    /// 高度只盖住表头（行区域不拦鼠标），平时完全透明、靠光标变化提示可拖；悬停时露出一小段
-    /// 竖条，形状抄 `TabBar` 选中项下面那根小横条，只是转了 90° 并换成灰色。
-    fn title_divider(&self, colors: ColorTokens, cx: &Context<Self>) -> AnyElement {
-        let anchor: DividerDragAnchor = Rc::new(Cell::new((px(0.), self.album_width)));
-        div()
-            .id(DIVIDER_ID)
-            .group(DIVIDER_ID)
-            .absolute()
-            .top_0()
-            .h(HEADER_HEIGHT)
-            .right(self.divider_right_offset())
-            .w(COLUMN_GAP)
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_col_resize()
-            .child(
-                // 3 宽 × 16 高的小竖条，flex 居中后正好落在两条列边界中间。
-                div()
-                    .w(px(3.))
-                    .h(px(16.))
-                    .rounded(px(1.5))
-                    .group_hover(DIVIDER_ID, |style| style.bg(colors.border)),
-            )
-            .on_drag(anchor.clone(), move |_, _, window, cx| {
-                // 起拖这一刻记下鼠标位置和当时的专辑列宽，之后按位移换算新宽度。
-                let (_, start_width) = anchor.get();
-                anchor.set((window.mouse_position().x, start_width));
-                cx.new(|_| ResizeDragPreview)
-            })
-            .on_drag_move(cx.listener(
-                move |this, event: &DragMoveEvent<DividerDragAnchor>, _, cx| {
-                    let (start_x, start_width) = event.drag(cx).get();
-                    let moved = event.event.position.x - start_x;
-                    // 往右拖 = 分界线右移 = 专辑列变窄（它的右边缘被后面的固定列钉住了），
-                    // 少掉的那部分正好加给弹性的标题列。
-                    this.album_width =
-                        (start_width - moved).clamp(ALBUM_WIDTH_MIN, ALBUM_WIDTH_MAX);
-                    cx.notify();
-                },
-            ))
-            .into_any_element()
+    /// 布局后用实际宽度定位分界线，不保存会随窗口变化的像素宽度。
+    fn title_divider(
+        &self,
+        colors: ColorTokens,
+        layout: Rc<Cell<[Bounds<Pixels>; 2]>>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let share = self.album_share;
+        let view = cx.entity();
+        canvas(
+            move |bounds, window, cx| {
+                let [title, album] = layout.get();
+                let available =
+                    (title.size.width + album.size.width - CELL_PADDING * 4.).max(px(0.));
+                let anchor: DividerDragAnchor = Rc::new(Cell::new((px(0.), share, available)));
+                let mut divider = div()
+                    .id(DIVIDER_ID)
+                    .group(DIVIDER_ID)
+                    .w(COLUMN_GAP)
+                    .h(HEADER_HEIGHT)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_col_resize()
+                    .child(
+                        div()
+                            .w(px(3.))
+                            .h(px(16.))
+                            .rounded(px(1.5))
+                            .group_hover(DIVIDER_ID, |style| style.bg(colors.border)),
+                    )
+                    .on_drag(anchor.clone(), move |_, _, window, cx| {
+                        let (_, share, width) = anchor.get();
+                        anchor.set((window.mouse_position().x, share, width));
+                        cx.new(|_| ResizeDragPreview)
+                    })
+                    .on_drag_move(move |event: &DragMoveEvent<DividerDragAnchor>, _, cx| {
+                        let (start_x, start_share, width) = event.drag(cx).get();
+                        let share = resized_album_share(
+                            start_share,
+                            f32::from(event.event.position.x - start_x),
+                            f32::from(width),
+                        );
+                        view.update(cx, |this, cx| {
+                            if this.album_share != share {
+                                this.album_share = share;
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .into_any_element();
+                divider.layout_as_root(
+                    size(
+                        AvailableSpace::Definite(COLUMN_GAP),
+                        AvailableSpace::Definite(HEADER_HEIGHT),
+                    ),
+                    window,
+                    cx,
+                );
+                divider.prepaint_at(point(title.right(), bounds.top()), window, cx);
+                divider
+            },
+            |_, mut divider, window, cx| divider.paint(window, cx),
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .w_full()
+        .h(HEADER_HEIGHT)
+        .into_any_element()
     }
 
-    /// 记下鼠标悬浮在哪一行。
-    ///
-    /// 只在真的换了行时 `notify()`：鼠标在同一行内移动会反复触发 hover 事件，
-    /// 每次都重绘整页太浪费。
-    ///
-    /// 「离开」只清掉自己那一行：鼠标从第 3 行移到第 4 行时，两行的 leave / enter 顺序
-    /// 没有保证，无条件置空就会出现"鼠标明明在第 4 行、图标却闪一下没了"。
+    /// 离开事件只清除自身，避免跨行事件顺序导致 hover 闪烁。
     fn set_hovered_row(&mut self, index: usize, hovered: bool, cx: &mut Context<Self>) {
         let next = if hovered {
             Some(index)
@@ -443,9 +401,10 @@ impl FavoriteMusicPage {
 
     fn song_cells(&mut self, index: usize, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let colors = Theme::global(cx).tokens.colors;
-        let song = &self.songs[index];
+        let song = &self.songs[self.display_order[index]];
+        let song_id = song.id;
         let liked = song.liked;
-        let hovered = self.hovered_row == Some(index);
+        let hovered = self.hovered_row == Some(song_id);
         // 序号格的固定部分：两种内容（序号 / 播放键）共用同一套宽度和对齐方式，
         // 靠右统一走 flex 的 `justify_end`，不给谁单独算一套。
         let index_cell = div()
@@ -460,7 +419,7 @@ impl FavoriteMusicPage {
                 // `play.svg` 的三角在画布里右边自带空白，光靠 `justify_end` 贴不到边
                 index_cell
                     .child(div().mr(px(-3.)).child(row_hover_icon(
-                        ("favorite-song-play", index),
+                        ("favorite-song-play", song_id),
                         "icons/play.svg",
                         "播放",
                         px(20.),
@@ -515,7 +474,7 @@ impl FavoriteMusicPage {
                                 // 所以窄了只会出现一个省略号。
                                 .child(
                                     div()
-                                        .text_size(TITLE_TEXT_SIZE)
+                                        .text_size(px(14.))
                                         .truncate()
                                         .child(title_with_subtitle(song, colors)),
                                 )
@@ -528,11 +487,7 @@ impl FavoriteMusicPage {
                                         .min_w(px(0.))
                                         // 徽章用 img() 才保得住原始配色；宽度由 img() 按图片比例自动定，
                                         // flex_none 是为了让它别被压缩（空间不够时该截断的是歌手名）。
-                                        .child(
-                                            img(song.quality.badge())
-                                                .h(QUALITY_BADGE_HEIGHT)
-                                                .flex_none(),
-                                        )
+                                        .child(img(song.quality.badge()).h(px(13.)).flex_none())
                                         .child(
                                             div()
                                                 .min_w(px(0.))
@@ -545,7 +500,7 @@ impl FavoriteMusicPage {
                         )
                         // 只在悬浮这一行时才把图标挂上。这和"渲染出来但隐形"是两回事：
                         // 隐形元素照样占宽度、也照样能被点到，会凭空吃掉标题宽度和一片点击热区。
-                        .when(hovered, |title| title.child(row_actions(index, colors))),
+                        .when(hovered, |title| title.child(row_actions(song_id, colors))),
                 )
                 .into_any_element(),
             div()
@@ -555,10 +510,6 @@ impl FavoriteMusicPage {
                 .child(song.album.clone())
                 .into_any_element(),
             // 裸 SVG，没有圆形底色：已喜欢是实心红心，未喜欢是勾线灰心。
-            // 换这一对（`heart*`）是因为它的勾线和实心是**同一个轮廓**：20px 下墨迹都是
-            // 16.1 × 15.2，切换只变颜色和填充。旧的那对（`like*`）两个版本尺寸不一致
-            // （勾线 17.3 / 实心 16.1），点亮时连大小都会跳一下。
-            // `like.svg` / `like_outline.svg` 仍留给别处（播放栏那个 "10w+" 计数器）。
             svg()
                 .path(if liked {
                     "icons/heart.svg"
@@ -582,11 +533,13 @@ impl FavoriteMusicPage {
                         style.text_color(colors.foreground)
                     }
                 })
-                .id(("favorite-song-like", index))
+                .id(("favorite-song-like", song_id))
                 .role(Role::Button)
                 .aria_label(if liked { "取消喜欢" } else { "喜欢" })
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.songs[index].liked = !this.songs[index].liked;
+                    if let Some(song) = this.songs.iter_mut().find(|song| song.id == song_id) {
+                        song.liked = !song.liked;
+                    }
                     cx.notify();
                 }))
                 .into_any_element(),
@@ -600,10 +553,72 @@ impl FavoriteMusicPage {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SongSort {
+    Title,
+    Artist,
+    Album,
+}
+
+// 标题循环：默认 → 标题升序 → 标题降序 → 歌手升序 → 歌手降序。
+fn next_sort(current: Option<(SongSort, bool)>, column: SongSort) -> Option<(SongSort, bool)> {
+    match (column, current) {
+        (SongSort::Title, Some((SongSort::Title, false))) => Some((SongSort::Title, true)),
+        (SongSort::Title, Some((SongSort::Title, true))) => Some((SongSort::Artist, false)),
+        (SongSort::Title, Some((SongSort::Artist, false))) => Some((SongSort::Artist, true)),
+        (SongSort::Title, Some((SongSort::Artist, true))) => None,
+        (SongSort::Album, Some((SongSort::Album, false))) => Some((SongSort::Album, true)),
+        (SongSort::Album, Some((SongSort::Album, true))) => None,
+        _ => Some((column, false)),
+    }
+}
+
+fn sort_label(current: Option<(SongSort, bool)>, column: SongSort) -> (&'static str, &'static str) {
+    let label = match (column, current) {
+        (SongSort::Title, Some((SongSort::Title, false))) => "标题升序",
+        (SongSort::Title, Some((SongSort::Title, true))) => "标题降序",
+        (SongSort::Title, Some((SongSort::Artist, false))) => "歌手升序",
+        (SongSort::Title, Some((SongSort::Artist, true))) => "歌手降序",
+        (SongSort::Album, Some((SongSort::Album, false))) => "升序",
+        (SongSort::Album, Some((SongSort::Album, true))) => "降序",
+        _ => "默认排序",
+    };
+    let icon = if label.ends_with("升序") {
+        "icons/列表排序/升序上箭头.svg"
+    } else if label.ends_with("降序") {
+        "icons/列表排序/降序下箭头.svg"
+    } else {
+        "icons/列表排序/默认排序.svg"
+    };
+    (icon, label)
+}
+
+fn song_order(songs: &[DemoSong], column: SongSort, descending: bool) -> Vec<usize> {
+    let mut order: Vec<_> = (0..songs.len()).collect();
+    // ponytail: 按 Unicode 字符排序；需要拼音或语言区域排序时再接入 collation。
+    order.sort_by(|&left, &right| {
+        let ordering = match column {
+            SongSort::Title => songs[left].title.cmp(&songs[right].title),
+            SongSort::Artist => songs[left].artists.cmp(&songs[right].artists),
+            SongSort::Album => songs[left].album.cmp(&songs[right].album),
+        };
+        if descending {
+            ordering.reverse()
+        } else {
+            ordering
+        }
+    });
+    order
+}
+
+fn resized_album_share(start: f32, movement: f32, available: f32) -> f32 {
+    if available <= 0. {
+        return start;
+    }
+    (start - movement / available).clamp(ALBUM_SHARE_MIN, ALBUM_SHARE_MAX)
+}
+
 /// 「播放全部」：主题红实心按钮，白字白图标，无边框。
-///
-/// 主操作用实心色块来吸引视线，所以它刻意不描边 —— 描边在纯色填充上
-/// 只会削弱色块边缘的锐利感。
 fn play_all_button(colors: ColorTokens) -> Button {
     Button::new("favorite-play-all-button")
         .h(ACTION_BUTTON_HEIGHT)
@@ -643,12 +658,77 @@ impl Render for FavoriteMusicPage {
         let user_profile = self.user_profile.read(cx);
         let content = match active_tab {
             FavoriteMusicTab::Songs => {
+                let header_layout = Rc::new(Cell::new([Bounds::default(); 2]));
                 let table = virtual_table(
                     cx.entity(),
                     "favorite-songs",
                     self.columns(),
-                    self.songs.len(),
+                    self.display_order.len(),
                     |this, index, _, cx| this.song_cells(index, cx),
+                    |this, index| this.songs[this.display_order[index]].id,
+                    {
+                        let view = cx.entity();
+                        let sort = self.sort;
+                        move |column, index| {
+                            let key = match index {
+                                1 => Some(SongSort::Title),
+                                2 => Some(SongSort::Album),
+                                _ => None,
+                            };
+                            if let Some(key) = key {
+                                let view = view.clone();
+                                let group = if index == 1 {
+                                    "favorite-title-header"
+                                } else {
+                                    "favorite-album-header"
+                                };
+                                let (icon, label) = sort_label(sort, key);
+                                Button::new(("favorite-sort", index))
+                                    .group(group)
+                                    .w_full()
+                                    .h(px(30.))
+                                    .px(CELL_PADDING)
+                                    .rounded(px(8.))
+                                    .hover(|style| style.bg(colors.muted))
+                                    .justify_start()
+                                    .gap(px(12.))
+                                    .text_color(colors.muted_foreground)
+                                    .child(column.title.clone())
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(4.))
+                                            .when(label == "默认排序", |label| {
+                                                label
+                                                    .opacity(0.)
+                                                    .group_hover(group, |style| style.opacity(1.))
+                                            })
+                                            .child(
+                                                svg()
+                                                    .path(icon)
+                                                    .size(px(16.))
+                                                    .flex_none()
+                                                    .text_color(colors.muted_foreground),
+                                            )
+                                            .child(label),
+                                    )
+                                    .on_click(move |_, _, cx| {
+                                        view.update(cx, |this, cx| this.toggle_sort(key, cx))
+                                    })
+                                    .into_any_element()
+                            } else {
+                                div()
+                                    .px(CELL_PADDING)
+                                    .child(column.title.clone())
+                                    .into_any_element()
+                            }
+                        }
+                    },
+                    {
+                        let layout = header_layout.clone();
+                        move |columns| layout.set([columns[1], columns[2]])
+                    },
                     |this, index, hovered, cx| this.set_hovered_row(index, hovered, cx),
                     cx,
                 )
@@ -657,7 +737,7 @@ impl Render for FavoriteMusicPage {
                 div()
                     .relative()
                     .child(table)
-                    .child(self.title_divider(colors, cx))
+                    .child(self.title_divider(colors, header_layout, cx))
                     .into_any_element()
             }
             _ => div()
@@ -846,5 +926,88 @@ impl Render for FavoriteMusicPage {
             .child(div().mt(px(28.)).child(self.tabs.clone()))
             // 具体内容区域
             .child(content)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ALBUM_SHARE_MAX, ALBUM_SHARE_MIN, SongSort, demo_songs, next_sort, resized_album_share,
+        song_order, sort_label,
+    };
+    use gpui::{HighlightStyle, Hsla, TextStyle, rgb};
+
+    #[test]
+    fn visual_sort_preserves_playlist_order_and_song_identity() {
+        let mut songs = demo_songs();
+        songs.truncate(3);
+        songs[0].title = "B".into();
+        songs[1].title = "A".into();
+        songs[2].title = "A".into();
+        songs[0].artists = vec!["C".into()];
+        songs[1].artists = vec!["A".into()];
+        songs[2].artists = vec!["B".into()];
+        songs[0].album = "A".into();
+        songs[1].album = "C".into();
+        songs[2].album = "B".into();
+        assert_eq!(song_order(&songs, SongSort::Title, false), vec![1, 2, 0]);
+        assert_eq!(song_order(&songs, SongSort::Title, true), vec![0, 1, 2]);
+        assert_eq!(song_order(&songs, SongSort::Album, false), vec![0, 2, 1]);
+        assert_eq!(song_order(&songs, SongSort::Album, true), vec![1, 2, 0]);
+        assert_eq!(
+            songs.iter().map(|song| song.id).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(songs[0].title.as_ref(), "B");
+        assert_eq!(song_order(&songs, SongSort::Artist, false), vec![1, 2, 0]);
+        assert_eq!(song_order(&songs, SongSort::Artist, true), vec![0, 2, 1]);
+        let mut sort = None;
+        for expected in [
+            Some((SongSort::Title, false)),
+            Some((SongSort::Title, true)),
+            Some((SongSort::Artist, false)),
+            Some((SongSort::Artist, true)),
+            None,
+        ] {
+            sort = next_sort(sort, SongSort::Title);
+            assert!(sort == expected);
+        }
+        assert_eq!(
+            sort_label(sort, SongSort::Title),
+            ("icons/列表排序/默认排序.svg", "默认排序")
+        );
+        for expected in [
+            Some((SongSort::Album, false)),
+            Some((SongSort::Album, true)),
+            None,
+        ] {
+            sort = next_sort(sort, SongSort::Album);
+            assert!(sort == expected);
+        }
+        assert!(
+            next_sort(Some((SongSort::Artist, true)), SongSort::Album)
+                == Some((SongSort::Album, false))
+        );
+    }
+
+    #[test]
+    fn resize_preserves_ratio_and_subtitle_overrides_red_title() {
+        let share = resized_album_share(0.35, 50., 500.);
+        assert!((share - 0.25).abs() < 0.00001);
+        assert_eq!(resized_album_share(share, 0., 1000.), share);
+        assert_eq!(resized_album_share(share, 10000., 500.), ALBUM_SHARE_MIN);
+        assert_eq!(resized_album_share(share, -10000., 500.), ALBUM_SHARE_MAX);
+        assert_eq!(resized_album_share(share, 50., 0.), share);
+        let gray = Hsla::from(rgb(0x283248)).alpha(0.6);
+        let style = TextStyle {
+            color: rgb(0xfc3d49).into(),
+            ..Default::default()
+        }
+        .highlight(HighlightStyle {
+            color: Some(gray.alpha(1.)),
+            fade_out: Some(1. - gray.a),
+            ..Default::default()
+        });
+        assert_eq!(style.color, gray);
     }
 }

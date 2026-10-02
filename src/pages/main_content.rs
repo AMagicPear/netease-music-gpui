@@ -27,7 +27,7 @@ pub struct MainContent {
     user_profile: Entity<UserProfile>,
     /// 每个导航项对应一个页面 View，一次创建后长期持有。
     pages: HashMap<ContentPage, AnyView>,
-    page_scroll: ScrollHandle,
+    page_scroll: HashMap<ContentPage, ScrollHandle>,
     _sidebar_subscription: Subscription,
     _user_profile_subscription: Subscription,
 }
@@ -63,7 +63,9 @@ impl MainContent {
             search_input,
             user_profile,
             pages,
-            page_scroll: ScrollHandle::default(),
+            page_scroll: ContentPage::all()
+                .map(|page| (page, ScrollHandle::default()))
+                .collect(),
             _sidebar_subscription: sidebar_subscription,
             _user_profile_subscription: user_profile_subscription,
         }
@@ -220,6 +222,7 @@ impl Render for MainContent {
         let colors = Theme::global(cx).tokens.colors;
         let user_profile = self.user_profile.read(cx);
         let active_page = self.sidebar.read(cx).active_page();
+        let page_scroll = &self.page_scroll[&active_page];
         let drag_offset = Rc::new(Cell::new(px(0.)));
 
         div()
@@ -258,19 +261,20 @@ impl Render for MainContent {
                             .overflow_hidden()
                             .child(
                                 div()
-                                    .id("right-page-content")
+                                    .id((
+                                        ElementId::Name("right-page-content".into()),
+                                        active_page.id(),
+                                    ))
                                     .flex_1()
                                     .min_h(px(0.))
                                     .px(px(40.))
                                     .py(px(18.))
                                     .overflow_y_scroll()
-                                    .track_scroll(&self.page_scroll)
+                                    .track_scroll(page_scroll)
                                     .children(self.pages.get(&active_page).cloned()),
                             )
                             // 滚动条放在外层，避免它的边界被计入滚动内容高度。
-                            .child(
-                                Scrollbar::vertical(&self.page_scroll).mode(ScrollbarMode::Always),
-                            ),
+                            .child(Scrollbar::vertical(page_scroll).mode(ScrollbarMode::Always)),
                     ),
             )
             .child(
