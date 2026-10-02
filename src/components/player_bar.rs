@@ -5,7 +5,7 @@ use gpui_kit::base::{Button, ColorTokens, Theme, Transition, transition};
 
 use super::progress_bar::ProgressBar;
 use crate::state::playback::PlaybackState;
-use crate::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_OPACITY};
+use crate::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
 
 pub struct PlayerBar {
     playback: Entity<PlaybackState>,
@@ -87,6 +87,10 @@ fn hover_icon(
         .text_color(color)
         .hover(|style| style.text_color(colors.foreground))
         .id(id)
+        // active 属于 StatefulInteractiveElement，必须跟在 .id() 之后（此时是 Stateful<Svg>）。
+        // 按下换成一个明确的「按下色」而不是 opacity：图标没有底色，叠 opacity 会在按住拖出时
+        // 因失去 hover、退回更浅底色而双重变淡。active 最后生效会覆盖 hover，颜色始终一致。
+        .active(|style| style.text_color(colors.foreground.alpha(PRESSED_ICON_ALPHA)))
 }
 
 impl Render for PlayerBar {

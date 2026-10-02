@@ -6,7 +6,7 @@ use gpui::*;
 use super::ContentPage;
 use super::sidebar_page::{SidebarChanged, SidebarPage};
 use crate::state::user::UserProfile;
-use crate::theme::IconSize;
+use crate::theme::{IconSize, PRESSED_ICON_ALPHA};
 use gpui_kit::base::input::{Input, InputState};
 use gpui_kit::base::{Button, ColorTokens, Scrollbar, ScrollbarMode, Theme};
 use gpui_kit::component::avatar::Avatar;
@@ -95,7 +95,9 @@ fn search_box(input: Entity<InputState>, colors: ColorTokens) -> impl IntoElemen
                 .flex_none()
                 .text_color(colors.muted_foreground)
                 .hover(|style| style.text_color(colors.foreground))
-                .id("search-box-icon"),
+                .id("search-box-icon")
+                // 同上：按下换用更浅的「按下色」，避免按住拖出时叠加 opacity 造成双重变淡
+                .active(|style| style.text_color(colors.foreground.alpha(PRESSED_ICON_ALPHA))),
         )
         .child(Input::new(&input))
 }
@@ -109,6 +111,10 @@ fn hover_icon(id: &'static str, path: &'static str, colors: ColorTokens) -> impl
         .text_color(colors.foreground.alpha(0.6))
         .hover(|style| style.text_color(colors.foreground))
         .id(id)
+        // active 属于 StatefulInteractiveElement，必须跟在 .id() 之后（此时是 Stateful<Svg>）。
+        // 按下换成一个明确的「按下色」而不是 opacity：图标没有底色，叠 opacity 会在按住拖出时
+        // 因失去 hover、退回更浅底色而双重变淡。active 最后生效会覆盖 hover，颜色始终一致。
+        .active(|style| style.text_color(colors.foreground.alpha(PRESSED_ICON_ALPHA)))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
 }
 
@@ -166,13 +172,19 @@ fn page_header(
                 .child(
                     div()
                         .id("header-profile-menu")
+                        // 把整块（昵称 + VIP + 箭头）声明成一个 group，
+                        // 子元素就能用 group_hover 感知「整块是否被悬浮」，而不是各自单独判断。
+                        .group("header-profile-menu")
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .ml(px(4.))
                         .flex()
                         .items_center()
                         .gap(px(4.))
                         .text_size(px(13.))
+                        // 昵称保持原本设计的 0.7；文字子元素会继承这个色，
+                        // 所以这里的 hover 一并让昵称变深到 foreground。
                         .text_color(colors.foreground.alpha(0.7))
+                        .hover(|style| style.text_color(colors.foreground))
                         .child(user_name)
                         .child(img("icons/vip-level.svg").w(px(48.)).h(px(16.)).flex_none())
                         .child(
@@ -180,7 +192,12 @@ fn page_header(
                                 .path("icons/unfold.svg")
                                 .size(px(20.))
                                 .flex_none()
-                                .text_color(colors.foreground.alpha(0.6)),
+                                // svg 不继承文字色的 hover，改用 group_hover：
+                                // 只要整块被悬浮，箭头也跟着变深到 foreground。
+                                .text_color(colors.foreground.alpha(0.6))
+                                .group_hover("header-profile-menu", |style| {
+                                    style.text_color(colors.foreground)
+                                }),
                         ),
                 )
                 .child(hover_icon(
