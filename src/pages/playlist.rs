@@ -82,6 +82,7 @@ pub struct PlaylistPage {
     _tabs_subscription: Subscription,
     library: Entity<MusicLibrary>,
     playback: Entity<PlaybackState>,
+    _playback_subscription: Subscription,
     _library_subscription: Subscription,
     /// 原始歌单顺序保存在 detail.songs；这里只保存显示顺序。
     display_order: Vec<usize>,
@@ -175,6 +176,37 @@ fn row_actions(index: u64, colors: ColorTokens) -> AnyElement {
         .into_any_element()
 }
 
+fn playing_indicator(song_id: u64, colors: ColorTokens) -> AnyElement {
+    let ids = [
+        "playlist-playing-bar-0",
+        "playlist-playing-bar-1",
+        "playlist-playing-bar-2",
+    ];
+    let bars = [0.0_f32, 0.33, 0.66]
+        .into_iter()
+        .enumerate()
+        .map(|(index, phase)| {
+            div().w(px(2.)).h(px(2.)).bg(colors.primary).with_animation(
+                (ids[index], song_id),
+                Animation::new(std::time::Duration::from_secs(2)).repeat(),
+                move |bar, progress| {
+                    let height =
+                        2. + ((progress + phase) * std::f32::consts::TAU).sin().abs() * 13.;
+                    bar.h(px(height))
+                },
+            )
+        });
+
+    div()
+        .w(px(12.))
+        .h(px(15.))
+        .flex()
+        .items_end()
+        .justify_between()
+        .children(bars)
+        .into_any_element()
+}
+
 impl PlaylistPage {
     pub fn new(
         library: Entity<MusicLibrary>,
@@ -191,6 +223,7 @@ impl PlaylistPage {
         });
         let tabs_subscription = cx.subscribe(&tabs, |_, _, _: &TabChanged, cx| cx.notify());
         let library_subscription = cx.observe(&library, |_, _, cx| cx.notify());
+        let playback_subscription = cx.observe(&playback, |_, _, cx| cx.notify());
         let detail_subscription = cx.observe(&detail, |this, detail, cx| {
             let detail = detail.read(cx);
             let changed = this.playlist_id != detail.id;
@@ -229,6 +262,7 @@ impl PlaylistPage {
             _tabs_subscription: tabs_subscription,
             library,
             playback,
+            _playback_subscription: playback_subscription,
             _library_subscription: library_subscription,
             display_order: Vec::new(),
             sort: None,
@@ -378,6 +412,12 @@ impl PlaylistPage {
         let detail = self.detail.read(cx);
         let song = &detail.songs[self.display_order[index]];
         let song_id = song.id;
+        let playback = self.playback.read(cx);
+        let is_current_song = playback
+            .current_song
+            .as_ref()
+            .is_some_and(|current| current.id == song_id);
+        let is_playing = playback.is_playing;
         let liked = library.liked_song_ids.contains(&song_id);
         let album_name = song
             .al
@@ -394,14 +434,32 @@ impl PlaylistPage {
             .whitespace_nowrap()
             .font_family(DOLPHIN_FAMILY);
         vec![
-            if hovered {
+            if is_current_song && is_playing && hovered {
+                index_cell
+                    .child(
+                        div()
+                            .id(("playlist-pause-song", song_id))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.playback.update(cx, |playback, cx| {
+                                    playback.is_playing = false;
+                                    cx.notify();
+                                });
+                            }))
+                            .child(row_hover_icon(
+                                ("playlist-song-pause", song_id),
+                                "icons/pause.svg",
+                                "暂停",
+                                px(20.),
+                                colors,
+                            )),
+                    )
+                    .into_any_element()
+            } else if hovered || (is_current_song && !is_playing) {
                 // hover 时序号让位给播放键
-                // `play.svg` 的三角在画布里右边自带空白，光靠 `justify_end` 贴不到边
                 index_cell
                     .child(
                         div()
                             .id(("playlist-select-song", song_id))
-                            .mr(px(-3.))
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.select_song(song_id, cx)),
                             )
@@ -413,6 +471,10 @@ impl PlaylistPage {
                                 colors,
                             )),
                     )
+                    .into_any_element()
+            } else if is_current_song && is_playing {
+                index_cell
+                    .child(playing_indicator(song_id, colors))
                     .into_any_element()
             } else {
                 index_cell
@@ -460,6 +522,11 @@ impl PlaylistPage {
                                 .child(
                                     div()
                                         .text_size(px(14.))
+                                        .text_color(if is_current_song {
+                                            colors.primary
+                                        } else {
+                                            colors.foreground
+                                        })
                                         .truncate()
                                         .child(title_with_subtitle(song, colors)),
                                 )
@@ -480,7 +547,11 @@ impl PlaylistPage {
                                                 .min_w(px(0.))
                                                 .truncate()
                                                 .font_weight(SECONDARY_FONT_WEIGHT)
-                                                .text_color(colors.muted_foreground)
+                                                .text_color(if is_current_song {
+                                                    colors.primary
+                                                } else {
+                                                    colors.muted_foreground
+                                                })
                                                 .child(artist_label(song, colors)),
                                         ),
                                 ),
