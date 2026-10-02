@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_kit::base::{
     Slider, SliderIndicator, SliderThumb, SliderTrack, Theme, Transition, transition,
@@ -74,26 +75,31 @@ impl ProgressBar {
             _slider_subscription: slider_subscription,
         }
     }
+
+    pub fn expanded(&self) -> bool {
+        self.hovered || self.dragging
+    }
 }
 
 impl Render for ProgressBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = Theme::global(cx).tokens.colors;
         let progress = self.slider.read(cx).percentage().end;
-        let enabled = self
-            .playback
-            .read(cx)
+        let playback = self.playback.read(cx);
+        let duration = playback
             .current_song
             .as_ref()
-            .is_some_and(|song| !song.duration.is_zero());
+            .map_or(Duration::ZERO, |song| song.duration);
+        let enabled = !duration.is_zero();
+        let elapsed = if self.dragging {
+            duration.mul_f64(f64::from(progress))
+        } else {
+            playback.position.min(duration)
+        };
         // 稳定 ID 的 transition 从当前采样值反向，并由库处理 reduced motion。
         let t = transition(
             "player-progress-hover",
-            if self.hovered || self.dragging {
-                1.
-            } else {
-                0.
-            },
+            if self.expanded() { 1. } else { 0. },
             Transition::new(Duration::from_millis(130)).ease(ease_out_quint()),
             window,
             cx,
@@ -182,7 +188,53 @@ impl Render for ProgressBar {
                                                 .blur_radius(px(1.)),
                                             ]),
                                     ),
-                            ),
+                            )
+                            .when(enabled && t > 0., |track| {
+                                let elapsed = elapsed.as_secs();
+                                let total = duration.as_secs();
+                                track.child(
+                                    // 零尺寸锚点跟随播放头，anchored 负责窗口边缘避让。
+                                    div()
+                                        .absolute()
+                                        .left(relative(progress))
+                                        .top(px(
+                                            HIT_SLOP_TOP + (REST_HEIGHT - HANDLE_SIZE) / 2. - 6.
+                                        ))
+                                        .size(px(0.))
+                                        .child(
+                                            anchored()
+                                                .anchor(Anchor::BottomCenter)
+                                                .snap_to_window_with_margin(px(4.))
+                                                .child(
+                                                    div()
+                                                        .h(px(28.))
+                                                        .px(px(16.))
+                                                        .flex()
+                                                        .items_center()
+                                                        .rounded_full()
+                                                        .bg(colors.surface)
+                                                        .text_color(colors.foreground)
+                                                        .font_family("Dolphin")
+                                                        .font_weight(FontWeight::BOLD)
+                                                        .text_size(px(13.5))
+                                                        .line_height(px(16.))
+                                                        .whitespace_nowrap()
+                                                        .opacity(t)
+                                                        .child(format!(
+                                                            "{:02}:{:02}",
+                                                            elapsed / 60,
+                                                            elapsed % 60
+                                                        ))
+                                                        .child(div().mx(px(2.)).child("/"))
+                                                        .child(format!(
+                                                            "{:02}:{:02}",
+                                                            total / 60,
+                                                            total % 60
+                                                        )),
+                                                ),
+                                        ),
+                                )
+                            }),
                     ),
             )
     }

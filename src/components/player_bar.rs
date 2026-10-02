@@ -1,5 +1,7 @@
+use std::time::Duration;
+
 use gpui::*;
-use gpui_kit::base::{Button, ColorTokens, Theme};
+use gpui_kit::base::{Button, ColorTokens, Theme, Transition, transition};
 
 use super::progress_bar::ProgressBar;
 use crate::state::playback::PlaybackState;
@@ -11,6 +13,7 @@ pub struct PlayerBar {
     play_button_hovered: bool,
     play_button_pressed: bool,
     _playback_subscription: Subscription,
+    _progress_subscription: Subscription,
 }
 
 impl PlayerBar {
@@ -21,12 +24,14 @@ impl PlayerBar {
     ) -> Self {
         let progress_bar = cx.new(|cx| ProgressBar::new(playback.clone(), window, cx));
         let playback_subscription = cx.observe(&playback, |_, _, cx| cx.notify());
+        let progress_subscription = cx.observe(&progress_bar, |_, _, cx| cx.notify());
         Self {
             playback,
             progress_bar,
             play_button_hovered: false,
             play_button_pressed: false,
             _playback_subscription: playback_subscription,
+            _progress_subscription: progress_subscription,
         }
     }
 }
@@ -85,8 +90,16 @@ fn hover_icon(
 }
 
 impl Render for PlayerBar {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = Theme::global(cx).tokens.colors;
+        let expanded = self.progress_bar.read(cx).expanded();
+        let shadow_opacity = transition(
+            "player-bar-shadow",
+            if expanded { 1. } else { 0. },
+            Transition::new(Duration::from_millis(130)).ease(ease_out_quint()),
+            window,
+            cx,
+        );
         let play_button_enlarged = self.play_button_hovered && !self.play_button_pressed;
         let play_button_size = if play_button_enlarged {
             px(42.)
@@ -123,6 +136,16 @@ impl Render for PlayerBar {
             .flex_none()
             .flex()
             .flex_col()
+            // GPUI 先绘制阴影，再绘制不透明背景；背景自然遮住下方阴影。
+            .shadow(vec![
+                BoxShadow::new(
+                    px(0.),
+                    px(-12.),
+                    colors.foreground.alpha(0.18 * shadow_opacity),
+                )
+                .blur_radius(px(24.))
+                .spread_radius(px(12.)),
+            ])
             .bg(colors.surface)
             .border_t_1()
             .border_color(colors.border)
