@@ -165,20 +165,28 @@ fn search_box(input: Entity<InputState>, colors: ColorTokens) -> impl IntoElemen
         .child(Input::new(&input))
 }
 
-fn hover_icon(id: &'static str, path: &'static str, colors: ColorTokens) -> impl IntoElement {
-    svg()
-        .path(path)
+fn hover_icon(
+    id: &'static str,
+    label: &'static str,
+    path: &'static str,
+    colors: ColorTokens,
+) -> Button {
+    Button::new(id)
+        .aria_label(label)
         .size(IconSize::Small.pixels())
         .ml(px(10.))
         .flex_none()
-        .text_color(colors.foreground.alpha(0.6))
-        .hover(|style| style.text_color(colors.foreground))
-        .id(id)
-        // active 属于 StatefulInteractiveElement，必须跟在 .id() 之后（此时是 Stateful<Svg>）。
-        // 按下换成一个明确的「按下色」而不是 opacity：图标没有底色，叠 opacity 会在按住拖出时
-        // 因失去 hover、退回更浅底色而双重变淡。active 最后生效会覆盖 hover，颜色始终一致。
-        .active(|style| style.text_color(colors.foreground.alpha(PRESSED_ICON_ALPHA)))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(
+            svg()
+                .path(path)
+                .size(IconSize::Small.pixels())
+                .flex_none()
+                .text_color(colors.foreground.alpha(0.6))
+                .hover(|style| style.text_color(colors.foreground))
+                .id((id, 0usize))
+                .active(|style| style.text_color(colors.foreground.alpha(PRESSED_ICON_ALPHA))),
+        )
 }
 
 fn page_header(
@@ -263,17 +271,25 @@ fn page_header(
                 )
                 .child(hover_icon(
                     "header-message-button",
+                    "消息",
                     "icons/message.svg",
                     colors,
                 ))
                 .child(hover_icon(
                     "header-setting-button",
+                    "设置",
                     "icons/setting.svg",
                     colors,
                 ))
-                .child(hover_icon("header-skin-button", "icons/skin.svg", colors))
+                .child(hover_icon(
+                    "header-skin-button",
+                    "皮肤",
+                    "icons/skin.svg",
+                    colors,
+                ))
                 .child(hover_icon(
                     "header-mini-button",
+                    "迷你模式",
                     "icons/menu_mini.svg",
                     colors,
                 )),

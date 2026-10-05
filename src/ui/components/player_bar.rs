@@ -5,10 +5,10 @@ use std::{
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_kit::base::{Button, ColorTokens, Theme, Transition, transition};
+use gpui_kit::base::{Button, ColorTokens, Popover, Theme, Transition, transition};
 
 use super::progress_bar::ProgressBar;
-use super::{artist_label, like_icon_path, quality_badge_path};
+use super::{artist_label, like_icon_path, popover_surface, quality_badge_path};
 use crate::api::MusicApi;
 use crate::playback::PlaybackController;
 use crate::state::library::MusicLibrary;
@@ -329,22 +329,29 @@ fn format_count(count: u64) -> String {
     }
 }
 
-/// 独立的图标按钮：hover 只改自己的颜色。
+/// 无预设样式的图标按钮：Button 管交互，SVG 管颜色。
 fn hover_icon(
     id: &'static str,
+    label: &'static str,
     icon_path: &'static str,
     size: Pixels,
     color: Hsla,
     colors: ColorTokens,
-) -> impl IntoElement {
-    svg()
-        .path(icon_path)
+) -> Button {
+    Button::new(id)
+        .aria_label(label)
         .size(size)
         .flex_none()
-        .text_color(color)
-        .hover(move |style| style.text_color(colors.foreground))
-        .id(id)
-        .active(move |style| style.text_color(colors.foreground.alpha(PRESSED_ICON_ALPHA)))
+        .child(
+            svg()
+                .path(icon_path)
+                .size(size)
+                .flex_none()
+                .text_color(color)
+                .hover(move |style| style.text_color(colors.foreground))
+                .id((id, 0usize))
+                .active(move |style| style.text_color(colors.foreground.alpha(PRESSED_ICON_ALPHA))),
+        )
 }
 
 impl Render for PlayerBar {
@@ -557,27 +564,27 @@ impl Render for PlayerBar {
                             .text_color(colors.foreground)
                             .child(hover_icon(
                                 "player-order-button",
+                                "播放顺序",
                                 "icons/播放顺序/顺序.svg",
                                 IconSize::Large.pixels(),
                                 colors.muted_foreground,
                                 colors,
                             ))
                             .child(
-                                div()
-                                    .id("player-previous-control")
-                                    .role(Role::Button)
-                                    .aria_label("上一首")
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                                hover_icon(
+                                    "player-previous-button",
+                                    "上一首",
+                                    "icons/pre.svg",
+                                    IconSize::Large.pixels(),
+                                    colors.secondary_foreground,
+                                    colors,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
                                         this.playback
                                             .update(cx, |playback, cx| playback.previous(cx));
-                                    }))
-                                    .child(hover_icon(
-                                        "player-previous-button",
-                                        "icons/pre.svg",
-                                        IconSize::Large.pixels(),
-                                        colors.secondary_foreground,
-                                        colors,
-                                    )),
+                                    },
+                                )),
                             )
                             .child(
                                 div()
@@ -642,23 +649,23 @@ impl Render for PlayerBar {
                                     ),
                             )
                             .child(
-                                div()
-                                    .id("player-next-control")
-                                    .role(Role::Button)
-                                    .aria_label("下一首")
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                                hover_icon(
+                                    "player-next-button",
+                                    "下一首",
+                                    "icons/next.svg",
+                                    IconSize::Large.pixels(),
+                                    colors.secondary_foreground,
+                                    colors,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
                                         this.playback.update(cx, |playback, cx| playback.next(cx));
-                                    }))
-                                    .child(hover_icon(
-                                        "player-next-button",
-                                        "icons/next.svg",
-                                        IconSize::Large.pixels(),
-                                        colors.secondary_foreground,
-                                        colors,
-                                    )),
+                                    },
+                                )),
                             )
                             .child(hover_icon(
                                 "player-playlist-button",
+                                "播放列表",
                                 "icons/playlist.svg",
                                 IconSize::Large.pixels(),
                                 colors.muted_foreground,
@@ -674,15 +681,27 @@ impl Render for PlayerBar {
                             .justify_end()
                             .gap(px(18.))
                             .text_color(colors.muted_foreground)
-                            .child(hover_icon(
-                                "player-quality-button",
-                                quality_icon_path,
-                                IconSize::Middle.pixels(),
-                                colors.muted_foreground,
-                                colors,
-                            ))
+                            .child(
+                                Popover::new("player-quality-popover")
+                                    .flex_none()
+                                    .anchor(Anchor::BottomRight)
+                                    .offset(px(12.))
+                                    .trigger(hover_icon(
+                                        "player-quality-button",
+                                        "音质选项",
+                                        quality_icon_path,
+                                        IconSize::Middle.pixels(),
+                                        colors.muted_foreground,
+                                        colors,
+                                    ))
+                                    // 空内容暂定尺寸；后续音质面板的布局只在这里实现。
+                                    .content(|_, _, cx| {
+                                        popover_surface(cx).w(px(380.)).h(px(480.))
+                                    }),
+                            )
                             .child(hover_icon(
                                 "player-collect-button",
+                                "收藏",
                                 "icons/collect.svg",
                                 IconSize::Middle.pixels(),
                                 colors.muted_foreground,
@@ -690,6 +709,7 @@ impl Render for PlayerBar {
                             ))
                             .child(hover_icon(
                                 "player-volume-button",
+                                "音量",
                                 "icons/volume.svg",
                                 IconSize::Middle.pixels(),
                                 colors.muted_foreground,
@@ -697,6 +717,7 @@ impl Render for PlayerBar {
                             ))
                             .child(hover_icon(
                                 "player-more-button",
+                                "更多",
                                 "icons/xpoint.svg",
                                 IconSize::Middle.pixels(),
                                 colors.muted_foreground,
