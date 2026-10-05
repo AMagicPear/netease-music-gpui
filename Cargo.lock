@@ -4345,6 +4345,7 @@ dependencies = [
  "gpui-kit",
  "gpui-pre",
  "gpui-pre-reqwest-client",
+ "image",
  "ncm-api-rs",
  "reqwest 0.13.5",
  "rodio",
