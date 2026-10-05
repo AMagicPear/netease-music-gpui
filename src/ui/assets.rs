@@ -17,6 +17,15 @@ pub fn thumbnail_url(url: &str, pixels: u32) -> String {
     {
         return url.into();
     }
+    // 同一张封面在 `user/playlist`（歌单摘要，返回 http://）和 `playlist/detail`
+    // （歌单详情，返回 https://）里的协议不一致，而 GPUI 的资源缓存以整条 URL 作为
+    // key（`Resource::Uri` / `SharedUri` 按内容哈希），协议不同就会被当成两张不同的图。
+    // 结果：详情返回时这张封面命中不了摘要那份缓存，要重新下载并解码，画面表现为封面闪一下。
+    // 统一升级到 https，让两边命中同一份缓存；网易 CDN 的 https 与 http 是同一批节点。
+    if parsed.scheme() == "http" {
+        // 只有「特殊协议 ↔ 非特殊协议」互转才会失败，http → https 不会。
+        let _ = parsed.set_scheme("https");
+    }
     let parameters: Vec<_> = parsed
         .query_pairs()
         .filter(|(key, _)| key != "param")
@@ -71,6 +80,25 @@ mod tests {
         assert_eq!(
             thumbnail_url("https://example.com/cover.jpg", 72),
             "https://example.com/cover.jpg"
+        );
+    }
+
+    /// 摘要走 `user/playlist`（http），详情走 `playlist/detail`（https），归一化后必须
+    /// 得到同一个字符串，否则 GPUI 的资源缓存会把它当成两张图，封面在详情返回时闪一下。
+    #[test]
+    fn thumbnail_normalizes_scheme_so_summary_and_detail_share_one_cache_entry() {
+        let summary = thumbnail_url(
+            "http://p1.music.126.net/abc==/109951174028075973.jpg",
+            340,
+        );
+        let detail = thumbnail_url(
+            "https://p1.music.126.net/abc==/109951174028075973.jpg?param=200y200",
+            340,
+        );
+        assert_eq!(summary, detail);
+        assert_eq!(
+            summary,
+            "https://p1.music.126.net/abc==/109951174028075973.jpg?param=340y340"
         );
     }
 }
