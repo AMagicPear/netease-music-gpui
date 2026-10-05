@@ -73,7 +73,12 @@ src/
 ├── playback/
 │   ├── controller.rs        统一播放接口、队列和 GPUI 状态通知
 │   ├── engine.rs            音频设备、播放源、暂停和音量
-│   └── stream.rs            分段下载、缓存、后台解码和 PCM 队列
+│   ├── stream.rs            音源组装、跳转和取消生命周期
+│   └── stream/
+│       ├── download.rs      HTTP Range 下载和字节缓存
+│       ├── decode.rs        Symphonia 解析、定位和解码
+│       ├── output.rs        PCM 队列和 rodio Source 适配
+│       └── tests.rs         本地 HTTP 与音频回归测试
 └── ui/
     ├── shell.rs             主窗口布局和导航协调
     ├── sidebar.rs           侧栏

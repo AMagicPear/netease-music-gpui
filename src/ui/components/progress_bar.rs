@@ -49,12 +49,18 @@ impl SeekDrag {
     }
 }
 
-fn slider_state(progress: f32) -> SliderState {
+fn slider_state(position: Duration, duration: Duration) -> SliderState {
     SliderState::new()
         .min(0.)
-        .max(1.)
-        .step(0.0001)
-        .default_value(progress)
+        .max(duration.as_millis() as f32)
+        .step(1.)
+        .default_value(position.min(duration).as_millis() as f32)
+}
+
+fn seek_position(milliseconds: f32, duration: Duration) -> Option<Duration> {
+    milliseconds
+        .is_finite()
+        .then(|| Duration::from_millis(milliseconds.max(0.).round() as u64).min(duration))
 }
 
 pub struct ProgressBar {
@@ -73,27 +79,31 @@ impl ProgressBar {
         cx: &mut Context<Self>,
     ) -> Self {
         let controller = playback.read(cx);
-        let progress = controller.progress();
+        let position = controller.snapshot().position;
+        let duration = controller.snapshot().duration;
         let revision = controller.snapshot().revision;
-        let slider = cx.new(|_| slider_state(progress));
+        let slider = cx.new(|_| slider_state(position, duration));
         let playback_subscription =
             cx.observe_in(&playback, window, |this, playback, window, cx| {
                 let playback = playback.read(cx);
                 let revision = playback.snapshot().revision;
-                let progress = playback.progress();
+                let duration = playback.snapshot().duration;
+                let position = playback.snapshot().position.min(duration);
+                let milliseconds = position.as_millis() as f32;
                 let enabled = playback.can_seek();
                 let changed = this.drag.sync_revision(revision);
-                if changed || (!enabled && this.drag.dragging) {
+                let range_changed = this.slider.read(cx).max_value() != duration.as_millis() as f32;
+                if changed || range_changed || (!enabled && this.drag.dragging) {
                     this.drag.dragging = false;
-                    // set_value 不清除库内部手势。换 Entity 同时隔离旧 DragThumb/DragSlider。
-                    this.slider = cx.new(|_| slider_state(progress));
+                    // 换 Entity 更新时长范围，并清除库内部旧 DragThumb/DragSlider 手势。
+                    this.slider = cx.new(|_| slider_state(position, duration));
                     this._slider_subscription =
                         Self::subscribe_slider(&this.slider, revision, window, cx);
                 }
                 // 播放时钟只更新非拖动状态，避免覆盖用户正在预览的位置。
-                if !this.drag.dragging && this.slider.read(cx).value().end() != progress {
+                if !this.drag.dragging && this.slider.read(cx).value().end() != milliseconds {
                     this.slider
-                        .update(cx, |slider, cx| slider.set_value(progress, window, cx));
+                        .update(cx, |slider, cx| slider.set_value(milliseconds, window, cx));
                 }
                 cx.notify();
             });
@@ -133,23 +143,21 @@ impl ProgressBar {
                     let commit = this.drag.release(revision, current_revision);
                     if commit {
                         this.playback.update(cx, |playback, cx| {
-                            let progress = value.end();
                             if playback.snapshot().revision == revision
                                 && playback.can_seek()
-                                && progress.is_finite()
+                                && let Some(position) =
+                                    seek_position(value.end(), playback.snapshot().duration)
                             {
-                                let position = playback
-                                    .snapshot()
-                                    .duration
-                                    .mul_f64(f64::from(progress.clamp(0., 1.)));
                                 playback.seek_to(position, cx);
                             }
                         });
                     }
                     if !this.drag.dragging {
-                        let progress = this.playback.read(cx).progress();
+                        let snapshot = this.playback.read(cx).snapshot();
+                        let milliseconds =
+                            snapshot.position.min(snapshot.duration).as_millis() as f32;
                         this.slider
-                            .update(cx, |slider, cx| slider.set_value(progress, window, cx));
+                            .update(cx, |slider, cx| slider.set_value(milliseconds, window, cx));
                     }
                 }
             }
@@ -170,7 +178,7 @@ impl Render for ProgressBar {
         let duration = playback.snapshot().duration;
         let enabled = playback.can_seek();
         let elapsed = if self.drag.dragging {
-            duration.mul_f64(f64::from(progress))
+            seek_position(self.slider.read(cx).value().end(), duration).unwrap_or_default()
         } else {
             playback.snapshot().position.min(duration)
         };
@@ -320,10 +328,28 @@ impl Render for ProgressBar {
 
 #[cfg(test)]
 mod tests {
-    use super::SeekDrag;
+    use super::{SeekDrag, seek_position, slider_state};
+    use std::time::Duration;
 
     #[test]
-    fn release_requires_a_change_in_the_current_revision() {
+    fn slider_uses_milliseconds_and_bounds_seek_targets() {
+        let duration = Duration::from_millis(240_000);
+        let slider = slider_state(Duration::from_millis(120_000), duration);
+        assert_eq!(slider.max_value(), 240_000.);
+        assert_eq!(slider.step_value(), 1.);
+        assert_eq!(slider.percentage().end, 0.5);
+        assert_eq!(
+            seek_position(120_001., duration),
+            Some(Duration::from_millis(120_001))
+        );
+        assert_eq!(seek_position(-1., duration), Some(Duration::ZERO));
+        assert_eq!(seek_position(300_000., duration), Some(duration));
+        assert_eq!(seek_position(f32::NAN, duration), None);
+        assert_eq!(seek_position(f32::INFINITY, duration), None);
+    }
+
+    #[test]
+    fn drag_lifecycle_rejects_stale_events_and_observer_races() {
         let mut drag = SeekDrag {
             revision: 7,
             dragging: false,
@@ -335,14 +361,6 @@ mod tests {
         assert!(drag.release(7, 7));
         assert!(!drag.dragging);
         assert!(!drag.release(7, 7));
-    }
-
-    #[test]
-    fn reload_cancels_drag_even_without_release_and_ignores_old_events() {
-        let mut drag = SeekDrag {
-            revision: 7,
-            dragging: false,
-        };
         drag.change(7, 7);
         assert!(drag.sync_revision(8));
         assert!(!drag.dragging);
@@ -353,18 +371,11 @@ mod tests {
         assert!(!drag.release(7, 8));
         assert!(drag.dragging);
         assert!(drag.release(8, 8));
-    }
-
-    #[test]
-    fn release_checks_revision_before_the_observer_runs() {
-        let mut drag = SeekDrag {
-            revision: 7,
-            dragging: false,
-        };
-        drag.change(7, 8);
+        // 新的控制器 revision 已生效，但观察通知尚未更新本地 revision。
+        drag.change(8, 9);
         assert!(!drag.dragging);
-        drag.change(7, 7);
-        assert!(!drag.release(7, 8));
+        drag.change(8, 8);
+        assert!(!drag.release(8, 9));
         assert!(!drag.dragging);
     }
 }

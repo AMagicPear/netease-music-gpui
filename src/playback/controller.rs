@@ -16,7 +16,8 @@ pub struct PlaybackController {
     state: PlaybackSnapshot,
     engine: PlayerEngine,
     queue: Vec<Song>,
-    generation: u64,
+    // 切歌或重载音质递增；与音源内部的 seek generation 分开。
+    load_revision: u64,
     play_when_ready: bool,
     request: Option<tokio::task::AbortHandle>,
     pending_position: Duration,
@@ -65,9 +66,9 @@ impl PlaybackController {
     }
 
     fn load_song(&mut self, song: Song, position: Duration, play: bool, cx: &mut Context<Self>) {
-        self.generation = self.generation.wrapping_add(1);
-        let generation = self.generation;
-        self.state.revision = generation;
+        self.load_revision = self.load_revision.wrapping_add(1);
+        let load_revision = self.load_revision;
+        self.state.revision = load_revision;
         self.pending_position = position;
         if let Some(request) = self.request.take() {
             request.abort();
@@ -102,7 +103,7 @@ impl PlaybackController {
                 .await
                 .unwrap_or_else(|_| Err("音频加载任务失败".into()));
             let _ = this.update(cx, |this, cx| {
-                if this.finish(generation, result) {
+                if this.finish(load_revision, result) {
                     cx.notify();
                 }
             });
@@ -113,11 +114,11 @@ impl PlaybackController {
 
     fn finish(
         &mut self,
-        generation: u64,
+        load_revision: u64,
         result: Result<(StreamingAudio, BufferedSource), String>,
     ) -> bool {
         // 同一首歌也可能重新请求；旧结果在这里丢弃，资源会随之取消。
-        if self.generation != generation {
+        if self.load_revision != load_revision {
             return false;
         }
         self.request = None;
@@ -255,15 +256,6 @@ impl PlaybackController {
         }
     }
 
-    pub fn progress(&self) -> f32 {
-        let duration = self.state.duration.as_secs_f32();
-        if duration == 0. {
-            0.
-        } else {
-            (self.state.position.as_secs_f32() / duration).clamp(0., 1.)
-        }
-    }
-
     fn tick(&mut self, cx: &mut Context<Self>) {
         if let Some(error) = self.engine.error() {
             self.fail(error);
@@ -314,35 +306,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn snapshot_progress_and_queue_keep_boundaries() {
+    fn queue_keeps_boundaries() {
         let mut controller = PlaybackController::default();
-        assert_eq!(controller.progress(), 0.);
-        assert_eq!(controller.snapshot().volume, 1.);
         controller.queue = [1, 2, 3]
             .map(|id| Song {
                 id,
-                dt: 10000,
                 ..Default::default()
             })
             .into();
         controller.state.current_song = Some(controller.queue[0].clone());
-        controller.state.duration = Duration::from_secs(10);
-        controller.state.position = Duration::from_secs(5);
-        assert_eq!(controller.progress(), 0.5);
         assert!(controller.queued_song(-1).is_none());
         assert_eq!(controller.queued_song(1).unwrap().id, 2);
         controller.state.current_song = Some(controller.queue[2].clone());
         assert!(controller.queued_song(1).is_none());
         assert_eq!(controller.queued_song(-1).unwrap().id, 2);
-        controller.state.duration = Duration::from_secs(5);
-        assert_eq!(controller.progress(), 1.);
         assert!(!controller.can_seek());
     }
 
     #[test]
     fn obsolete_load_cannot_replace_current_snapshot() {
         let mut controller = PlaybackController::default();
-        controller.generation = 3;
+        controller.load_revision = 3;
         controller.state.loading = true;
         assert!(!controller.finish(1, Err("旧请求失败".into())));
         assert!(controller.snapshot().loading);
