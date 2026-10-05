@@ -5,6 +5,6 @@ use gpui_kit::base::Theme;
 pub fn popover_surface(cx: &App) -> Div {
     let colors = Theme::global(cx).tokens.colors;
     div().bg(colors.surface).rounded(px(10.)).shadow(vec![
-        BoxShadow::new(px(0.), px(4.), colors.foreground.alpha(0.16)).blur_radius(px(20.)),
+        BoxShadow::new(px(0.), px(2.), colors.foreground.alpha(0.1)).blur_radius(px(6.)),
     ])
 }

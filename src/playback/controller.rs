@@ -28,7 +28,7 @@ impl PlaybackController {
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
-                    .timer(Duration::from_millis(250))
+                    .timer(Duration::from_millis(1000))
                     .await;
                 if this.update(cx, |this, cx| this.tick(cx)).is_err() {
                     break;
