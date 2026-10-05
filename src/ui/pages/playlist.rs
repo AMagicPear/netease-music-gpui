@@ -415,6 +415,7 @@ impl PlaylistPage {
             .as_ref()
             .is_some_and(|current| current.id == song_id);
         let is_playing = playback.snapshot().is_playing;
+        let play_requested = playback.is_play_requested();
         let liked = library.liked_song_ids.contains(&song_id);
         let album_name = song
             .al
@@ -431,7 +432,7 @@ impl PlaylistPage {
             .whitespace_nowrap()
             .font_family(DOLPHIN_FAMILY);
         vec![
-            if is_current_song && is_playing && hovered {
+            if is_current_song && play_requested && hovered {
                 index_cell
                     .child(
                         div()
@@ -450,7 +451,7 @@ impl PlaylistPage {
                             )),
                     )
                     .into_any_element()
-            } else if hovered || (is_current_song && !is_playing) {
+            } else if hovered || (is_current_song && !play_requested) {
                 // hover 时序号让位给播放键
                 index_cell
                     .child(

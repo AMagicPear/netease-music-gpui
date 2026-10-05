@@ -55,7 +55,11 @@ impl PlayerEngine {
     }
 
     pub fn finished(&self) -> bool {
-        self.player.as_ref().is_some_and(Player::empty)
+        self.audio.as_ref().is_some_and(StreamingAudio::finished)
+    }
+
+    pub fn buffering(&self) -> bool {
+        self.audio.as_ref().is_some_and(StreamingAudio::buffering)
     }
 
     pub fn pause(&self) {
@@ -65,7 +69,11 @@ impl PlayerEngine {
     }
 
     pub fn resume(&self) -> bool {
-        if let Some(player) = self.player.as_ref().filter(|player| !player.empty()) {
+        if let Some(player) = self
+            .player
+            .as_ref()
+            .filter(|player| !player.empty() && !self.finished())
+        {
             player.play();
             true
         } else {

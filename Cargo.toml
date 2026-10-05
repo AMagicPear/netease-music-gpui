@@ -16,6 +16,7 @@ serde = { version = "1", features = ["derive"] }
 time = "0.3"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream"] }
 rodio = { version = "0.22.2", default-features = false, features = ["playback", "flac", "mp3", "mp4", "vorbis", "wav"] }
+symphonia = { version = "0.5.5", default-features = false, features = ["flac", "mp3", "aac", "isomp4", "ogg", "vorbis", "wav", "pcm", "alac"] }
 
 [dev-dependencies]
 futures = "0.3"

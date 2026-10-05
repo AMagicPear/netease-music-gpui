@@ -4,7 +4,9 @@ use gpui::Global;
 use ncm_api_rs::{ApiClient, ApiResponse, NcmError, Query, create_client};
 use tokio::runtime::Runtime;
 
-use crate::models::{AudioSourceInfo, Playlist, Song, TrackId, UserProfile, VipInfo};
+use crate::models::{
+    AudioQualityLevel, AudioSourceInfo, Playlist, Song, TrackId, UserProfile, VipInfo,
+};
 
 /// GPUI 负责界面，Tokio 负责 SDK 的网络请求。客户端和运行时在应用内复用。
 pub struct MusicApi {
@@ -107,12 +109,16 @@ impl MusicApi {
         ]
     }
 
-    pub async fn song_source(client: ApiClient, song_id: u64) -> Result<AudioSourceInfo, String> {
+    pub async fn song_source(
+        client: ApiClient,
+        song_id: u64,
+        quality: AudioQualityLevel,
+    ) -> Result<AudioSourceInfo, String> {
         let response = Self::request(
             client.song_url_v1(
                 &Query::new()
                     .param("id", &song_id.to_string())
-                    .param("level", "standard"),
+                    .param("level", quality.api_level()),
             ),
         )
         .await?;
@@ -203,6 +209,9 @@ fn song_source_info(body: &serde_json::Value, song_id: u64) -> Result<AudioSourc
             .as_u64()
             .filter(|time| *time > 0)
             .map(Duration::from_millis),
+        quality: track["level"]
+            .as_str()
+            .and_then(AudioQualityLevel::from_api_level),
     })
 }
 
@@ -235,6 +244,25 @@ mod tests {
         for id in [2, 3, 4] {
             assert!(song_source_info(&body, id).is_err());
         }
+    }
+
+    #[test]
+    fn playback_quality_uses_actual_response_and_preserves_trial_duration() {
+        let body = serde_json::json!({"data": [{
+            "id": 1, "url": "https://example.com/song.flac", "size": 123456,
+            "level": "lossless", "time": 30000
+        }]});
+        let source = song_source_info(&body, 1).unwrap();
+        assert_eq!(source.quality, Some(AudioQualityLevel::Lossless));
+        assert_eq!(source.duration, Some(Duration::from_secs(30)));
+        assert_eq!(source.byte_len, Some(123456));
+        for quality in AudioQualityLevel::ALL {
+            assert_eq!(
+                AudioQualityLevel::from_api_level(quality.api_level()),
+                Some(quality)
+            );
+        }
+        assert!(AudioQualityLevel::from_api_level("unknown").is_none());
     }
 
     #[test]

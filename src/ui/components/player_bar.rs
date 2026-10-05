@@ -7,6 +7,7 @@ use gpui_kit::base::{Button, ColorTokens, Theme, Transition, transition};
 use super::artist_label;
 use super::progress_bar::ProgressBar;
 use crate::api::MusicApi;
+use crate::models::AudioQualityLevel;
 use crate::playback::PlaybackController;
 use crate::ui::assets::thumbnail_url;
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
@@ -204,6 +205,12 @@ impl Render for PlayerBar {
                         playback.is_play_requested(),
                     )
                 })
+        };
+        let snapshot = self.playback.read(cx).snapshot();
+        let quality_icon_path = match snapshot.actual_quality.unwrap_or(snapshot.quality) {
+            AudioQualityLevel::HiRes => "icons/音质选项/Hi-Res.svg",
+            AudioQualityLevel::Lossless => "icons/音质选项/sq.svg",
+            _ => "icons/音质选项/HQ.svg",
         };
         let play_pause_icon_path = if is_playing {
             "icons/pause.svg"
@@ -438,6 +445,13 @@ impl Render for PlayerBar {
                             .justify_end()
                             .gap(px(18.))
                             .text_color(colors.muted_foreground)
+                            .child(hover_icon(
+                                "player-quality-button",
+                                quality_icon_path,
+                                IconSize::Middle.pixels(),
+                                colors.muted_foreground,
+                                colors,
+                            ))
                             .child(hover_icon(
                                 "player-collect-button",
                                 "icons/collect.svg",

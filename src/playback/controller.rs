@@ -3,7 +3,10 @@ use super::{
     engine::PlayerEngine,
     stream::{BufferedSource, StreamingAudio},
 };
-use crate::{api::MusicApi, models::Song};
+use crate::{
+    api::MusicApi,
+    models::{AudioQualityLevel, Song},
+};
 use gpui::{Context, ReadGlobal};
 use std::time::Duration;
 
@@ -16,6 +19,7 @@ pub struct PlaybackController {
     generation: u64,
     play_when_ready: bool,
     request: Option<tokio::task::AbortHandle>,
+    pending_position: Duration,
 }
 
 impl PlaybackController {
@@ -57,19 +61,27 @@ impl PlaybackController {
     }
 
     fn select_song(&mut self, song: Song, cx: &mut Context<Self>) {
+        self.load_song(song, Duration::ZERO, true, cx);
+    }
+
+    fn load_song(&mut self, song: Song, position: Duration, play: bool, cx: &mut Context<Self>) {
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
+        self.state.revision = generation;
+        self.pending_position = position;
         if let Some(request) = self.request.take() {
             request.abort();
         }
         self.engine.stop();
         self.state.duration = song.duration();
         self.state.current_song = Some(song.clone());
-        self.state.position = Duration::ZERO;
+        self.state.position = position.min(self.state.duration);
         self.state.is_playing = false;
         self.state.loading = false;
+        self.state.buffering = false;
+        self.state.actual_quality = None;
         self.state.error = None;
-        self.play_when_ready = true;
+        self.play_when_ready = play;
         if let Err(error) = self.engine.ensure_device() {
             self.fail(error);
             cx.notify();
@@ -79,8 +91,9 @@ impl PlaybackController {
         let api = MusicApi::global(cx);
         let client = api.client.clone();
         let http = api.audio_http();
+        let quality = self.state.quality;
         let request = api.runtime.spawn(async move {
-            let source = MusicApi::song_source(client, song.id).await?;
+            let source = MusicApi::song_source(client, song.id, quality).await?;
             StreamingAudio::open(http, source).await
         });
         self.request = Some(request.abort_handle());
@@ -111,11 +124,20 @@ impl PlaybackController {
         self.state.loading = false;
         match result {
             Ok((audio, source)) => {
+                self.state.actual_quality = audio.quality;
                 if let Some(duration) = audio.duration {
                     self.state.duration = duration;
                 }
                 match self.engine.load(audio, source) {
-                    Ok(()) => self.state.is_playing = self.play_when_ready && self.engine.resume(),
+                    Ok(()) => {
+                        let position = self.pending_position.min(self.state.duration);
+                        if !position.is_zero() {
+                            self.engine.seek_to(position);
+                        }
+                        self.state.position = position;
+                        self.state.is_playing = self.play_when_ready && self.engine.resume();
+                        self.state.buffering = self.state.is_playing && self.engine.buffering();
+                    }
                     Err(error) => self.fail(error),
                 }
             }
@@ -135,7 +157,11 @@ impl PlaybackController {
     pub fn pause(&mut self, cx: &mut Context<Self>) {
         self.play_when_ready = false;
         self.engine.pause();
+        if self.engine.has_source() {
+            self.state.position = self.engine.position().min(self.state.duration);
+        }
         self.state.is_playing = false;
+        self.state.buffering = false;
         cx.notify();
     }
 
@@ -144,8 +170,14 @@ impl PlaybackController {
         if !self.state.loading {
             if self.engine.resume() {
                 self.state.is_playing = true;
+                self.state.buffering = self.engine.buffering();
             } else if let Some(song) = self.state.current_song.clone() {
-                self.select_song(song, cx);
+                let position = if self.state.error.is_some() {
+                    self.state.position
+                } else {
+                    Duration::ZERO
+                };
+                self.load_song(song, position, true, cx);
                 return;
             }
         }
@@ -157,6 +189,25 @@ impl PlaybackController {
             self.pause(cx);
         } else {
             self.resume(cx);
+        }
+    }
+
+    #[allow(dead_code, reason = "音质菜单已按要求回退，保留播放控制接口")]
+    pub fn set_quality(&mut self, quality: AudioQualityLevel, cx: &mut Context<Self>) {
+        if self.state.quality == quality {
+            return;
+        }
+        let play = self.is_play_requested();
+        let position = if self.engine.has_source() {
+            self.engine.position()
+        } else {
+            self.state.position
+        };
+        self.state.quality = quality;
+        if let Some(song) = self.state.current_song.clone() {
+            self.load_song(song, position, play, cx);
+        } else {
+            cx.notify();
         }
     }
 
@@ -190,6 +241,7 @@ impl PlaybackController {
         if self.can_seek() && self.engine.seek_to(position) {
             self.state.position = position;
             self.state.error = None;
+            self.state.buffering = self.state.is_playing;
             cx.notify();
         }
     }
@@ -221,9 +273,11 @@ impl PlaybackController {
         if !self.state.is_playing {
             return;
         }
+        self.state.buffering = self.engine.buffering();
         if self.engine.finished() {
             self.state.position = self.state.duration;
             self.state.is_playing = false;
+            self.state.buffering = false;
             self.engine.stop();
             self.next(cx);
         } else {
@@ -234,10 +288,14 @@ impl PlaybackController {
     }
 
     fn fail(&mut self, error: String) {
+        if self.engine.has_source() {
+            self.state.position = self.engine.position().min(self.state.duration);
+        }
         eprintln!("{error}");
         self.state.error = Some(error);
         self.state.loading = false;
         self.state.is_playing = false;
+        self.state.buffering = false;
         self.engine.stop();
     }
 }
