@@ -5,11 +5,11 @@ use std::{
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_kit::base::{Button, ColorTokens, Popover, Theme, Transition, transition};
+use gpui_kit::base::{Button, ColorTokens, Theme, Transition, transition};
 
 use super::progress_bar::ProgressBar;
 use super::volume_control::VolumeControl;
-use super::{artist_label, like_icon_path, popover_surface, quality_badge_path};
+use super::{LAYER_PROGRESS_BAR, Popover, artist_label, like_icon_path, quality_badge_path};
 use crate::api::MusicApi;
 use crate::playback::PlaybackController;
 use crate::state::library::MusicLibrary;
@@ -455,7 +455,7 @@ impl Render for PlayerBar {
             .border_color(colors.border)
             .relative()
             // 进度条覆盖渲染
-            .child(deferred(self.progress_bar.clone()).with_priority(1))
+            .child(deferred(self.progress_bar.clone()).with_priority(LAYER_PROGRESS_BAR))
             // 主控件栏
             .child(
                 div()
@@ -700,9 +700,7 @@ impl Render for PlayerBar {
                                         colors,
                                     ))
                                     // 空内容暂定尺寸；后续音质面板的布局只在这里实现。
-                                    .content(|_, _, cx| {
-                                        popover_surface(cx).w(px(380.)).h(px(480.))
-                                    }),
+                                    .child(div().w(px(380.)).h(px(480.))),
                             )
                             .child(hover_icon(
                                 "player-collect-button",

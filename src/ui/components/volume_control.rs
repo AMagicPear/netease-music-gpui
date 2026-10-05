@@ -3,6 +3,7 @@ use gpui::*;
 use gpui_kit::base::{ColorTokens, Slider, SliderIndicator, SliderThumb, SliderTrack, Theme};
 use gpui_kit::component::slider::{SliderEvent, SliderState};
 
+use super::LAYER_VOLUME_BALLOON;
 use crate::playback::PlaybackController;
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA};
 
@@ -23,8 +24,6 @@ const BRIDGE_OVERLAP: Pixels = px(2.);
 const TRACK_WIDTH: Pixels = px(6.);
 const TRACK_HIT_WIDTH: Pixels = px(20.);
 const THUMB_SIZE: Pixels = px(10.);
-/// 延迟绘制的优先级：进度条占 1，气泡要盖在它上面。
-const BALLOON_PRIORITY: usize = 2;
 
 /// 悬停状态的来源，用于区分是谁的 hover 发生了变化。
 #[derive(Clone, Copy)]
@@ -307,8 +306,7 @@ impl Render for VolumeControl {
             // 不做窗口边界避让——音量按钮离窗口右边界还隔着"更多"按钮，越不了界。
             .when(self.open, |this| {
                 this.child(
-                    // 进度条也是延迟绘制（优先级 1），气泡必须比它更晚画，
-                    // 否则气泡会被进度线横穿过去。
+                    // 进度条和通用弹层都是延迟绘制且层级更低，气泡画在最后才不会被横穿。
                     deferred(
                         self.balloon(percent, colors, cx)
                             .absolute()
@@ -316,7 +314,7 @@ impl Render for VolumeControl {
                             .left(relative(0.5))
                             .ml(-BALLOON_WIDTH / 2.),
                     )
-                    .with_priority(BALLOON_PRIORITY),
+                    .with_priority(LAYER_VOLUME_BALLOON),
                 )
             })
     }

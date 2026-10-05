@@ -8,11 +8,19 @@ mod volume_control;
 
 pub use drag_preview::ResizeDragPreview;
 pub use player_bar::PlayerBar;
-pub use popover::popover_surface;
+pub use popover::Popover;
 pub use tab_bar::{TabBar, TabChanged, TabItem};
 pub use virtual_table::{
     CELL_PADDING, COLUMN_GAP, HEADER_HEIGHT, ROW_TEXT_SIZE, TableColumn, virtual_table,
 };
+
+// 浮层都用 deferred 绘制，数字大的画得更晚、盖在上面。
+//
+// 进度条在最底下；通用弹层要盖住进度条；音量气泡最小也最临时，
+// 它从图标上方弹出时会和弹层重叠，所以压在最上面。
+pub(super) const LAYER_PROGRESS_BAR: usize = 1;
+pub(super) const LAYER_POPOVER: usize = 2;
+pub(super) const LAYER_VOLUME_BALLOON: usize = 3;
 
 // 下面是跨页面共用的展示规则。同一个规则只在歌单列表和播放栏各写一遍很容易漂移
 // （比如换了素材只改一处），所以集中在这里，由调用方决定怎么渲染。
