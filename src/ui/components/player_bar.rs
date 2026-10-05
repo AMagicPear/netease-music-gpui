@@ -4,28 +4,35 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_kit::base::{Button, ColorTokens, Theme, Transition, transition};
 
-use super::artist_label;
 use super::progress_bar::ProgressBar;
+use super::{artist_label, like_icon_path, quality_badge_path};
 use crate::api::MusicApi;
-use crate::models::AudioQualityLevel;
 use crate::playback::PlaybackController;
+use crate::state::library::MusicLibrary;
 use crate::ui::assets::thumbnail_url;
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
 
 pub struct PlayerBar {
     playback: Entity<PlaybackController>,
+    /// 喜欢状态不在播放控制器里，而在音乐库中，红心要据此显示实心/空心。
+    library: Entity<MusicLibrary>,
     progress_bar: Entity<ProgressBar>,
     play_button_hovered: bool,
     play_button_pressed: bool,
     song_id: Option<u64>,
     counts: [Option<u64>; 2],
+    /// 哪块互动区正被悬停，`(互动区 id, 命中部件)`。
+    /// 图标和计数是两个独立 hitbox（计数还可能伸出格子），靠这份状态让两者同步变色。
+    hovered_interaction: Option<(&'static str, usize)>,
     _playback_subscription: Subscription,
     _progress_subscription: Subscription,
+    _library_subscription: Subscription,
 }
 
 impl PlayerBar {
     pub fn new(
         playback: Entity<PlaybackController>,
+        library: Entity<MusicLibrary>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -35,15 +42,20 @@ impl PlayerBar {
             cx.notify();
         });
         let progress_subscription = cx.observe(&progress_bar, |_, _, cx| cx.notify());
+        // 喜欢状态由音乐库维护：歌单页点亮红心后，播放栏也要跟着重绘。
+        let library_subscription = cx.observe(&library, |_, _, cx| cx.notify());
         let mut this = Self {
             playback,
+            library,
             progress_bar,
             play_button_hovered: false,
             play_button_pressed: false,
             song_id: None,
             counts: [None; 2],
+            hovered_interaction: None,
             _playback_subscription: playback_subscription,
             _progress_subscription: progress_subscription,
+            _library_subscription: library_subscription,
         };
         this.load_counts(cx);
         this
@@ -91,7 +103,105 @@ impl PlayerBar {
         })
         .detach();
     }
+
+    /// 记录某块互动区的悬停状态。
+    ///
+    /// 离开事件只清除自己：图标和计数是两块相邻的 hitbox，鼠标从图标移到数字上时，
+    /// 「离开图标」和「进入数字」谁先到并不确定；一律清除会让后到的进入事件失效，
+    /// 于是颜色闪一下就没了。只清除与当前键相同的状态就没有这个问题。
+    fn set_interaction_hover(
+        &mut self,
+        key: (&'static str, usize),
+        hovered: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let next = if hovered {
+            Some(key)
+        } else if self.hovered_interaction == Some(key) {
+            None
+        } else {
+            self.hovered_interaction
+        };
+        if next != self.hovered_interaction {
+            self.hovered_interaction = next;
+            cx.notify();
+        }
+    }
+
+    /// 左下角互动图标 + 右上角计数，两者同色。
+    ///
+    /// 图标和计数是两块独立的 hitbox，而且计数常常比 28px 的格子宽、会伸出格子，
+    /// 没法用一个 `group` 的形状同时罩住它们。所以改用 view 里的悬停状态把两者绑在一起：
+    /// 谁被悬停都算这块互动区被悬停，两边都按同一份状态取色。
+    fn interaction_count(
+        &self,
+        id: &'static str,
+        path: &'static str,
+        count: Option<u64>,
+        color: Hsla,
+        hover_color: Hsla,
+        colors: ColorTokens,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let hovered = self
+            .hovered_interaction
+            .is_some_and(|(interaction, _)| interaction == id);
+        let shown_color = if hovered { hover_color } else { color };
+
+        div()
+            .relative()
+            .ml_0p5()
+            .w(px(28.))
+            .h(px(24.))
+            .flex_none()
+            // 区域命中：罩住图标那一块。
+            .id((id, INTERACTION_AREA))
+            .on_hover(cx.listener(move |this, hovered, _, cx| {
+                this.set_interaction_hover((id, INTERACTION_AREA), *hovered, cx);
+            }))
+            .child(
+                div().absolute().left_0().bottom_0().child(
+                    svg()
+                        .path(path)
+                        .size(IconSize::Large.pixels())
+                        .flex_none()
+                        .text_color(shown_color)
+                        .id((id, INTERACTION_ICON))
+                        .active(move |style| {
+                            style.text_color(hover_color.alpha(PRESSED_ICON_ALPHA))
+                        }),
+                ),
+            )
+            .when_some(count, |block, count| {
+                block.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left(px(16.))
+                        .px(px(2.))
+                        .rounded_full()
+                        .bg(colors.surface)
+                        .text_color(shown_color)
+                        .text_size(px(9.))
+                        .font_family(DOLPHIN_FAMILY)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .line_height(px(10.))
+                        // 计数自己也是命中区：它伸出格子的那部分不在区域 hitbox 里。
+                        .id((id, INTERACTION_BADGE))
+                        .on_hover(cx.listener(move |this, hovered, _, cx| {
+                            this.set_interaction_hover((id, INTERACTION_BADGE), *hovered, cx);
+                        }))
+                        .child(format_count(count)),
+                )
+            })
+            .into_any_element()
+    }
 }
+
+/// 互动区的三个命中部件，用作 hitbox 和元素 id 的后缀。
+const INTERACTION_AREA: usize = 0;
+const INTERACTION_BADGE: usize = 1;
+const INTERACTION_ICON: usize = 2;
 
 fn format_count(count: u64) -> String {
     match count {
@@ -102,45 +212,7 @@ fn format_count(count: u64) -> String {
     }
 }
 
-fn interaction_count(
-    id: &'static str,
-    path: &'static str,
-    count: Option<u64>,
-    color: Hsla,
-    colors: ColorTokens,
-) -> impl IntoElement {
-    div()
-        .relative()
-        .ml_0p5()
-        .w(px(28.))
-        .h(px(24.))
-        .flex_none()
-        .child(div().absolute().left_0().bottom_0().child(hover_icon(
-            id,
-            path,
-            IconSize::Large.pixels(),
-            color,
-            colors,
-        )))
-        .when_some(count, |icon, count| {
-            icon.child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .left(px(16.))
-                    .px(px(2.))
-                    .rounded_full()
-                    .bg(colors.surface)
-                    .text_color(color)
-                    .text_size(px(9.))
-                    .font_family(DOLPHIN_FAMILY)
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .line_height(px(10.))
-                    .child(format_count(count)),
-            )
-        })
-}
-
+/// 独立的图标按钮：hover 只改自己的颜色。
 fn hover_icon(
     id: &'static str,
     icon_path: &'static str,
@@ -153,12 +225,9 @@ fn hover_icon(
         .size(size)
         .flex_none()
         .text_color(color)
-        .hover(|style| style.text_color(colors.foreground))
+        .hover(move |style| style.text_color(colors.foreground))
         .id(id)
-        // active 属于 StatefulInteractiveElement，必须跟在 .id() 之后（此时是 Stateful<Svg>）。
-        // 按下换成一个明确的「按下色」而不是 opacity：图标没有底色，叠 opacity 会在按住拖出时
-        // 因失去 hover、退回更浅底色而双重变淡。active 最后生效会覆盖 hover，颜色始终一致。
-        .active(|style| style.text_color(colors.foreground.alpha(PRESSED_ICON_ALPHA)))
+        .active(move |style| style.text_color(colors.foreground.alpha(PRESSED_ICON_ALPHA)))
 }
 
 impl Render for PlayerBar {
@@ -183,7 +252,7 @@ impl Render for PlayerBar {
         } else {
             IconSize::Large.pixels()
         };
-        let (title, artist, cover_url, is_playing) = {
+        let (title, artist, cover_url, song_id, is_playing) = {
             let playback = self.playback.read(cx);
             playback
                 .snapshot()
@@ -194,6 +263,7 @@ impl Render for PlayerBar {
                         song.name.clone(),
                         artist_label(song, colors),
                         song.al.pic_url.clone(),
+                        Some(song.id),
                         playback.is_play_requested(),
                     )
                 })
@@ -202,16 +272,18 @@ impl Render for PlayerBar {
                         String::new(),
                         StyledText::new(""),
                         None,
+                        None,
                         playback.is_play_requested(),
                     )
                 })
         };
+        // 红心跟随这首歌真实的喜欢状态，而不是固定实心。
+        let liked =
+            song_id.is_some_and(|song_id| self.library.read(cx).liked_song_ids.contains(&song_id));
         let snapshot = self.playback.read(cx).snapshot();
-        let quality_icon_path = match snapshot.actual_quality.unwrap_or(snapshot.quality) {
-            AudioQualityLevel::HiRes => "icons/音质选项/Hi-Res.svg",
-            AudioQualityLevel::Lossless => "icons/音质选项/sq.svg",
-            _ => "icons/音质选项/HQ.svg",
-        };
+        // 优先显示实际拿到的音质，降级时不会谎报。
+        let quality_icon_path =
+            quality_badge_path(snapshot.actual_quality.unwrap_or(snapshot.quality));
         let play_pause_icon_path = if is_playing {
             "icons/pause.svg"
         } else {
@@ -303,19 +375,32 @@ impl Render for PlayerBar {
                                             .child(artist),
                                     ),
                             )
-                            .child(interaction_count(
+                            // 已喜欢：实心红心，hover 淡一档的红；未喜欢：描线灰心，hover 变前景色。
+                            .child(self.interaction_count(
                                 "player-like-button",
-                                "icons/like.svg",
+                                like_icon_path(liked),
                                 self.counts[0],
-                                colors.primary,
+                                if liked {
+                                    colors.primary
+                                } else {
+                                    colors.muted_foreground
+                                },
+                                if liked {
+                                    colors.primary.alpha(0.88)
+                                } else {
+                                    colors.foreground
+                                },
                                 colors,
+                                cx,
                             ))
-                            .child(interaction_count(
+                            .child(self.interaction_count(
                                 "player-comment-button",
                                 "icons/comment.svg",
                                 self.counts[1],
                                 colors.muted_foreground,
+                                colors.foreground,
                                 colors,
+                                cx,
                             )),
                     )
                     // 中间：收藏与播放控制

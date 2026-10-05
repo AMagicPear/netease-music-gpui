@@ -7,6 +7,7 @@ use gpui_kit::base::{
 };
 use gpui_kit::component::slider::{SliderEvent, SliderState};
 
+use super::format_duration;
 use crate::playback::PlaybackController;
 use crate::ui::theme::DOLPHIN_FAMILY;
 
@@ -276,8 +277,6 @@ impl Render for ProgressBar {
                                     ),
                             )
                             .when(enabled && t > 0., |track| {
-                                let elapsed = elapsed.as_secs();
-                                let total = duration.as_secs();
                                 track.child(
                                     // 零尺寸锚点跟随播放头，anchored 负责窗口边缘避让。
                                     div()
@@ -306,17 +305,9 @@ impl Render for ProgressBar {
                                                         .line_height(px(16.))
                                                         .whitespace_nowrap()
                                                         .opacity(t)
-                                                        .child(format!(
-                                                            "{:02}:{:02}",
-                                                            elapsed / 60,
-                                                            elapsed % 60
-                                                        ))
+                                                        .child(format_duration(elapsed))
                                                         .child(div().mx(px(2.)).child("/"))
-                                                        .child(format!(
-                                                            "{:02}:{:02}",
-                                                            total / 60,
-                                                            total % 60
-                                                        )),
+                                                        .child(format_duration(duration)),
                                                 ),
                                         ),
                                 )

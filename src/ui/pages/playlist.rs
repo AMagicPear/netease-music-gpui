@@ -49,7 +49,8 @@ use crate::state::{library::MusicLibrary, playlist_detail::PlaylistDetail};
 use crate::ui::assets::thumbnail_url;
 use crate::ui::components::{
     CELL_PADDING, COLUMN_GAP, HEADER_HEIGHT, ROW_TEXT_SIZE, ResizeDragPreview, TabBar, TabChanged,
-    TabItem, TableColumn, artist_label, virtual_table,
+    TabItem, TableColumn, artist_label, format_duration, like_icon_path, quality_badge_path,
+    virtual_table,
 };
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
 
@@ -115,18 +116,6 @@ fn title_with_subtitle(song: &Song, colors: ColorTokens) -> StyledText {
             ..Default::default()
         },
     )])
-}
-
-fn quality_badge(song: &Song) -> Option<&'static str> {
-    if song.hr.is_some() {
-        Some("icons/音质选项/Hi-Res.svg")
-    } else if song.sq.is_some() {
-        Some("icons/音质选项/sq.svg")
-    } else if song.h.as_ref().is_some_and(|quality| quality.br >= 320000) {
-        Some("icons/音质选项/HQ.svg")
-    } else {
-        None
-    }
 }
 
 /// 行 hover 时才出现的图标：序号位置的播放键、标题右侧那排操作按钮，共用这一套样式。
@@ -536,8 +525,12 @@ impl PlaylistPage {
                                         .min_w(px(0.))
                                         // 徽章用 img() 才保得住原始配色；宽度由 img() 按图片比例自动定，
                                         // flex_none 是为了让它别被压缩（空间不够时该截断的是歌手名）。
-                                        .when_some(quality_badge(song), |row, badge| {
-                                            row.child(img(badge).h(px(13.)).flex_none())
+                                        .when_some(song.best_quality_level(), |row, level| {
+                                            row.child(
+                                                img(quality_badge_path(level))
+                                                    .h(px(13.))
+                                                    .flex_none(),
+                                            )
                                         })
                                         .child(
                                             div()
@@ -570,11 +563,7 @@ impl PlaylistPage {
                 .into_any_element(),
             // 裸 SVG，没有圆形底色：已喜欢是实心红心，未喜欢是勾线灰心。
             svg()
-                .path(if liked {
-                    "icons/heart.svg"
-                } else {
-                    "icons/heart_outline.svg"
-                })
+                .path(like_icon_path(liked))
                 // 和 header 右上角那排图标同一个尺寸。
                 .size(IconSize::Small.pixels())
                 .text_color(if liked {
@@ -598,7 +587,7 @@ impl PlaylistPage {
                 // 时长是辅助信息：比 `muted_foreground`(60%) 再淡一档（45%），字重也细一档。
                 .font_weight(SECONDARY_FONT_WEIGHT)
                 .text_color(colors.foreground.alpha(0.45))
-                .child(format!("{:02}:{:02}", song.dt / 60000, song.dt / 1000 % 60))
+                .child(format_duration(song.duration()))
                 .into_any_element(),
         ]
     }

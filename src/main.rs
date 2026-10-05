@@ -40,9 +40,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let user_profile = cx.new(AccountState::new);
                     let library = cx.new(|cx| MusicLibrary::new(user_profile.clone(), cx));
                     let main_content = cx.new(|cx| {
-                        MainContent::new(window, user_profile, library, playback.clone(), cx)
+                        MainContent::new(
+                            window,
+                            user_profile,
+                            library.clone(),
+                            playback.clone(),
+                            cx,
+                        )
                     });
-                    let player_bar = cx.new(|cx| PlayerBar::new(playback, window, cx));
+                    let player_bar = cx.new(|cx| PlayerBar::new(playback, library, window, cx));
                     cx.new(|_| MainWindow {
                         main_content,
                         player_bar,
