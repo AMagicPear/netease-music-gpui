@@ -4,6 +4,7 @@ mod popover;
 mod progress_bar;
 mod tab_bar;
 mod virtual_table;
+mod volume_control;
 
 pub use drag_preview::ResizeDragPreview;
 pub use player_bar::PlayerBar;

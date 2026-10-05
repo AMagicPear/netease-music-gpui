@@ -8,6 +8,7 @@ use gpui::*;
 use gpui_kit::base::{Button, ColorTokens, Popover, Theme, Transition, transition};
 
 use super::progress_bar::ProgressBar;
+use super::volume_control::VolumeControl;
 use super::{artist_label, like_icon_path, popover_surface, quality_badge_path};
 use crate::api::MusicApi;
 use crate::playback::PlaybackController;
@@ -20,6 +21,8 @@ pub struct PlayerBar {
     /// 喜欢状态不在播放控制器里，而在音乐库中，红心要据此显示实心/空心。
     library: Entity<MusicLibrary>,
     progress_bar: Entity<ProgressBar>,
+    /// 音量是 hover 弹出、形状还带小三角，和通用弹层不一样，自己实现。
+    volume: Entity<VolumeControl>,
     play_button_hovered: bool,
     play_button_pressed: bool,
     song_id: Option<u64>,
@@ -43,6 +46,7 @@ impl PlayerBar {
         cx: &mut Context<Self>,
     ) -> Self {
         let progress_bar = cx.new(|cx| ProgressBar::new(playback.clone(), window, cx));
+        let volume = cx.new(|cx| VolumeControl::new(playback.clone(), window, cx));
         let playback_subscription = cx.observe(&playback, |this, _, cx| {
             this.sync_cover_rotation(Instant::now(), cx);
             this.load_counts(cx);
@@ -55,6 +59,7 @@ impl PlayerBar {
             playback,
             library,
             progress_bar,
+            volume,
             play_button_hovered: false,
             play_button_pressed: false,
             song_id: None,
@@ -684,7 +689,7 @@ impl Render for PlayerBar {
                             .child(
                                 Popover::new("player-quality-popover")
                                     .flex_none()
-                                    .anchor(Anchor::BottomRight)
+                                    .anchor(Anchor::BottomCenter)
                                     .offset(px(12.))
                                     .trigger(hover_icon(
                                         "player-quality-button",
@@ -707,14 +712,7 @@ impl Render for PlayerBar {
                                 colors.muted_foreground,
                                 colors,
                             ))
-                            .child(hover_icon(
-                                "player-volume-button",
-                                "音量",
-                                "icons/volume.svg",
-                                IconSize::Middle.pixels(),
-                                colors.muted_foreground,
-                                colors,
-                            ))
+                            .child(self.volume.clone())
                             .child(hover_icon(
                                 "player-more-button",
                                 "更多",
