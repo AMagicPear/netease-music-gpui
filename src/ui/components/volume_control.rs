@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_kit::base::{ColorTokens, Slider, SliderIndicator, SliderThumb, SliderTrack, Theme};
@@ -18,12 +16,13 @@ const BALLOON_WIDTH: Pixels = px(36.);
 const BALLOON_HEIGHT: Pixels = px(140.);
 /// 三角尖端与图标顶部的间距。
 const BALLOON_GAP: Pixels = px(2.);
-/// 轨道与滑块的视觉尺寸；命中宽度比视觉宽度宽，手指不必瞄准 4px。
+/// 命中区"桥"额外压住图标的高度：让气泡的命中区直接搭到图标上，
+/// 连成一整片，鼠标在两者之间移动不会掉出去（也就不需要延迟关闭）。
+const BRIDGE_OVERLAP: Pixels = px(2.);
+/// 轨道与滑块的视觉尺寸；命中宽度比视觉宽度宽，手指不必瞄准 6px。
 const TRACK_WIDTH: Pixels = px(6.);
 const TRACK_HIT_WIDTH: Pixels = px(20.);
 const THUMB_SIZE: Pixels = px(10.);
-/// 鼠标在图标与气泡之间移动时会短暂离开两者，延迟关闭才不会闪一下。
-const CLOSE_DELAY: Duration = Duration::from_millis(160);
 /// 延迟绘制的优先级：进度条占 1，气泡要盖在它上面。
 const BALLOON_PRIORITY: usize = 2;
 
@@ -42,8 +41,6 @@ pub struct VolumeControl {
     /// 鼠标按在气泡里（多半是在拖音量）：此时即使指针跑出气泡也不能收起。
     pressed: bool,
     open: bool,
-    /// 每次悬停/按键变化自增；过期的延迟关闭任务醒来时发现自己过期就不再动作。
-    hover_generation: usize,
     _playback_subscription: Subscription,
     _slider_subscription: Subscription,
 }
@@ -88,9 +85,19 @@ impl VolumeControl {
             balloon_hovered: false,
             pressed: false,
             open: false,
-            hover_generation: 0,
             _playback_subscription: playback_subscription,
             _slider_subscription: slider_subscription,
+        }
+    }
+
+    /// 只有图标能让它出现；图标、气泡、以及两者之间那块"桥"都能让它留着。
+    /// 桥是气泡的子元素，只在展开时才存在，所以它天生只管消失、不管出现。
+    fn refresh_open(&mut self, cx: &mut Context<Self>) {
+        // 拖动中指针会跑出气泡，此时必须压住不要收起。
+        let open = self.pressed || self.trigger_hovered || self.balloon_hovered;
+        if self.open != open {
+            self.open = open;
+            cx.notify();
         }
     }
 
@@ -99,50 +106,26 @@ impl VolumeControl {
             HoverTarget::Trigger => self.trigger_hovered = hovered,
             HoverTarget::Balloon => self.balloon_hovered = hovered,
         }
-        self.hover_generation += 1;
-        if hovered {
-            self.open = true;
-            cx.notify();
-            return;
-        }
-        self.schedule_close(cx);
+        self.refresh_open(cx);
     }
 
     fn set_pressed(&mut self, pressed: bool, cx: &mut Context<Self>) {
         self.pressed = pressed;
-        self.hover_generation += 1;
-        if pressed {
-            return;
-        }
-        // 松手时指针可能已经在气泡外面了，这时按正常规则收起。
-        self.schedule_close(cx);
+        self.refresh_open(cx);
     }
 
-    /// 延迟关闭：鼠标在图标与气泡之间移动、或拖动时短暂离开气泡，都不该立刻收起。
-    fn schedule_close(&mut self, cx: &mut Context<Self>) {
-        let generation = self.hover_generation;
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(CLOSE_DELAY).await;
-            let _ = this.update(cx, |this, cx| {
-                if this.hover_generation == generation
-                    && !this.trigger_hovered
-                    && !this.balloon_hovered
-                    && !this.pressed
-                {
-                    this.open = false;
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-    }
-
+    /// 命中区容器：可见气泡 + 下面一段透明的"桥"。
+    ///
+    /// 桥把图标顶边和气泡底边之间那道缝补上，两者连成一整片命中区，
+    /// 鼠标走过去不会掉到"谁都不算"的空档里，于是可以即时关闭、不用延迟。
     fn balloon(&self, percent: f32, colors: ColorTokens, cx: &mut Context<Self>) -> Stateful<Div> {
         div()
             .id("player-volume-balloon")
             .relative()
             .w(BALLOON_WIDTH)
-            .h(BALLOON_HEIGHT)
+            .h(BALLOON_HEIGHT + BALLOON_GAP + BRIDGE_OVERLAP)
+            .flex()
+            .flex_col()
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 this.set_hover(HoverTarget::Balloon, *hovered, cx);
             }))
@@ -161,6 +144,17 @@ impl VolumeControl {
                     this.set_pressed(false, cx);
                 }),
             )
+            .child(self.balloon_body(percent, colors))
+            // 桥：透明、不画东西，只贡献命中区。
+            .child(div().w_full().h(BALLOON_GAP + BRIDGE_OVERLAP))
+    }
+
+    /// 可见的那部分：圆角矩形 + 底部三角，高度正好 BALLOON_HEIGHT。
+    fn balloon_body(&self, percent: f32, colors: ColorTokens) -> Div {
+        div()
+            .relative()
+            .w_full()
+            .h(BALLOON_HEIGHT)
             // 背景先画，内容后画：子元素按声明顺序绘制。
             .child(
                 canvas(
@@ -283,9 +277,8 @@ impl Render for VolumeControl {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = Theme::global(cx).tokens.colors;
         let percent = self.slider.read(cx).percentage().end;
-        // 气泡展开时图标跟着高亮，让人看出音量条是从这个图标弹出的。
-        let highlighted = self.open || self.trigger_hovered;
-        let icon_color = if highlighted {
+        // 指针还在图标上就已经算"展开"了，所以图标高亮直接看 open。
+        let icon_color = if self.open {
             colors.foreground
         } else {
             colors.muted_foreground
@@ -296,9 +289,6 @@ impl Render for VolumeControl {
             .relative()
             .flex_none()
             .size(IconSize::Middle.pixels())
-            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                this.set_hover(HoverTarget::Trigger, *hovered, cx);
-            }))
             .child(
                 svg()
                     .path("icons/volume.svg")
@@ -310,7 +300,10 @@ impl Render for VolumeControl {
                         style.text_color(colors.foreground.alpha(PRESSED_ICON_ALPHA))
                     }),
             )
-            // 气泡钉死在图标正上方：底边距图标 BALLOON_GAP，水平中心与图标对齐。
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                this.set_hover(HoverTarget::Trigger, *hovered, cx);
+            }))
+            // 气泡钉死在图标正上方：水平中心与图标对齐，底部的"桥"再压住图标 2px。
             // 不做窗口边界避让——音量按钮离窗口右边界还隔着"更多"按钮，越不了界。
             .when(self.open, |this| {
                 this.child(
@@ -319,7 +312,7 @@ impl Render for VolumeControl {
                     deferred(
                         self.balloon(percent, colors, cx)
                             .absolute()
-                            .bottom(IconSize::Middle.pixels() + BALLOON_GAP)
+                            .bottom(IconSize::Middle.pixels() - BRIDGE_OVERLAP)
                             .left(relative(0.5))
                             .ml(-BALLOON_WIDTH / 2.),
                     )
