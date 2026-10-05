@@ -3,11 +3,11 @@ use gpui::*;
 use gpui_kit::base::{Button, ColorTokens, Theme};
 use gpui_kit::component::TitleBar;
 
+use super::assets::thumbnail_url;
 use super::pages::{ContentPage, LIBRARY_PAGES, MAIN_PAGES};
+use super::theme::IconSize;
 use crate::models::Playlist;
 use crate::state::library::MusicLibrary;
-use crate::ui::assets::thumbnail_url;
-use crate::ui::theme::IconSize;
 
 /// 选中项变化时发出的事件，`MainContent` 订阅它来重新渲染右侧内容。
 pub(super) struct SidebarChanged(pub ContentPage);

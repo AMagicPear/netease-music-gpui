@@ -87,10 +87,7 @@ mod tests {
     /// 得到同一个字符串，否则 GPUI 的资源缓存会把它当成两张图，封面在详情返回时闪一下。
     #[test]
     fn thumbnail_normalizes_scheme_so_summary_and_detail_share_one_cache_entry() {
-        let summary = thumbnail_url(
-            "http://p1.music.126.net/abc==/109951174028075973.jpg",
-            340,
-        );
+        let summary = thumbnail_url("http://p1.music.126.net/abc==/109951174028075973.jpg", 340);
         let detail = thumbnail_url(
             "https://p1.music.126.net/abc==/109951174028075973.jpg?param=200y200",
             340,

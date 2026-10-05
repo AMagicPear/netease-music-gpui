@@ -9,7 +9,12 @@ use std::path::PathBuf;
 use gpui::*;
 use playback::PlaybackController;
 use state::{account::AccountState, library::MusicLibrary};
-use ui::{MainContent, MainWindow, PlayerBar, assets::Assets, theme};
+use ui::{
+    assets::Assets,
+    components::PlayerBar,
+    shell::{MainContent, MainWindow},
+    theme,
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api = api::MusicApi::from_env()?;
