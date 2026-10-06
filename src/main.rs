@@ -41,7 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 cx,
                 |window, cx| {
-                    let playback = cx.new(PlaybackController::new);
+                    let playback = cx.new(|cx| PlaybackController::new(window, cx));
                     let user_profile = cx.new(AccountState::new);
                     let library = cx.new(|cx| MusicLibrary::new(user_profile.clone(), cx));
                     let main_content = cx.new(|cx| {

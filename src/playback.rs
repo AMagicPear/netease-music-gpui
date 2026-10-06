@@ -1,6 +1,7 @@
 mod controller;
 mod engine;
 mod stream;
+mod system_media;
 
 pub use controller::PlaybackController;
 

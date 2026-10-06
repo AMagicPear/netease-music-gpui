@@ -2,12 +2,14 @@ use super::{
     PlaybackSnapshot,
     engine::PlayerEngine,
     stream::{BufferedSource, StreamingAudio},
+    system_media::SystemMedia,
 };
 use crate::{
     api::MusicApi,
     models::{AudioQualityLevel, Song},
 };
-use gpui::{Context, ReadGlobal};
+use gpui::{Context, ReadGlobal, Window};
+use souvlaki::{MediaControlEvent, SeekDirection};
 use std::time::Duration;
 
 /// 共享 GPUI Entity：统一接收 UI 命令，管理队列、异步请求和状态通知。
@@ -21,10 +23,38 @@ pub struct PlaybackController {
     play_when_ready: bool,
     request: Option<tokio::task::AbortHandle>,
     pending_position: Duration,
+    system_media: Option<SystemMedia>,
 }
 
 impl PlaybackController {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &Window, cx: &mut Context<Self>) -> Self {
+        let mut this = Self::default();
+        match SystemMedia::new(window) {
+            Ok((media, mut events)) => {
+                this.system_media = Some(media);
+                // 原生回调只发送命令，Entity 的修改始终回到 GPUI 线程。
+                cx.spawn(async move |this, cx| {
+                    while let Some(event) = events.recv().await {
+                        if this
+                            .update(cx, |this, cx| this.handle_media_event(event, cx))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                })
+                .detach();
+                cx.observe_self(|this, _| {
+                    if let Some(media) = &mut this.system_media {
+                        if let Err(error) = media.sync(&this.state, this.engine.has_source()) {
+                            eprintln!("同步系统媒体控件失败：{error}");
+                        }
+                    }
+                })
+                .detach();
+            }
+            Err(error) => eprintln!("系统媒体控件初始化失败：{error}"),
+        }
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
@@ -36,7 +66,62 @@ impl PlaybackController {
             }
         })
         .detach();
-        Self::default()
+        this
+    }
+
+    fn handle_media_event(&mut self, event: MediaControlEvent, cx: &mut Context<Self>) {
+        match event {
+            MediaControlEvent::Play => self.resume(cx),
+            MediaControlEvent::Pause => self.pause(cx),
+            MediaControlEvent::Toggle => self.toggle(cx),
+            MediaControlEvent::Previous => self.previous(cx),
+            MediaControlEvent::Next => self.next(cx),
+            MediaControlEvent::Stop => {
+                self.stop();
+                cx.notify();
+            }
+            MediaControlEvent::SetPosition(position) => self.seek_to(position.0, cx),
+            MediaControlEvent::Seek(direction) => {
+                self.seek_by(direction, Duration::from_secs(10), cx)
+            }
+            MediaControlEvent::SeekBy(direction, offset) => self.seek_by(direction, offset, cx),
+            MediaControlEvent::SetVolume(volume) if volume.is_finite() => {
+                self.set_volume(volume.clamp(0., 1.) as f32, cx)
+            }
+            MediaControlEvent::Raise => cx.activate(true),
+            MediaControlEvent::Quit => cx.quit(),
+            _ => {}
+        }
+    }
+
+    fn seek_by(&mut self, direction: SeekDirection, offset: Duration, cx: &mut Context<Self>) {
+        let position = if self.engine.has_source() {
+            self.engine.position()
+        } else {
+            self.state.position
+        };
+        let position = match direction {
+            SeekDirection::Forward => position.saturating_add(offset),
+            SeekDirection::Backward => position.saturating_sub(offset),
+        };
+        self.seek_to(position, cx);
+    }
+
+    fn stop(&mut self) {
+        // 使停止之前的加载结果失效，防止异步完成后重新开始播放。
+        self.load_revision = self.load_revision.wrapping_add(1);
+        self.state.revision = self.load_revision;
+        if let Some(request) = self.request.take() {
+            request.abort();
+        }
+        self.play_when_ready = false;
+        self.pending_position = Duration::ZERO;
+        self.engine.stop();
+        self.state.position = Duration::ZERO;
+        self.state.is_playing = false;
+        self.state.loading = false;
+        self.state.buffering = false;
+        self.state.error = None;
     }
 
     pub fn snapshot(&self) -> &PlaybackSnapshot {
@@ -304,6 +389,25 @@ impl Drop for PlaybackController {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_stop_invalidates_pending_load_and_resets_position() {
+        let mut controller = PlaybackController::default();
+        controller.load_revision = 3;
+        controller.play_when_ready = true;
+        controller.state.loading = true;
+        controller.state.position = Duration::from_secs(12);
+        controller.pending_position = controller.state.position;
+        controller.stop();
+        assert!(!controller.finish(3, Err("停止前的请求".into())));
+        assert!(!controller.is_play_requested());
+        assert!(!controller.state.loading);
+        assert!(!controller.state.buffering);
+        assert_eq!(controller.state.position, Duration::ZERO);
+        assert_eq!(controller.pending_position, Duration::ZERO);
+        assert!(controller.state.error.is_none());
+        assert_eq!(controller.state.revision, controller.load_revision);
+    }
 
     #[test]
     fn queue_keeps_boundaries() {
