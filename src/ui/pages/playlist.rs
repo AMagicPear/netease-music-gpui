@@ -43,7 +43,7 @@ const DIVIDER_ID: &str = "playlist-title-divider";
 /// 起拖时的鼠标 x、专辑占比、两列可用宽度。
 type DividerDragAnchor = Rc<Cell<(Pixels, f32, Pixels)>>;
 
-use crate::models::Song;
+use crate::models::{Playlist, Song};
 use crate::playback::PlaybackController;
 use crate::state::{library::MusicLibrary, playlist_detail::PlaylistDetail};
 use crate::ui::assets::thumbnail_url;
@@ -116,6 +116,53 @@ fn title_with_subtitle(song: &Song, colors: ColorTokens) -> StyledText {
             ..Default::default()
         },
     )])
+}
+
+/// 播放量：十万以下照写，十万起折算成万，万位满四位不再带小数。
+fn play_count_label(count: u64) -> String {
+    const WAN: u64 = 10_000;
+    if count < 10 * WAN {
+        return count.to_string();
+    }
+    let wan = count / WAN;
+    // 十分位截断而不是四舍五入：812568 是 81.2万，不是 81.3万。
+    let tenth = count % WAN / 1_000;
+    if wan >= 1_000 || tenth == 0 {
+        format!("{wan}万")
+    } else {
+        format!("{wan}.{tenth}万")
+    }
+}
+
+/// 简介压成一行：换行、连续空白、首尾空白都折叠成一个空格。
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// 标签胶囊：跟在作者后面横向排开，一行放不下时整体被裁掉，不挤走创建时间。
+fn tag_row(tags: &[String], colors: ColorTokens) -> AnyElement {
+    div()
+        .ml(px(12.))
+        .flex()
+        .items_center()
+        .gap(px(4.))
+        .min_w(px(0.))
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .children(tags.iter().map(|tag| {
+            div()
+                .flex_none()
+                .h(px(18.))
+                .px(px(6.))
+                .flex()
+                .items_center()
+                .rounded(px(9.))
+                .bg(colors.muted)
+                .text_size(px(11.))
+                .text_color(colors.secondary_foreground)
+                .child(tag.clone())
+        }))
+        .into_any_element()
 }
 
 /// 行 hover 时才出现的图标：序号位置的播放键、标题右侧那排操作按钮，共用这一套样式。
@@ -715,6 +762,8 @@ impl Render for PlaylistPage {
                     )
                 })
         });
+        let description = playlist.and_then(Playlist::description).map(one_line);
+        let tags = playlist.map(Playlist::tags).unwrap_or_default();
         let error = detail
             .error
             .as_ref()
@@ -906,13 +955,12 @@ impl Render for PlaylistPage {
                                 .size(px(15.))
                                 .text_color(white()),
                         )
-                        .child(count.to_string()),
+                        .child(play_count_label(count)),
                 )
             });
 
         let title = div()
             .text_size(px(24.))
-            .line_height(rems(3.))
             .line_clamp(2)
             .font_weight(FontWeight::BOLD)
             .text_color(colors.foreground)
@@ -926,7 +974,6 @@ impl Render for PlaylistPage {
             .flex()
             .min_w(px(0.))
             .items_center()
-            .gap_2()
             .when_some(playlist, |author, playlist| {
                 author
                     .child(
@@ -937,6 +984,7 @@ impl Render for PlaylistPage {
                     )
                     .child(
                         div()
+                            .ml(px(6.))
                             .min_w(px(0.))
                             .truncate()
                             .text_size(px(13.))
@@ -945,10 +993,13 @@ impl Render for PlaylistPage {
                             .child(playlist.creator.nickname.clone()),
                     )
             })
+            .when(!tags.is_empty(), |author| {
+                author.child(tag_row(tags, colors))
+            })
             .when_some(created_date, |row, date| {
                 row.child(
                     div()
-                        .ml_2()
+                        .ml(px(12.))
                         .flex_none()
                         .text_size(px(12.))
                         .text_color(colors.muted_foreground)
@@ -967,7 +1018,28 @@ impl Render for PlaylistPage {
                         .flex_1()
                         .min_w(px(0.))
                         .justify_between()
-                        .child(div().child(title).child(author))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .min_w(px(0.))
+                                // 三行共用一个间距；其余留白交给 justify_between。
+                                .gap(px(6.))
+                                .child(title)
+                                // 简介插在标题和作者之间：单行截断，没有就整行不出现。
+                                .when_some(description, |column, text| {
+                                    column.child(
+                                        div()
+                                            .min_w(px(0.))
+                                            .truncate()
+                                            .text_size(px(13.))
+                                            .font_weight(SECONDARY_FONT_WEIGHT)
+                                            .text_color(colors.muted_foreground)
+                                            .child(text),
+                                    )
+                                })
+                                .child(author),
+                        )
                         // 操作按钮组：播放全部 / 下载 / 更多
                         .child(
                             div()
@@ -1072,9 +1144,25 @@ impl Render for PlaylistPage {
 #[cfg(test)]
 mod tests {
     use super::{
-        ALBUM_SHARE_MAX, ALBUM_SHARE_MIN, Song, SongSort, next_sort, resized_album_share,
-        song_order,
+        ALBUM_SHARE_MAX, ALBUM_SHARE_MIN, Song, SongSort, next_sort, one_line, play_count_label,
+        resized_album_share, song_order,
     };
+
+    #[test]
+    fn play_count_switches_to_wan_at_one_hundred_thousand() {
+        assert_eq!(play_count_label(0), "0");
+        assert_eq!(play_count_label(99_999), "99999");
+        assert_eq!(play_count_label(100_000), "10万");
+        assert_eq!(play_count_label(812_568), "81.2万");
+        assert_eq!(play_count_label(86_630_448), "8663万");
+    }
+
+    #[test]
+    fn description_folds_to_a_single_line() {
+        assert_eq!(one_line("华语\n流行  "), "华语 流行");
+        assert_eq!(one_line("  只有一行  "), "只有一行");
+        assert_eq!(one_line(""), "");
+    }
 
     #[test]
     fn sorting_keeps_source_order_and_returns_to_default() {
