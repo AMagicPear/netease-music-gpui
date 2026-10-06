@@ -124,6 +124,8 @@ impl RenderOnce for Popover {
                             .child(
                                 div()
                                     .id("popover-content")
+                                    // 从命中测试中遮住后方元素，hover 样式也不会穿透。
+                                    .occlude()
                                     // 弹层的外观固定在这里，调用方给的元素只撑尺寸。
                                     .bg(colors.surface)
                                     .rounded(SURFACE_RADIUS)

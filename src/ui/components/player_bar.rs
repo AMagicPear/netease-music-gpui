@@ -9,8 +9,9 @@ use gpui_kit::base::{Button, ColorTokens, Theme, Transition, transition};
 
 use super::progress_bar::ProgressBar;
 use super::volume_control::VolumeControl;
-use super::{LAYER_PROGRESS_BAR, Popover, artist_label, like_icon_path, quality_badge_path};
+use super::{LAYER_PROGRESS_BAR, Popover, artist_label, like_icon_path};
 use crate::api::MusicApi;
+use crate::models::AudioQualityLevel;
 use crate::playback::PlaybackController;
 use crate::state::library::MusicLibrary;
 use crate::ui::assets::thumbnail_url;
@@ -420,9 +421,12 @@ impl Render for PlayerBar {
         let liked =
             song_id.is_some_and(|song_id| self.library.read(cx).liked_song_ids.contains(&song_id));
         let snapshot = self.playback.read(cx).snapshot();
+        let selected_quality = snapshot.quality;
         // 优先显示实际拿到的音质，降级时不会谎报。
-        let quality_icon_path =
-            quality_badge_path(snapshot.actual_quality.unwrap_or(snapshot.quality));
+        let quality_label = snapshot
+            .actual_quality
+            .unwrap_or(snapshot.quality)
+            .quality_label();
         let play_pause_icon_path = if is_playing {
             "icons/pause.svg"
         } else {
@@ -691,16 +695,258 @@ impl Render for PlayerBar {
                                     .flex_none()
                                     .anchor(Anchor::BottomCenter)
                                     .offset(px(12.))
-                                    .trigger(hover_icon(
-                                        "player-quality-button",
-                                        "音质选项",
-                                        quality_icon_path,
-                                        IconSize::Middle.pixels(),
-                                        colors.muted_foreground,
-                                        colors,
-                                    ))
-                                    // 空内容暂定尺寸；后续音质面板的布局只在这里实现。
-                                    .child(div().w(px(380.)).h(px(480.))),
+                                    .trigger(
+                                        Button::new("player-quality-button")
+                                            .aria_label("音质选项")
+                                            .h(px(16.))
+                                            .px(px(2.))
+                                            .flex_none()
+                                            .border_1()
+                                            .border_color(colors.muted_foreground)
+                                            .rounded(px(4.))
+                                            .text_size(px(10.))
+                                            .text_color(colors.muted_foreground)
+                                            .hover(|style| {
+                                                style
+                                                    .text_color(colors.foreground)
+                                                    .border_color(colors.foreground)
+                                            })
+                                            .child(quality_label),
+                                    )
+                                    .text_color(colors.secondary_foreground)
+                                    .child(
+                                        div()
+                                            .w(px(380.))
+                                            .h(px(480.))
+                                            .flex()
+                                            .flex_col()
+                                            .child(
+                                                div()
+                                                    .px_4()
+                                                    .py(px(10.))
+                                                    .text_size(px(16.))
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .child("当前歌曲音质"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_none()
+                                                    .flex()
+                                                    .gap(px(8.))
+                                                    .px(px(16.))
+                                                    .pb(px(10.))
+                                                    .children([
+                                                        (
+                                                            AudioQualityLevel::Sky,
+                                                            "沉浸环绕声",
+                                                            "Surround Audio",
+                                                            "环绕音感 最高5.1声道",
+                                                        ),
+                                                        (
+                                                            AudioQualityLevel::JyMaster,
+                                                            "超清母带",
+                                                            "Master",
+                                                            "极致细节 192kHz/24bit",
+                                                        ),
+                                                    ]
+                                                    .into_iter()
+                                                    .map(|(quality, title, subtitle, detail)| {
+                                                        div()
+                                                            .id(match quality {
+                                                                AudioQualityLevel::Sky => "quality-sky-card",
+                                                                _ => "quality-master-card",
+                                                            })
+                                                            .flex_1()
+                                                            .h(px(112.))
+                                                            .relative()
+                                                            .rounded(px(10.))
+                                                            .bg(rgb(0xfff3dc))
+                                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                                this.playback.update(cx, |playback, cx| {
+                                                                    playback.set_quality(quality, cx)
+                                                                });
+                                                            }))
+                                                            .child(
+                                                                svg().path(match quality {
+                                                                    AudioQualityLevel::Sky => "icons/音质选项/immersive_audio.svg",
+                                                                    _ => "icons/音质选项/master_audio.svg",
+                                                                })
+                                                                .absolute()
+                                                                .top(px(10.))
+                                                                .left(px(10.))
+                                                                .size(px(32.))
+                                                                .text_color(rgb(0xe8bd77)),
+                                                            )
+                                                            .child(img("icons/VIP/svip.svg")
+                                                                .absolute()
+                                                                .top(px(10.))
+                                                                .right(px(10.))
+                                                                .w(px(33.75))
+                                                                .h(px(13.5)))
+                                                            .child(
+                                                                div()
+                                                                    .absolute()
+                                                                    .left(px(10.))
+                                                                    .bottom(px(10.))
+                                                                    .flex()
+                                                                    .flex_col()
+                                                                    .child(
+                                                                        div()
+                                                                            .text_size(px(14.))
+                                                                            .line_height(px(17.))
+                                                                            .child(title),
+                                                                    )
+                                                                    .child(
+                                                                        div()
+                                                                            .text_size(px(14.))
+                                                                            .line_height(px(17.))
+                                                                            .child(subtitle),
+                                                                    )
+                                                                    .child(
+                                                                        div()
+                                                                            .pt(px(8.))
+                                                                            .text_size(px(11.))
+                                                                            .line_height(px(14.))
+                                                                            .text_color(colors.muted_foreground.alpha(0.4))
+                                                                            .child(detail),
+                                                                    ),
+                                                            )
+                                                    })),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .children([
+                                                        (
+                                                            AudioQualityLevel::JyEffect,
+                                                            "高清臻音 (Spatial Audio)",
+                                                            "高频细节还原与清晰沉浸感，96kHz/24bit",
+                                                            "臻",
+                                                            true,
+                                                        ),
+                                                        (
+                                                            AudioQualityLevel::HiRes,
+                                                            "高解析度无损 (Hi-Res)",
+                                                            "更饱满清晰的高解析度音质，最高192kHz/24bit",
+                                                            "H",
+                                                            true,
+                                                        ),
+                                                        (
+                                                            AudioQualityLevel::Lossless,
+                                                            "无损 (SQ)",
+                                                            "高保真无损音质，最高48kHz/16bit",
+                                                            "SQ",
+                                                            true,
+                                                        ),
+                                                        (
+                                                            AudioQualityLevel::ExHigh,
+                                                            "极高 (HQ)",
+                                                            "近 CD 音质的细节体验，最高320kbps",
+                                                            "HQ",
+                                                            false,
+                                                        ),
+                                                        (
+                                                            AudioQualityLevel::Standard,
+                                                            "标准",
+                                                            "128kbps",
+                                                            "标",
+                                                            false,
+                                                        ),
+                                                    ]
+                                                    .into_iter()
+                                                    .map(|(quality, title, detail, mark, vip)| {
+                                                        let selected = selected_quality == quality;
+                                                        let muted_icon = matches!(
+                                                            quality,
+                                                            AudioQualityLevel::ExHigh
+                                                                | AudioQualityLevel::Standard
+                                                        );
+                                                        let (icon_bg, icon_fg) = if muted_icon {
+                                                            (
+                                                                colors.muted,
+                                                                colors.muted_foreground.alpha(0.4),
+                                                            )
+                                                        } else {
+                                                            (
+                                                                rgb(0xfdf0ed).into(),
+                                                                rgb(0xc97f71).into(),
+                                                            )
+                                                        };
+                                                        div()
+                                                            .id(match quality {
+                                                                AudioQualityLevel::JyEffect => "quality-jyeffect-row",
+                                                                AudioQualityLevel::HiRes => "quality-hires-row",
+                                                                AudioQualityLevel::Lossless => "quality-lossless-row",
+                                                                AudioQualityLevel::ExHigh => "quality-exhigh-row",
+                                                                _ => "quality-standard-row",
+                                                            })
+                                                            .w_full()
+                                                            .flex_1()
+                                                            .flex()
+                                                            .items_center()
+                                                            .gap(px(9.))
+                                                            .px(px(16.))
+                                                            .hover(|row| row.bg(colors.muted))
+                                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                                this.playback.update(cx, |playback, cx| {
+                                                                    playback.set_quality(quality, cx)
+                                                                });
+                                                            }))
+                                                            .child(
+                                                                div()
+                                                                    .size(px(32.))
+                                                                    .flex_none()
+                                                                    .flex()
+                                                                    .items_center()
+                                                                    .justify_center()
+                                                                    .rounded_full()
+                                                                    .bg(icon_bg)
+                                                                    .text_color(icon_fg)
+                                                                    .text_size(px(11.))
+                                                                    .child(mark),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .flex_1()
+                                                                    .min_w_0()
+                                                                    .flex()
+                                                                    .flex_col()
+                                                                    .gap(px(8.))
+                                                                    .child(
+                                                                        div()
+                                                                            .flex()
+                                                                            .items_center()
+                                                                            .gap(px(4.))
+                                                                            .child(
+                                                                                div()
+                                                                                    .text_size(px(14.))
+                                                                                    .line_height(px(16.))
+                                                                                    .child(title),
+                                                                            )
+                                                                            .when(vip, |line| {
+                                                                                line.child(img("icons/VIP/vip.svg").w(px(30.375)).h(px(13.5)))
+                                                                            }),
+                                                                    )
+                                                                    .child(
+                                                                        div()
+                                                                            .text_size(px(11.))
+                                                                            .line_height(px(14.))
+                                                                            .text_color(colors.muted_foreground.alpha(0.4))
+                                                                            .child(detail),
+                                                                    ),
+                                                            )
+                                                            .when(selected, |row| {
+                                                                row.child(
+                                                                    img("icons/音质选项/quality_selected.svg")
+                                                                        .size(px(24.))
+                                                                        .flex_none(),
+                                                                )
+                                                            })
+                                                    })),
+                                            ),
+                                    ),
                             )
                             .child(hover_icon(
                                 "player-collect-button",

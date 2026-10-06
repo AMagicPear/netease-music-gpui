@@ -324,7 +324,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn playlist_order_follows_track_ids_and_skips_unavailable_songs() {
         let tracks: Vec<_> = [3, 2, 1].into_iter().map(|id| TrackId { id }).collect();

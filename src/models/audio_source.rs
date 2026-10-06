@@ -21,6 +21,20 @@ pub enum AudioQualityLevel {
 }
 
 impl AudioQualityLevel {
+    pub fn quality_label(self) -> &'static str {
+        match self {
+            Self::Standard => "标准",
+            Self::Higher => "较高",
+            Self::ExHigh => "极高",
+            Self::Lossless => "无损",
+            Self::HiRes => "Hi-Res",
+            Self::JyEffect => "高清臻音",
+            Self::Sky => "沉浸声",
+            Self::Dolby => "全景声",
+            Self::JyMaster => "超清母带",
+        }
+    }
+
     /// 由低到高，与官方音质选项面板的顺序一致。
     pub const ALL: [Self; 9] = [
         Self::Standard,
