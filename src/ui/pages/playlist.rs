@@ -1,11 +1,12 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_kit::base::{Button, ColorTokens, Theme};
+use gpui_kit::base::{Button, ColorTokens, Theme, Transition, transition};
 use gpui_kit::component::Sizable;
 use gpui_kit::component::avatar::Avatar;
 use gpui_kit::component::native_menu::NativeMenu;
 use std::cell::Cell;
 use std::rc::Rc;
+use std::time::Duration;
 
 /// 操作按钮的统一高度
 const ACTION_BUTTON_HEIGHT: Pixels = px(36.);
@@ -90,6 +91,7 @@ pub struct PlaylistPage {
     sort: Option<(SongSort, bool)>,
     album_share: f32,
     hovered_row: Option<u64>,
+    table_header_hidden: Rc<Cell<bool>>,
 }
 
 /// 使用同一段 StyledText，标题和副标题一起截断，只出现一个省略号。
@@ -304,6 +306,7 @@ impl PlaylistPage {
             sort: None,
             album_share: 0.35,
             hovered_row: None,
+            table_header_hidden: Rc::new(Cell::new(false)),
         }
     }
 
@@ -317,6 +320,163 @@ impl PlaylistPage {
             .cloned();
         self.detail
             .update(cx, |detail, cx| detail.open(id, summary, cx));
+    }
+
+    fn action_buttons(&self, compact: bool, cx: &Context<Self>) -> Div {
+        let colors = Theme::global(cx).tokens.colors;
+        div()
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .child(
+                play_all_button(colors, compact).on_click(cx.listener(|this, _, _, cx| {
+                    let id = this
+                        .detail
+                        .read(cx)
+                        .songs
+                        .get(*this.display_order.first().unwrap_or(&0))
+                        .map(|song| song.id);
+                    if let Some(id) = id {
+                        this.select_song(id, cx);
+                    }
+                })),
+            )
+            // 下载：宽度自适应，比 muted 更浅的底 + 比 muted 更浅的描边，
+            // 文字/图标用比 muted_foreground 深一档的灰保证可读
+            .child(if compact {
+                icon_action_button(
+                    "playlist-floating-download",
+                    "icons/download.svg",
+                    "下载",
+                    colors,
+                )
+            } else {
+                Button::new("playlist-download-button")
+                    .h(ACTION_BUTTON_HEIGHT)
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(4.))
+                    .px(ACTION_BUTTON_PADDING)
+                    .border_1()
+                    .border_color(colors.foreground.alpha(0.06))
+                    .rounded_lg()
+                    .bg(colors.foreground.alpha(0.03))
+                    // 底色本身已有 3%，hover 只抬到 8%（+5 个点），
+                    // 观感与 header 返回键的 0 → accent(6%) 接近；
+                    // 按下不再换更深的颜色，统一降整体透明度
+                    .hover(|style| style.bg(colors.foreground.alpha(0.08)))
+                    .active(|style| style.opacity(PRESSED_OPACITY))
+                    .text_size(px(13.))
+                    .text_color(colors.secondary_foreground)
+                    .child(
+                        svg()
+                            .path("icons/download.svg")
+                            .size(px(18.))
+                            .flex_none()
+                            .text_color(colors.secondary_foreground),
+                    )
+                    .child("下载")
+            })
+            // 更多：固定 36×36 的纯图标按钮，靠 flex 居中
+            .child(
+                icon_action_button(
+                    if compact {
+                        "playlist-floating-more"
+                    } else {
+                        "playlist-more-button"
+                    },
+                    "icons/xpoint.svg",
+                    "更多",
+                    colors,
+                )
+                // 弹出系统原生菜单
+                .on_click(|event, window, cx| {
+                    NativeMenu::new()
+                        .menu("分享…", Box::new(Share))
+                        .menu("批量操作", Box::new(BatchOperation))
+                        .menu("添加全部至播放列表", Box::new(AddAllToPlaylist))
+                        .show(event.position(), window, cx);
+                }),
+            )
+    }
+
+    /// 在滚动容器外预绘制，透明度和位移共用进度；渐隐结束后才移除。
+    pub fn floating_header(&self, cx: &Context<Self>) -> AnyElement {
+        let hidden = self.table_header_hidden.clone();
+        let view = cx.entity();
+        canvas(
+            move |bounds, window, cx| {
+                let progress = transition(
+                    "playlist-floating-header-presence",
+                    if hidden.get() { 1. } else { 0. },
+                    Transition::new(Duration::from_millis(600)).ease(ease_out_quint()),
+                    window,
+                    cx,
+                );
+                if progress <= 0. {
+                    return None;
+                }
+                let mut header = view.update(cx, |this, cx| {
+                    let colors = Theme::global(cx).tokens.colors;
+                    div()
+                        .id("playlist-floating-header")
+                        .w_full()
+                        .h(px(110.))
+                        .px(px(40.))
+                        .py(px(14.))
+                        .flex()
+                        .flex_col()
+                        .justify_between()
+                        .bg(colors.background)
+                        .opacity(progress)
+                        .occlude()
+                        .child(this.playlist_title(cx).line_clamp(1))
+                        .child(this.action_buttons(true, cx))
+                        .into_any_element()
+                });
+                header.layout_as_root(
+                    size(
+                        AvailableSpace::Definite(bounds.size.width),
+                        AvailableSpace::Definite(px(110.)),
+                    ),
+                    window,
+                    cx,
+                );
+                // 只移动预绘制坐标，布局尺寸和列表位置不变，点击区域随栏移动。
+                header.prepaint_at(
+                    bounds.origin + point(px(0.), px(12. * (1. - progress))),
+                    window,
+                    cx,
+                );
+                Some(header)
+            },
+            |_, header, window, cx| {
+                if let Some(mut header) = header {
+                    header.paint(window, cx);
+                }
+            },
+        )
+        .absolute()
+        .inset_0()
+        .into_any_element()
+    }
+
+    fn playlist_title(&self, cx: &App) -> Div {
+        div()
+            .text_size(px(24.))
+            .line_clamp(2)
+            .font_weight(FontWeight::BOLD)
+            .text_color(Theme::global(cx).tokens.colors.foreground)
+            .child(
+                self.detail
+                    .read(cx)
+                    .playlist
+                    .as_ref()
+                    .map(|playlist| playlist.name.clone())
+                    .unwrap_or_else(|| "歌单".into()),
+            )
     }
 
     fn columns(&self) -> Rc<Vec<TableColumn>> {
@@ -709,36 +869,72 @@ fn resized_album_share(start: f32, movement: f32, available: f32) -> f32 {
     (start - movement / available).clamp(ALBUM_SHARE_MIN, ALBUM_SHARE_MAX)
 }
 
-/// 「播放全部」：主题红实心按钮，白字白图标，无边框。
-fn play_all_button(colors: ColorTokens) -> Button {
-    Button::new("playlist-play-all-button")
-        .h(ACTION_BUTTON_HEIGHT)
+/// 与「更多」相同的方形图标按钮。
+fn icon_action_button(
+    id: &'static str,
+    path: &'static str,
+    label: &'static str,
+    colors: ColorTokens,
+) -> Button {
+    Button::new(id)
+        .aria_label(label)
+        .size(ACTION_BUTTON_HEIGHT)
         .flex_none()
         .flex()
         .items_center()
         .justify_center()
-        .gap(px(4.))
-        // 宽度交给内容：图标 + 文字 + 左右内边距
-        .px(ACTION_BUTTON_PADDING)
+        .border_1()
+        .border_color(colors.foreground.alpha(0.06))
         .rounded_lg()
-        .bg(colors.primary)
-        // hover 只改颜色（向背景靠一档），按下统一降整体透明度
-        .hover(|style| style.bg(colors.primary.alpha(0.88)))
+        .bg(colors.foreground.alpha(0.03))
+        .hover(|style| style.bg(colors.foreground.alpha(0.08)))
         .active(|style| style.opacity(PRESSED_OPACITY))
-        .text_size(px(13.))
-        .text_color(colors.primary_foreground)
         .child(
             svg()
-                .path("icons/play.svg")
-                .size(px(18.))
+                .path(path)
+                .size(px(16.))
                 .flex_none()
-                .text_color(colors.primary_foreground),
+                .text_color(colors.secondary_foreground),
         )
-        .child("播放全部")
+}
+
+/// 「播放全部」：主题红实心按钮，白字白图标，无边框。
+fn play_all_button(colors: ColorTokens, compact: bool) -> Button {
+    Button::new(if compact {
+        "playlist-floating-play"
+    } else {
+        "playlist-play-all-button"
+    })
+    .h(ACTION_BUTTON_HEIGHT)
+    .flex_none()
+    .flex()
+    .items_center()
+    .justify_center()
+    .gap(px(4.))
+    // 宽度交给内容：图标 + 文字 + 左右内边距
+    .px(ACTION_BUTTON_PADDING)
+    .when(compact, |button| button.w(ACTION_BUTTON_HEIGHT).px(px(0.)))
+    .rounded_lg()
+    .bg(colors.primary)
+    // hover 只改颜色（向背景靠一档），按下统一降整体透明度
+    .hover(|style| style.bg(colors.primary.alpha(0.88)))
+    .active(|style| style.opacity(PRESSED_OPACITY))
+    .text_size(px(13.))
+    .text_color(colors.primary_foreground)
+    .child(
+        svg()
+            .path("icons/play.svg")
+            .size(px(18.))
+            .flex_none()
+            .text_color(colors.primary_foreground),
+    )
+    .aria_label("播放全部")
+    .when(!compact, |button| button.child("播放全部"))
 }
 
 impl Render for PlaylistPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.table_header_hidden.set(false);
         let colors = Theme::global(cx).tokens.colors;
         let active_tab = [
             PlaylistTab::Songs,
@@ -903,6 +1099,15 @@ impl Render for PlaylistPage {
                 div()
                     .relative()
                     .child(table)
+                    .on_children_prepainted({
+                        let hidden = self.table_header_hidden.clone();
+                        move |bounds, window, _| {
+                            hidden.set(
+                                bounds[0].top() + HEADER_HEIGHT
+                                    <= window.content_mask().bounds.top(),
+                            );
+                        }
+                    })
                     .child(self.title_divider(colors, header_layout, cx))
                     .into_any_element()
             }
@@ -959,16 +1164,7 @@ impl Render for PlaylistPage {
                 )
             });
 
-        let title = div()
-            .text_size(px(24.))
-            .line_clamp(2)
-            .font_weight(FontWeight::BOLD)
-            .text_color(colors.foreground)
-            .child(
-                playlist
-                    .map(|playlist| playlist.name.clone())
-                    .unwrap_or_else(|| "歌单".into()),
-            );
+        let title = self.playlist_title(cx);
 
         let author = div()
             .flex()
@@ -1041,89 +1237,7 @@ impl Render for PlaylistPage {
                                 .child(author),
                         )
                         // 操作按钮组：播放全部 / 下载 / 更多
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(12.))
-                                .child(play_all_button(colors).on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        let id = this
-                                            .detail
-                                            .read(cx)
-                                            .songs
-                                            .get(*this.display_order.first().unwrap_or(&0))
-                                            .map(|song| song.id);
-                                        if let Some(id) = id {
-                                            this.select_song(id, cx);
-                                        }
-                                    },
-                                )))
-                                // 下载：宽度自适应，比 muted 更浅的底 + 比 muted 更浅的描边，
-                                // 文字/图标用比 muted_foreground 深一档的灰保证可读
-                                .child(
-                                    Button::new("playlist-download-button")
-                                        .h(ACTION_BUTTON_HEIGHT)
-                                        .flex_none()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .gap(px(4.))
-                                        .px(ACTION_BUTTON_PADDING)
-                                        .border_1()
-                                        .border_color(colors.foreground.alpha(0.06))
-                                        .rounded_lg()
-                                        .bg(colors.foreground.alpha(0.03))
-                                        // 底色本身已有 3%，hover 只抬到 8%（+5 个点），
-                                        // 观感与 header 返回键的 0 → accent(6%) 接近；
-                                        // 按下不再换更深的颜色，统一降整体透明度
-                                        .hover(|style| style.bg(colors.foreground.alpha(0.08)))
-                                        .active(|style| style.opacity(PRESSED_OPACITY))
-                                        .text_size(px(13.))
-                                        .text_color(colors.secondary_foreground)
-                                        .child(
-                                            svg()
-                                                .path("icons/download.svg")
-                                                .size(px(18.))
-                                                .flex_none()
-                                                .text_color(colors.secondary_foreground),
-                                        )
-                                        .child("下载"),
-                                )
-                                // 更多：固定 36×36 的纯图标按钮，靠 flex 居中
-                                .child(
-                                    Button::new("playlist-more-button")
-                                        .size(px(36.))
-                                        .flex_none()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .border_1()
-                                        .border_color(colors.foreground.alpha(0.06))
-                                        .rounded_lg()
-                                        .bg(colors.foreground.alpha(0.03))
-                                        .hover(|style| style.bg(colors.foreground.alpha(0.08)))
-                                        .active(|style| style.opacity(PRESSED_OPACITY))
-                                        // 弹出系统原生菜单
-                                        .on_click(|event, window, cx| {
-                                            NativeMenu::new()
-                                                .menu("分享…", Box::new(Share))
-                                                .menu("批量操作", Box::new(BatchOperation))
-                                                .menu(
-                                                    "添加全部至播放列表",
-                                                    Box::new(AddAllToPlaylist),
-                                                )
-                                                .show(event.position(), window, cx);
-                                        })
-                                        .child(
-                                            svg()
-                                                .path("icons/xpoint.svg")
-                                                .size(px(16.))
-                                                .flex_none()
-                                                .text_color(colors.secondary_foreground),
-                                        ),
-                                ),
-                        ),
+                        .child(self.action_buttons(false, cx)),
                 ),
             )
             // 控件区域

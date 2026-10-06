@@ -363,6 +363,18 @@ impl Render for MainContent {
                                     .track_scroll(page_scroll)
                                     .children(page),
                             )
+                            .when(
+                                matches!(
+                                    active_page,
+                                    ContentPage::FavoriteMusic | ContentPage::Playlist(_)
+                                ),
+                                |container| {
+                                    container.child(
+                                        self.playlist_page
+                                            .update(cx, |page, cx| page.floating_header(cx)),
+                                    )
+                                },
+                            )
                             // 滚动条放在外层，避免它的边界被计入滚动内容高度。
                             .child(Scrollbar::vertical(page_scroll).mode(ScrollbarMode::Always)),
                     ),
