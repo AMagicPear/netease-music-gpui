@@ -47,7 +47,7 @@ GPUI 的共享业务对象放在 Entity 中：`AccountState`、`MusicLibrary`、
 | `previous(cx)` / `next(cx)` | 按队列顺序切歌，队列边界不循环。 |
 | `seek_to(Duration, cx)` | 提交时间位置，由后台解码线程完成跳转。 |
 | `set_volume(f32, cx)` | 0..=1，超出范围钳制，忽略非有限值；切歌与重试保留音量。 |
-| `set_quality(AudioQualityLevel, cx)` | 选择标准、较高、极高、无损或 Hi-Res；重载当前歌曲并保留位置及暂停意图。 |
+| `set_quality(AudioQualityLevel, cx)` | 选择与 `song_url_v1` 的 `level` 一一对应的九档音质（标准、较高、极高、无损、Hi-Res、高清臻音、沉浸声、全景声、超清母带）；重载当前歌曲并保留位置及暂停意图。 |
 | `snapshot()` | 只读当前歌曲、位置、时长、播放/加载状态、错误和音量。 |
 | `can_seek()` / `is_play_requested()` | 给现有播放控件提供交互依据。 |
 

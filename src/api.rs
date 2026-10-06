@@ -5,7 +5,7 @@ use ncm_api_rs::{ApiClient, ApiResponse, NcmError, Query, create_client};
 use tokio::runtime::Runtime;
 
 use crate::models::{
-    AudioQualityLevel, AudioSourceInfo, Playlist, Song, TrackId, UserProfile, VipInfo,
+    AudioQualityLevel, AudioSourceInfo, Playlist, Privilege, Song, TrackId, UserProfile, VipInfo,
 };
 
 /// GPUI 负责界面，Tokio 负责 SDK 的网络请求。客户端和运行时在应用内复用。
@@ -179,7 +179,12 @@ impl MusicApi {
                 Self::request(client.song_detail(&Query::new().param("ids", &ids))).await?;
             let batch: Vec<Song> = serde_json::from_value(response.body["songs"].take())
                 .map_err(|error| format!("歌曲详情格式无效：{error}"))?;
-            songs.extend(ordered_playlist_songs(tracks, batch));
+            // 权益拿不到不影响列表本身，音质判断会退回歌曲自带的变体字段。
+            let privileges: Vec<Privilege> =
+                serde_json::from_value(response.body["privileges"].take()).unwrap_or_default();
+            let mut batch = ordered_playlist_songs(tracks, batch);
+            attach_privileges(&mut batch, privileges);
+            songs.extend(batch);
         }
         Ok((playlist, songs))
     }
@@ -224,6 +229,17 @@ fn ordered_playlist_songs(tracks: &[TrackId], songs: Vec<Song>) -> Vec<Song> {
         .collect()
 }
 
+/// privileges 与 songs 是两个独立数组，只靠 id 对应，顺序不保证一致。
+fn attach_privileges(songs: &mut [Song], privileges: Vec<Privilege>) {
+    let mut by_id: HashMap<u64, Privilege> =
+        privileges.into_iter().map(|item| (item.id, item)).collect();
+    for song in songs {
+        if let Some(privilege) = by_id.remove(&song.id) {
+            song.privilege = Some(privilege);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,6 +280,50 @@ mod tests {
         }
         assert!(AudioQualityLevel::from_api_level("unknown").is_none());
     }
+
+    #[test]
+    fn privileges_attach_by_song_id_not_by_position() {
+        let mut songs = vec![
+            Song {
+                id: 1,
+                ..Default::default()
+            },
+            Song {
+                id: 2,
+                ..Default::default()
+            },
+        ];
+        // 顺序故意和 songs 相反，且混入一条无关的权益。
+        attach_privileges(
+            &mut songs,
+            vec![
+                Privilege {
+                    id: 3,
+                    play_max_br_level: Some("hires".into()),
+                    ..Default::default()
+                },
+                Privilege {
+                    id: 2,
+                    play_max_br_level: Some("lossless".into()),
+                    ..Default::default()
+                },
+                Privilege {
+                    id: 1,
+                    play_max_br_level: Some("jymaster".into()),
+                    ..Default::default()
+                },
+            ],
+        );
+        assert_eq!(
+            songs[0].best_quality_level(),
+            Some(AudioQualityLevel::JyMaster)
+        );
+        assert_eq!(
+            songs[1].best_quality_level(),
+            Some(AudioQualityLevel::Lossless)
+        );
+    }
+
 
     #[test]
     fn playlist_order_follows_track_ids_and_skips_unavailable_songs() {

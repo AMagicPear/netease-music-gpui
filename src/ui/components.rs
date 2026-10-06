@@ -1,3 +1,5 @@
+use crate::models::AudioQualityLevel;
+
 mod drag_preview;
 mod player_bar;
 mod popover;
@@ -25,12 +27,19 @@ pub(super) const LAYER_VOLUME_BALLOON: usize = 3;
 // 下面是跨页面共用的展示规则。同一个规则只在歌单列表和播放栏各写一遍很容易漂移
 // （比如换了素材只改一处），所以集中在这里，由调用方决定怎么渲染。
 
-/// 音质徽章的图标。五个档位共用三套素材：标准 / 较高 / 极高 都是 HQ。
-pub(super) fn quality_badge_path(quality: crate::models::AudioQualityLevel) -> &'static str {
+/// 音质徽章的图标，素材与官方「音质选项」一一对应。
+/// 标准 / 较高 / 极高 共用 HQ，其余档位各有专属素材。
+pub(super) fn quality_badge_path(quality: AudioQualityLevel) -> &'static str {
     match quality {
-        crate::models::AudioQualityLevel::HiRes => "icons/音质选项/Hi-Res.svg",
-        crate::models::AudioQualityLevel::Lossless => "icons/音质选项/sq.svg",
-        _ => "icons/音质选项/HQ.svg",
+        AudioQualityLevel::Standard | AudioQualityLevel::Higher | AudioQualityLevel::ExHigh => {
+            "icons/音质选项/HQ.svg"
+        }
+        AudioQualityLevel::Lossless => "icons/音质选项/sq.svg",
+        AudioQualityLevel::HiRes => "icons/音质选项/Hi-Res.svg",
+        AudioQualityLevel::JyEffect => "icons/音质选项/高清臻音.svg",
+        AudioQualityLevel::Sky => "icons/音质选项/沉浸声.svg",
+        AudioQualityLevel::Dolby => "icons/音质选项/全景声.svg",
+        AudioQualityLevel::JyMaster => "icons/音质选项/超清母带.svg",
     }
 }
 
