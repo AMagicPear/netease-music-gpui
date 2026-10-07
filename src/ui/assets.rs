@@ -1,9 +1,58 @@
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use gpui::{AssetSource, Result, SharedString};
 
 pub struct Assets {
-    pub base: PathBuf,
+    base: PathBuf,
+}
+
+impl Assets {
+    pub fn new() -> Result<Self> {
+        let executable = std::env::current_exe()?;
+        let development = cfg!(debug_assertions).then(|| Path::new(env!("CARGO_MANIFEST_DIR")));
+        Ok(Self {
+            base: resource_directory(&executable, development)?,
+        })
+    }
+}
+
+/// 发布资源相对于可执行文件定位，不受启动时工作目录影响。
+fn resource_directory(executable: &Path, development: Option<&Path>) -> std::io::Result<PathBuf> {
+    let directory = executable.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "executable has no parent directory",
+        )
+    })?;
+    let packaged = if directory.file_name().is_some_and(|name| name == "MacOS")
+        && directory
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|name| name == "Contents")
+    {
+        directory.parent().unwrap().join("Resources/assets")
+    } else {
+        directory.join("assets")
+    };
+    if packaged.is_dir() {
+        return Ok(packaged);
+    }
+    if let Some(directory) = development
+        .map(|root| root.join("assets"))
+        .filter(|path| path.is_dir())
+    {
+        return Ok(directory);
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        format!(
+            "resource directory missing: {} (distribute the complete application package)",
+            packaged.display()
+        ),
+    ))
 }
 
 /// 网易封面 CDN 在服务端缩放，避免下载原图后只在 GPUI 中缩小显示。
@@ -64,7 +113,40 @@ impl AssetSource for Assets {
 
 #[cfg(test)]
 mod tests {
-    use super::thumbnail_url;
+    use super::{resource_directory, thumbnail_url};
+
+    #[test]
+    fn resources_follow_executable_and_only_development_can_fall_back() {
+        let root = std::env::temp_dir().join(format!("netease-assets-{}", std::process::id()));
+        let bundle = root.join("Music.app/Contents");
+        let portable = root.join("windows");
+        let development = root.join("project");
+        for directory in [
+            bundle.join("Resources/assets"),
+            portable.join("assets"),
+            development.join("assets"),
+        ] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        assert_eq!(
+            resource_directory(&bundle.join("MacOS/music"), None).unwrap(),
+            bundle.join("Resources/assets")
+        );
+        assert_eq!(
+            resource_directory(&portable.join("music.exe"), Some(&development)).unwrap(),
+            portable.join("assets")
+        );
+        let standalone = root.join("standalone/music");
+        assert_eq!(
+            resource_directory(&standalone, Some(&development)).unwrap(),
+            development.join("assets")
+        );
+        assert_eq!(
+            resource_directory(&standalone, None).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn thumbnail_replaces_size_and_preserves_other_parameters() {

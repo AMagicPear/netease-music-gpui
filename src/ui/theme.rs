@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use gpui::{App, Hsla, Pixels, px, rgb};
 use gpui_kit::component::Theme;
 
@@ -8,10 +6,6 @@ use gpui_kit::component::Theme;
 /// 文本系统按这个名字查找字体，与文件名无关；文件名是 `dolphin.ttf`，
 /// 但内部的 family 是 `Dolphin`，而且匹配是大小写敏感的，写错就静默回退到系统字体。
 pub const DOLPHIN_FAMILY: &str = "Dolphin";
-
-/// 编译期把字体字节打进二进制，运行时零拷贝地交给文本系统。
-const DOLPHIN_MEDIUM: &[u8] = include_bytes!("../../assets/font/dolphin.ttf");
-const DOLPHIN_BOLD: &[u8] = include_bytes!("../../assets/font/dolphin_bold.ttf");
 
 #[derive(Clone, Copy)]
 pub enum IconSize {
@@ -45,17 +39,24 @@ pub const PRESSED_OPACITY: f32 = 0.8;
 /// 「按住后把鼠标移出图标」时因失去 hover、退回更浅的底色而双重变淡。
 pub const PRESSED_ICON_ALPHA: f32 = 0.4;
 
-/// 注册打包字体。
+/// 从与图标相同的资源目录读取并注册字体。
 ///
 /// 必须早于任何文字测量与 `open_window`：`add_fonts` 之后首次布局才会用上新字体，
 /// 之后再注册则还要 `cx.refresh_windows()` 才能重新排版已显示的窗口。
-pub fn load_fonts(cx: &mut App) {
-    cx.text_system()
-        .add_fonts(vec![
-            Cow::Borrowed(DOLPHIN_MEDIUM),
-            Cow::Borrowed(DOLPHIN_BOLD),
-        ])
-        .expect("failed to load dolphin fonts");
+pub fn load_fonts(cx: &mut App) -> gpui::Result<()> {
+    let fonts = ["font/dolphin.ttf", "font/dolphin_bold.ttf"]
+        .into_iter()
+        .map(|path| {
+            cx.asset_source().load(path)?.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("font missing: {path}"),
+                )
+                .into()
+            })
+        })
+        .collect::<gpui::Result<Vec<_>>>()?;
+    cx.text_system().add_fonts(fonts)
 }
 
 pub fn init(cx: &mut App) {
