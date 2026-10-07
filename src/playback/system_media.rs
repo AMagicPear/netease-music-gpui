@@ -24,7 +24,11 @@ impl SystemMedia {
         #[cfg(target_os = "windows")]
         let hwnd = {
             use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-            match HasWindowHandle::window_handle(_window)?.as_raw() {
+            // `HandleError` 只有在 raw-window-handle 开启 `std` feature 时才实现
+            // std::error::Error，这里手动转成字符串错误，避免依赖 feature 统一。
+            let handle = HasWindowHandle::window_handle(_window)
+                .map_err(|err| format!("无法获取窗口句柄: {err}"))?;
+            match handle.as_raw() {
                 RawWindowHandle::Win32(handle) => Some(handle.hwnd.get() as *mut std::ffi::c_void),
                 _ => return Err("系统媒体控件需要 Win32 窗口句柄".into()),
             }
