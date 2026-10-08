@@ -4,7 +4,7 @@ use gpui::prelude::{FluentBuilder, StatefulInteractiveElement};
 use gpui::*;
 
 use super::assets::thumbnail_url;
-use super::components::{PlayerBar, ResizeDragPreview};
+use super::components::{PlayerBar, ResizeDragPreview, window_drag_area};
 use super::pages::{ContentPage, playlist::PlaylistPage};
 use super::sidebar::{SidebarChanged, SidebarPage};
 use super::theme::{IconSize, PRESSED_ICON_ALPHA};
@@ -36,6 +36,20 @@ impl Render for MainWindow {
             .flex()
             .flex_col()
             .bg(colors.background)
+            .child(
+                TitleBar::new()
+                    .h(px(30.))
+                    .pl(px(0.))
+                    .border_b_0()
+                    .bg(colors.background)
+                    .child(
+                        div()
+                            .w(self.main_content.read(cx).sidebar_width)
+                            .h_full()
+                            .flex_none()
+                            .bg(colors.foreground.alpha(0.03)),
+                    ),
+            )
             .child(self.main_content.clone())
             .child(self.player_bar.clone())
     }
@@ -196,104 +210,98 @@ fn page_header(
     avatar_url: String,
     vip_badge: Option<String>,
 ) -> impl IntoElement {
-    TitleBar::new()
-        .h(px(72.))
+    window_drag_area("page-header")
+        .h(px(42.))
+        .flex_none()
         .w_full()
-        .pl(px(0.))
-        .border_b_0()
         .bg(colors.background)
+        .px(px(40.))
+        .flex()
+        .items_center()
+        .min_w(px(0.))
+        .child(
+            Button::new("back-button")
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .h_9()
+                .w_7()
+                .flex_none()
+                .border_1()
+                .border_color(colors.border)
+                .rounded_lg()
+                .hover(|style| style.bg(colors.accent))
+                .child(
+                    svg()
+                        .path("icons/backward.svg")
+                        .size(px(11.))
+                        .text_color(colors.secondary_foreground),
+                ),
+        )
+        .child(search_box(search_input, colors))
         .child(
             div()
-                .size_full()
-                .pt(px(30.))
-                .px(px(40.))
+                .id("header-avatar")
+                .ml_auto()
+                .flex_none()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(Avatar::new().with_size(px(28.)).flex_none().src(avatar_url)),
+        )
+        .child(
+            div()
+                .id("header-profile-menu")
+                // 把整块（昵称 + VIP + 箭头）声明成一个 group，
+                // 子元素就能用 group_hover 感知「整块是否被悬浮」，而不是各自单独判断。
+                .group("header-profile-menu")
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .ml(px(4.))
                 .flex()
                 .items_center()
-                .min_w(px(0.))
+                .gap(px(4.))
+                .text_size(px(13.))
+                // 昵称保持原本设计的 0.7；文字子元素会继承这个色，
+                // 所以这里的 hover 一并让昵称变深到 foreground。
+                .text_color(colors.foreground.alpha(0.7))
+                .hover(|style| style.text_color(colors.foreground))
+                .child(nickname)
+                .when_some(vip_badge, |menu, badge| {
+                    menu.child(img(badge).h(px(16.)).flex_none())
+                })
                 .child(
-                    Button::new("back-button")
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .h_9()
-                        .w_7()
+                    svg()
+                        .path("icons/unfold.svg")
+                        .size(px(20.))
                         .flex_none()
-                        .border_1()
-                        .border_color(colors.border)
-                        .rounded_lg()
-                        .hover(|style| style.bg(colors.accent))
-                        .child(
-                            svg()
-                                .path("icons/backward.svg")
-                                .size(px(11.))
-                                .text_color(colors.secondary_foreground),
-                        ),
-                )
-                .child(search_box(search_input, colors))
-                .child(
-                    div()
-                        .id("header-avatar")
-                        .ml_auto()
-                        .flex_none()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(Avatar::new().with_size(px(28.)).flex_none().src(avatar_url)),
-                )
-                .child(
-                    div()
-                        .id("header-profile-menu")
-                        // 把整块（昵称 + VIP + 箭头）声明成一个 group，
-                        // 子元素就能用 group_hover 感知「整块是否被悬浮」，而不是各自单独判断。
-                        .group("header-profile-menu")
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .ml(px(4.))
-                        .flex()
-                        .items_center()
-                        .gap(px(4.))
-                        .text_size(px(13.))
-                        // 昵称保持原本设计的 0.7；文字子元素会继承这个色，
-                        // 所以这里的 hover 一并让昵称变深到 foreground。
-                        .text_color(colors.foreground.alpha(0.7))
-                        .hover(|style| style.text_color(colors.foreground))
-                        .child(nickname)
-                        .when_some(vip_badge, |menu, badge| {
-                            menu.child(img(badge).h(px(16.)).flex_none())
-                        })
-                        .child(
-                            svg()
-                                .path("icons/unfold.svg")
-                                .size(px(20.))
-                                .flex_none()
-                                // svg 不继承文字色的 hover，改用 group_hover：
-                                // 只要整块被悬浮，箭头也跟着变深到 foreground。
-                                .text_color(colors.foreground.alpha(0.6))
-                                .group_hover("header-profile-menu", |style| {
-                                    style.text_color(colors.foreground)
-                                }),
-                        ),
-                )
-                .child(hover_icon(
-                    "header-message-button",
-                    "消息",
-                    "icons/message.svg",
-                    colors,
-                ))
-                .child(hover_icon(
-                    "header-setting-button",
-                    "设置",
-                    "icons/setting.svg",
-                    colors,
-                ))
-                .child(hover_icon(
-                    "header-skin-button",
-                    "皮肤",
-                    "icons/skin.svg",
-                    colors,
-                ))
-                .child(hover_icon(
-                    "header-mini-button",
-                    "迷你模式",
-                    "icons/menu_mini.svg",
-                    colors,
-                )),
+                        // svg 不继承文字色的 hover，改用 group_hover：
+                        // 只要整块被悬浮，箭头也跟着变深到 foreground。
+                        .text_color(colors.foreground.alpha(0.6))
+                        .group_hover("header-profile-menu", |style| {
+                            style.text_color(colors.foreground)
+                        }),
+                ),
         )
+        .child(hover_icon(
+            "header-message-button",
+            "消息",
+            "icons/message.svg",
+            colors,
+        ))
+        .child(hover_icon(
+            "header-setting-button",
+            "设置",
+            "icons/setting.svg",
+            colors,
+        ))
+        .child(hover_icon(
+            "header-skin-button",
+            "皮肤",
+            "icons/skin.svg",
+            colors,
+        ))
+        .child(hover_icon(
+            "header-mini-button",
+            "迷你模式",
+            "icons/menu_mini.svg",
+            colors,
+        ))
 }
 
 impl Render for MainContent {

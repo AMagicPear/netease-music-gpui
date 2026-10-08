@@ -1,7 +1,7 @@
+use super::components::window_drag_area;
 use gpui::prelude::{FluentBuilder, StatefulInteractiveElement};
 use gpui::*;
 use gpui_kit::base::{Button, ColorTokens, Theme};
-use gpui_kit::component::TitleBar;
 
 use super::assets::thumbnail_url;
 use super::pages::{ContentPage, LIBRARY_PAGES, MAIN_PAGES};
@@ -44,46 +44,42 @@ impl SidebarPage {
 
 /// 顶部 logo 区域，同时充当窗口拖动手柄。
 fn page_header(colors: ColorTokens) -> impl IntoElement {
-    TitleBar::new()
-        .h(px(72.))
+    window_drag_area("sidebar-header")
+        .h(px(42.))
+        .flex_none()
         .w_full()
-        .pl(px(0.))
-        .border_b_0()
-        .bg(rgba(0x00000000))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        // 原来的 px(18) + left_1；上下留白保持 Logo 位于 y=10。
+        .pl(px(22.))
+        .pr(px(14.))
+        .pt(px(10.))
+        .pb(px(8.))
         .child(
-            div().size_full().px(px(18.)).child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .pt_10()
-                    .left_1()
-                    .child(
-                        div()
-                            .size(px(24.))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_full()
-                            .bg(colors.primary)
-                            .text_color(colors.primary_foreground)
-                            .child(
-                                svg()
-                                    .path("icons/logo/logo.svg")
-                                    .size(px(27.))
-                                    .flex_none()
-                                    .text_color(colors.primary_foreground),
-                            ),
-                    )
-                    .child(
-                        svg()
-                            .path("icons/logo/logo_text.svg")
-                            .w(px(101.))
-                            .h(px(19.))
-                            .text_color(colors.foreground),
-                    ),
-            ),
+            div()
+                .size(px(24.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(colors.primary)
+                .text_color(colors.primary_foreground)
+                .child(
+                    svg()
+                        .path("icons/logo/logo.svg")
+                        .size(px(27.))
+                        .flex_none()
+                        .text_color(colors.primary_foreground),
+                ),
+        )
+        .child(
+            svg()
+                .path("icons/logo/logo_text.svg")
+                .w(px(101.))
+                .h(px(19.))
+                .text_color(colors.foreground),
         )
 }
 

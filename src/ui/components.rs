@@ -1,4 +1,7 @@
 use crate::models::AudioQualityLevel;
+use gpui::{InteractiveElement, MouseButton, div};
+use gpui_kit::base::InteractiveElementExt;
+use std::{cell::Cell, rc::Rc};
 
 mod drag_preview;
 mod player_bar;
@@ -23,6 +26,37 @@ pub use virtual_table::{
 pub(super) const LAYER_PROGRESS_BAR: usize = 1;
 pub(super) const LAYER_POPOVER: usize = 2;
 pub(super) const LAYER_VOLUME_BALLOON: usize = 3;
+
+/// 普通内容区的窗口拖拽，不创建 TitleBar 或窗口控制按钮。
+pub(super) fn window_drag_area(id: &'static str) -> gpui::Stateful<gpui::Div> {
+    let should_move = Rc::new(Cell::new(false));
+    div()
+        .id(id)
+        .on_mouse_down_out({
+            let should_move = should_move.clone();
+            move |_, _, _| should_move.set(false)
+        })
+        .on_mouse_down(MouseButton::Left, {
+            let should_move = should_move.clone();
+            move |_, _, _| should_move.set(true)
+        })
+        .on_mouse_up(MouseButton::Left, {
+            let should_move = should_move.clone();
+            move |_, _, _| should_move.set(false)
+        })
+        .on_mouse_move(move |event, window, _| {
+            if should_move.replace(false) && event.pressed_button == Some(MouseButton::Left) {
+                window.start_window_move();
+            }
+        })
+        .on_double_click(|_, window, _| {
+            if cfg!(target_os = "macos") {
+                window.titlebar_double_click();
+            } else {
+                window.zoom_window();
+            }
+        })
+}
 
 // 下面是跨页面共用的展示规则。同一个规则只在歌单列表和播放栏各写一遍很容易漂移
 // （比如换了素材只改一处），所以集中在这里，由调用方决定怎么渲染。
