@@ -19,9 +19,18 @@ reqwest = { version = "0.13.5", default-features = false, features = ["rustls", 
 rodio = { version = "0.22.2", default-features = false, features = ["playback", "flac", "mp3", "mp4", "vorbis", "wav"] }
 symphonia = { version = "0.5.5", default-features = false, features = ["flac", "mp3", "aac", "isomp4", "ogg", "vorbis", "wav", "pcm", "alac"] }
 souvlaki = { version = "0.8.3", default-features = false, features = ["use_zbus"] }
+tray-icon = { version = "0.26.1", default-features = false, features = ["ksni"] }
+anyhow = "1"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 raw-window-handle = "0.6"
+windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+raw-window-handle = "0.6"
+objc2 = "0.6"
+objc2-foundation = "0.3.2"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSView", "NSWindow", "NSBitmapImageRep", "NSImage", "NSImageRep", "NSGraphics", "NSStatusItem", "NSStatusBarButton", "NSButton"] }
 
 [dev-dependencies]
 futures = "0.3"

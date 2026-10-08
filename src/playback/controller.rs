@@ -88,7 +88,7 @@ impl PlaybackController {
             MediaControlEvent::SetVolume(volume) if volume.is_finite() => {
                 self.set_volume(volume.clamp(0., 1.) as f32, cx)
             }
-            MediaControlEvent::Raise => cx.activate(true),
+            MediaControlEvent::Raise => crate::desktop::show_window(cx),
             MediaControlEvent::Quit => cx.quit(),
             _ => {}
         }

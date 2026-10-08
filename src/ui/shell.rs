@@ -38,6 +38,7 @@ impl Render for MainWindow {
             .bg(colors.background)
             .child(
                 TitleBar::new()
+                    .on_close_window(|_, window, cx| crate::desktop::close_window(window, cx))
                     .h(px(30.))
                     .pl(px(0.))
                     .border_b_0()
