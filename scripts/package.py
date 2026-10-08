@@ -49,6 +49,7 @@ def main():
     if sys.platform not in ("darwin", "win32"):
         raise SystemExit("Run this script on macOS or Windows to build for that platform")
     root = Path(__file__).resolve().parents[1]
+    subprocess.run([sys.executable, str(root / "scripts/prepare_gpui.py")], cwd=root, check=True)
     metadata = json.loads(subprocess.check_output(
         ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"], cwd=root
     ))

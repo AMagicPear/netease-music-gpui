@@ -1,7 +1,4 @@
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -33,7 +30,6 @@ pub struct PlayerBar {
     hovered_interaction: Option<(&'static str, usize)>,
     cover_rotation_elapsed: Duration,
     cover_rotation_started: Option<Instant>,
-    cover_images: [Option<RotatingCover>; 2],
     album_expanded: bool,
     _playback_subscription: Subscription,
     _progress_subscription: Subscription,
@@ -73,7 +69,6 @@ impl PlayerBar {
             hovered_interaction: None,
             cover_rotation_elapsed: Duration::ZERO,
             cover_rotation_started: None,
-            cover_images: [None, None],
             album_expanded: false,
             _playback_subscription: playback_subscription,
             _progress_subscription: progress_subscription,
@@ -99,15 +94,20 @@ impl PlayerBar {
         }
     }
 
-    /// 大小唱片共用播放时钟与图片缓存，展开、收起时保持旋转角度连续。
-    pub(crate) fn vinyl(&mut self, side: f32, window: &mut Window, cx: &mut App) -> Div {
+    /// 大小唱片共用播放时钟，图片纹理复用 GPUI 缓存，只在 GPU 上旋转。
+    pub(crate) fn vinyl(
+        &mut self,
+        side: f32,
+        disc_path: &'static str,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Div {
         let elapsed = self.cover_rotation_elapsed
             + self
                 .cover_rotation_started
                 .map_or(Duration::ZERO, |started| started.elapsed());
-        // 40 秒一圈，最多每秒生成 30 张旋转图；其他重绘复用缓存。
-        let angle = ((elapsed.as_secs_f64() % 40.) * 30.).floor() as f32 / (40. * 30.)
-            * std::f32::consts::TAU;
+        // 40 秒一圈；按实际时间取角度，不受帧率影响。
+        let angle = (elapsed.as_secs_f64() % 40.) as f32 / 40. * std::f32::consts::TAU;
         if self.cover_rotation_started.is_some() {
             window.request_animation_frame();
         }
@@ -125,98 +125,22 @@ impl PlayerBar {
             .flex_none()
             .relative()
             .child(
-                self.rotating_image(
-                    0,
-                    Resource::Embedded("images/miniVinyl.png".into()),
-                    angle,
-                    side,
-                    window,
-                    cx,
-                )
-                .size_full(),
+                img(disc_path)
+                    .with_transformation(Transformation::rotate(radians(angle)))
+                    .size_full(),
             )
             .when_some(cover_url, |vinyl, url| {
                 vinyl.child(
-                    self.rotating_image(
-                        1,
-                        Resource::Uri(thumbnail_url(&url, (cover_side * 2.).ceil() as u32).into()),
-                        angle,
-                        cover_side,
-                        window,
-                        cx,
-                    )
-                    .absolute()
-                    .left(px(inset))
-                    .top(px(inset))
-                    .size(px(cover_side))
-                    .rounded_full()
-                    .object_fit(ObjectFit::Cover),
+                    img(thumbnail_url(&url, (cover_side * 2.).ceil() as u32))
+                        .with_transformation(Transformation::rotate(radians(angle)))
+                        .absolute()
+                        .left(px(inset))
+                        .top(px(inset))
+                        .size(px(cover_side))
+                        .rounded_full()
+                        .object_fit(ObjectFit::Cover),
                 )
             })
-    }
-
-    fn rotating_image(
-        &mut self,
-        slot: usize,
-        source: Resource,
-        angle: f32,
-        side: f32,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Img {
-        let Some(Ok(data)) = window.use_asset::<ImgResourceLoader>(&source, cx) else {
-            return img(ImageSource::Resource(source));
-        };
-        let side = (side * window.scale_factor()).ceil() as u32;
-        let cached = &mut self.cover_images[slot];
-        if cached
-            .as_ref()
-            .is_none_or(|cover| cover.source_id != data.id || cover.pixels.width() != side)
-        {
-            let extent = data.size(0);
-            let Some(pixels) = image::RgbaImage::from_raw(
-                extent.width.0 as u32,
-                extent.height.0 as u32,
-                data.as_bytes(0).unwrap_or_default().to_vec(),
-            ) else {
-                return img(ImageSource::Resource(source));
-            };
-            // 缩放和 Cover 居中裁剪只在换图或 DPI 改变时做一次。
-            let extent = pixels.width().min(pixels.height());
-            let square = image::imageops::crop_imm(
-                &pixels,
-                (pixels.width() - extent) / 2,
-                (pixels.height() - extent) / 2,
-                extent,
-                extent,
-            )
-            .to_image();
-            let pixels =
-                image::imageops::resize(&square, side, side, image::imageops::FilterType::Triangle);
-            let frame = Arc::new(RenderImage::new(vec![image::Frame::new(rotate_cover(
-                &pixels, angle,
-            ))]));
-            if let Some(previous) = cached.replace(RotatingCover {
-                source_id: data.id,
-                pixels,
-                angle,
-                frame,
-            }) {
-                let _ = window.drop_image(previous.frame);
-            }
-        }
-        let cover = cached.as_mut().unwrap();
-        if cover.angle != angle {
-            let frame = Arc::new(RenderImage::new(vec![image::Frame::new(rotate_cover(
-                &cover.pixels,
-                angle,
-            ))]));
-            let previous = std::mem::replace(&mut cover.frame, frame);
-            // 不让旧旋转帧一直留在 GPU 图集中。
-            let _ = window.drop_image(previous);
-            cover.angle = angle;
-        }
-        img(cover.frame.clone())
     }
 
     fn load_counts(&mut self, cx: &mut Context<Self>) {
@@ -360,40 +284,6 @@ impl PlayerBar {
 const INTERACTION_AREA: usize = 0;
 const INTERACTION_BADGE: usize = 1;
 const INTERACTION_ICON: usize = 2;
-
-struct RotatingCover {
-    source_id: ImageId,
-    pixels: image::RgbaImage,
-    angle: f32,
-    frame: Arc<RenderImage>,
-}
-
-/// 逆向采样避免空洞；屏幕坐标 y 向下，正角度对应顺时针。
-fn rotate_cover(source: &image::RgbaImage, angle: f32) -> image::RgbaImage {
-    let center = (source.width() as f32 - 1.) / 2.;
-    let (sin, cos) = angle.sin_cos();
-    image::RgbaImage::from_fn(source.width(), source.height(), |x, y| {
-        let dx = x as f32 - center;
-        let dy = y as f32 - center;
-        // RenderImage 的像素是 BGRA；重采样保持原来的通道顺序。
-        let sx = center + cos * dx + sin * dy;
-        let sy = center - sin * dx + cos * dy;
-        let last = source.width() - 1;
-        if sx < 0. || sy < 0. || sx > last as f32 || sy > last as f32 {
-            return image::Rgba([0; 4]);
-        }
-        let (x0, y0) = (sx as u32, sy as u32);
-        let (x1, y1) = ((x0 + 1).min(last), (y0 + 1).min(last));
-        let (fx, fy) = (sx - x0 as f32, sy - y0 as f32);
-        let [a, b, c, d] =
-            [(x0, y0), (x1, y0), (x0, y1), (x1, y1)].map(|(x, y)| source.get_pixel(x, y).0);
-        image::Rgba(std::array::from_fn(|channel| {
-            let top = a[channel] as f32 * (1. - fx) + b[channel] as f32 * fx;
-            let bottom = c[channel] as f32 * (1. - fx) + d[channel] as f32 * fx;
-            (top * (1. - fy) + bottom * fy).round() as u8
-        }))
-    })
-}
 
 fn format_count(count: u64) -> String {
     match count {
@@ -541,7 +431,7 @@ impl Render for PlayerBar {
                                     }))
                                     .size(px(60.))
                                     .flex_none()
-                                    .child(self.vinyl(60., window, cx)),
+                                    .child(self.vinyl(60., "images/miniVinyl.png", window, cx)),
                             ))
                             .child(
                                 div()
@@ -1005,29 +895,7 @@ impl Render for PlayerBar {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_count, rotate_cover};
-
-    #[test]
-    #[ignore = "手动测量 Retina 大唱片的旋转耗时"]
-    fn large_cover_rotation_timing() {
-        let source = image::RgbaImage::from_pixel(628, 628, image::Rgba([30, 80, 150, 255]));
-        let started = std::time::Instant::now();
-        for frame in 0..30 {
-            std::hint::black_box(rotate_cover(&source, frame as f32 * 0.01));
-        }
-        eprintln!("30 frames: {:?}", started.elapsed());
-    }
-
-    #[test]
-    fn cover_rotates_clockwise_and_keeps_colors() {
-        let mut source = image::RgbaImage::new(5, 5);
-        let color = image::Rgba([30, 80, 150, 255]);
-        source.put_pixel(2, 1, color);
-        assert_eq!(rotate_cover(&source, 0.), source);
-        let rotated = rotate_cover(&source, std::f32::consts::FRAC_PI_2);
-        assert_eq!(*rotated.get_pixel(3, 2), color);
-        assert_eq!(*rotated.get_pixel(2, 1), image::Rgba([0; 4]));
-    }
+    use super::format_count;
 
     #[test]
     fn count_labels_change_at_thresholds() {

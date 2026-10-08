@@ -1,0 +1,2 @@
+# Unified diff 的空白上下文行需要保留一个前导空格。
+vendor/patches/*.patch whitespace=-blank-at-eol

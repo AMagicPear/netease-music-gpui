@@ -106,8 +106,9 @@ impl Render for AlbumLyrics {
         );
         let comments_top = (height + f32::from(self.scroll.offset().y)).max(0.);
         let vinyl = (reveal > 0. && comments_top > 0.).then(|| {
-            self.player_bar
-                .update(cx, |player, cx| player.vinyl(314., window, cx))
+            self.player_bar.update(cx, |player, cx| {
+                player.vinyl(314., "images/disc.png", window, cx)
+            })
         });
 
         div()

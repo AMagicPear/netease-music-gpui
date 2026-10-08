@@ -25,14 +25,18 @@
 
 ## 运行
 
-需要较新的 Rust stable 工具链、Git、网络连接及可用的网易云登录 COOKIE。macOS 编译环境还需要 Xcode Command Line Tools。
+需要较新的 Rust stable 工具链、Python 3.9+、Git、网络连接及可用的网易云登录 COOKIE。macOS 编译环境还需要 Xcode Command Line Tools。
 
 在项目根目录运行：
 
 ```bash
+python3 scripts/prepare_gpui.py
 export COOKIE='你的网易云登录 Cookie'
 cargo run --locked
 ```
+
+准备脚本下载固定版本的 GPUI 并应用图片 GPU 旋转补丁；首次构建和补丁更新后运行即可。
+仓库只保存补丁，生成的依赖源码不进入 Git。详情见 [GPUI 补丁说明](vendor/README.md)。
 
 `COOKIE` 应填写登录后请求中的 Cookie 字符串，不包含 `Cookie:` 请求头名称。应用启动时直接读取环境变量，缺失或为空会退出；播放权限取决于账号及接口返回的资源。
 
@@ -123,12 +127,13 @@ docs/architecture.md         模块职责与播放链路说明
 ## 开发验证
 
 ```bash
+python3 scripts/prepare_gpui.py
 cargo fmt --check
 cargo check --locked --all-targets
 cargo test --locked
 ```
 
-普通测试不启动界面，也不需要外网或声卡；播放回归测试使用本地 HTTP 服务器、内存生成的 WAV 和仓库内的 MP3、AAC/M4A、96 kHz FLAC 测试音频，覆盖 Range 跳转、取消、失败恢复和损坏数据。音频来源及生成方式见 [测试音频说明](tests/fixtures/README.md)。真实接口测试默认忽略，配置 COOKIE 后可以单独运行：
+普通测试不启动界面，也不需要外网或声卡；macOS 的图片旋转测试会使用真实离屏 Metal 渲染器，需要可用的 GPU。播放回归测试使用本地 HTTP 服务器、内存生成的 WAV 和仓库内的 MP3、AAC/M4A、96 kHz FLAC 测试音频，覆盖 Range 跳转、取消、失败恢复和损坏数据。音频来源及生成方式见 [测试音频说明](tests/fixtures/README.md)。真实接口测试默认忽略，配置 COOKIE 后可以单独运行：
 
 ```bash
 cargo test --locked cookie_can_load_real_library -- --ignored

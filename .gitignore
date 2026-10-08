@@ -2,3 +2,7 @@
 .DS_Store
 .env
 __pycache__/
+/vendor/gpui-pre/
+/vendor/gpui-pre-apple/
+/vendor/gpui-pre-wgpu/
+/vendor/.gpui-patch-id

@@ -1,0 +1,317 @@
+--- a/vendor/gpui-pre/src/elements/img.rs
++++ b/vendor/gpui-pre/src/elements/img.rs
+@@ -2,8 +2,8 @@
+     AnyElement, AnyImageCache, App, Asset, AssetLogger, Bounds, DefiniteLength, Element, ElementId,
+     Entity, GlobalElementId, Hitbox, Image, ImageCache, InspectorElementId, InteractiveElement,
+     Interactivity, IntoElement, LayoutId, Length, ObjectFit, Pixels, RenderImage, Resource,
+-    SharedString, SharedUri, StyleRefinement, Styled, Task, Window, decode_static_image,
+-    decode_static_image_from_decoder, px,
++    SharedString, SharedUri, StyleRefinement, Styled, Task, Transformation, Window,
++    decode_static_image, decode_static_image_from_decoder, px,
+ };
+ use anyhow::Result;
+ 
+@@ -127,6 +127,7 @@
+ 
+ /// The style of an image element.
+ pub struct ImageStyle {
++    transformation: Transformation,
+     grayscale: bool,
+     object_fit: ObjectFit,
+     loading: Option<Box<dyn Fn() -> AnyElement>>,
+@@ -136,6 +137,7 @@
+ impl Default for ImageStyle {
+     fn default() -> Self {
+         Self {
++            transformation: Transformation::default(),
+             grayscale: false,
+             object_fit: ObjectFit::Contain,
+             loading: None,
+@@ -148,6 +150,13 @@
+ pub trait StyledImage: Sized {
+     /// Get a mutable [ImageStyle] from the element.
+     fn image_style(&mut self) -> &mut ImageStyle;
++
++    /// Transform the painted image around its element center on the GPU.
++    /// Layout and hitboxes are unchanged; ancestor clipping remains in window coordinates.
++    fn with_transformation(mut self, transformation: Transformation) -> Self {
++        self.image_style().transformation = transformation;
++        self
++    }
+ 
+     /// Set the image to be displayed in grayscale.
+     fn grayscale(mut self, grayscale: bool) -> Self {
+@@ -493,13 +502,16 @@
+                         .get_bounds(bounds, data.size(layout_state.frame_index));
+                     let corner_radii = style.corner_radii.to_pixels(window.rem_size());
+                     window
+-                        .paint_image(
++                        .paint_image_with_transformation(
+                             bounds,
+                             new_bounds,
+                             corner_radii,
+                             data,
+                             layout_state.frame_index,
+                             self.style.grayscale,
++                            self.style
++                                .transformation
++                                .into_matrix(bounds.center(), window.scale_factor()),
+                         )
+                         .log_err();
+                 } else if let Some(replacement) = &mut layout_state.replacement {
+--- a/vendor/gpui-pre/src/elements/svg.rs
++++ b/vendor/gpui-pre/src/elements/svg.rs
+@@ -274,7 +274,7 @@
+         self
+     }
+ 
+-    fn into_matrix(self, center: Point<Pixels>, scale_factor: f32) -> TransformationMatrix {
++    pub(crate) fn into_matrix(self, center: Point<Pixels>, scale_factor: f32) -> TransformationMatrix {
+         //Note: if you read this as a sequence of matrix multiplications, start from the bottom
+         TransformationMatrix::unit()
+             .translate(center.scale(scale_factor) + self.translate.scale(scale_factor))
+--- a/vendor/gpui-pre/src/scene.rs
++++ b/vendor/gpui-pre/src/scene.rs
+@@ -86,9 +86,11 @@
+ 
+     pub fn insert_primitive(&mut self, primitive: impl Into<Primitive>) {
+         let mut primitive = primitive.into();
+-        let clipped_bounds = primitive
+-            .bounds()
+-            .intersect(&primitive.content_mask().bounds);
++        let paint_bounds = match &primitive {
++            Primitive::PolychromeSprite(sprite) => sprite.transformed_bounds(),
++            _ => *primitive.bounds(),
++        };
++        let clipped_bounds = paint_bounds.intersect(&primitive.content_mask().bounds);
+ 
+         if clipped_bounds.is_empty() {
+             return;
+@@ -755,6 +757,32 @@
+     pub content_mask: ContentMask<ScaledPixels>,
+     pub corner_radii: Corners<ScaledPixels>,
+     pub tile: AtlasTile,
++    pub transformation: TransformationMatrix,
++}
++
++impl PolychromeSprite {
++    /// Axis-aligned extent of the transformed image, for culling and draw ordering.
++    pub fn transformed_bounds(&self) -> Bounds<ScaledPixels> {
++        let transform = |point: Point<ScaledPixels>| {
++            self.transformation
++                .apply(point.map(|value| Pixels(value.0)))
++                .map(|value| ScaledPixels(value.0))
++        };
++        let corners = [
++            self.bounds.origin,
++            self.bounds.top_right(),
++            self.bounds.bottom_left(),
++            self.bounds.bottom_right(),
++        ]
++        .map(transform);
++        let mut min = corners[0];
++        let mut max = corners[0];
++        for corner in &corners[1..] {
++            min = min.min(corner);
++            max = max.max(corner);
++        }
++        Bounds::from_corners(min, max)
++    }
+ }
+ 
+ impl From<PolychromeSprite> for Primitive {
+--- a/vendor/gpui-pre/src/window.rs
++++ b/vendor/gpui-pre/src/window.rs
+@@ -4838,6 +4838,7 @@
+                 content_mask,
+                 tile,
+                 opacity,
++                transformation: TransformationMatrix::unit(),
+             });
+         }
+         Ok(())
+@@ -4925,6 +4926,30 @@
+         frame_index: usize,
+         grayscale: bool,
+     ) -> Result<()> {
++        self.paint_image_with_transformation(
++            bounds,
++            image_bounds,
++            corner_radii,
++            data,
++            frame_index,
++            grayscale,
++            TransformationMatrix::unit(),
++        )
++    }
++
++    /// Paint an image with a GPU transform in scaled window coordinates.
++    /// Image cropping and corner radii are evaluated before the transform;
++    /// the ancestor content mask stays in window coordinates.
++    pub fn paint_image_with_transformation(
++        &mut self,
++        bounds: Bounds<Pixels>,
++        image_bounds: Bounds<Pixels>,
++        corner_radii: Corners<Pixels>,
++        data: Arc<RenderImage>,
++        frame_index: usize,
++        grayscale: bool,
++        transformation: TransformationMatrix,
++    ) -> Result<()> {
+         self.invalidator.debug_assert_paint();
+ 
+         let visible_bounds = bounds.intersect(&image_bounds);
+@@ -5010,6 +5035,7 @@
+             corner_radii,
+             tile: sub_tile,
+             opacity,
++            transformation,
+         });
+         Ok(())
+     }
+--- a/vendor/gpui-pre-apple/build.rs
++++ b/vendor/gpui-pre-apple/build.rs
+@@ -101,7 +101,7 @@
+     /// build-script runtime against this crate's manifest dir, so no checkout
+     /// path is baked into a compiled artifact (which corgi rejects).
+     fn find_gpui_crate_dir() -> PathBuf {
+-        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("vendor/gpui")
++        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("../gpui-pre")
+     }
+ 
+     /// To enable runtime compilation, we need to "stitch" the shaders file with the generated header
+--- a/vendor/gpui-pre-apple/src/shaders.metal
++++ b/vendor/gpui-pre-apple/src/shaders.metal
+@@ -675,6 +675,7 @@
+ struct PolychromeSpriteVertexOutput {
+   float4 position [[position]];
+   float2 tile_position;
++  float2 local_position;
+   uint sprite_id [[flat]];
+   float clip_distance [[clip_distance]][4];
+ };
+@@ -682,6 +683,7 @@
+ struct PolychromeSpriteFragmentInput {
+   float4 position [[position]];
+   float2 tile_position;
++  float2 local_position;
+   uint sprite_id [[flat]];
+ };
+ 
+@@ -697,13 +699,14 @@
+   float2 unit_vertex = unit_vertices[unit_vertex_id];
+   PolychromeSprite sprite = sprites[sprite_id];
+   float4 device_position =
+-      to_device_position(unit_vertex, sprite.bounds, viewport_size);
+-  float4 clip_distance = distance_from_clip_rect(unit_vertex, sprite.bounds,
+-                                                 sprite.content_mask.bounds);
++      to_device_position_transformed(unit_vertex, sprite.bounds, sprite.transformation, viewport_size);
++  float4 clip_distance = distance_from_clip_rect_transformed(unit_vertex, sprite.bounds,
++                                                 sprite.content_mask.bounds, sprite.transformation);
+   float2 tile_position = to_tile_position(unit_vertex, sprite.tile, atlas_size);
+   return PolychromeSpriteVertexOutput{
+       device_position,
+       tile_position,
++      unit_vertex * float2(sprite.bounds.size.width, sprite.bounds.size.height) + float2(sprite.bounds.origin.x, sprite.bounds.origin.y),
+       sprite_id,
+       {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w}};
+ }
+@@ -718,7 +721,12 @@
++  // Keep linear filtering inside this image's atlas tile.
++  float2 atlas_size = float2(atlas_texture.get_width(), atlas_texture.get_height());
++  float2 tile_min = (float2(sprite.tile.bounds.origin.x, sprite.tile.bounds.origin.y) + 0.5) / atlas_size;
++  float2 tile_max = (float2(sprite.tile.bounds.origin.x + sprite.tile.bounds.size.width, sprite.tile.bounds.origin.y + sprite.tile.bounds.size.height) - 0.5) / atlas_size;
++  float2 tile_position = clamp(input.tile_position, tile_min, tile_max);
+   float4 sample =
+-      atlas_texture.sample(atlas_texture_sampler, input.tile_position);
++      atlas_texture.sample(atlas_texture_sampler, tile_position);
+   float distance =
+-      quad_sdf(input.position.xy, sprite.bounds, sprite.corner_radii);
++      quad_sdf(input.local_position, sprite.bounds, sprite.corner_radii);
+ 
+   float4 color = sample;
+   if (sprite.grayscale) {
+--- a/vendor/gpui-pre-wgpu/src/shaders.wgsl
++++ b/vendor/gpui-pre-wgpu/src/shaders.wgsl
+@@ -1268,6 +1268,7 @@
+     content_mask: Bounds,
+     corner_radii: Corners,
+     tile: AtlasTile,
++    transformation: TransformationMatrix,
+ }
+ 
+ 
+@@ -1275,6 +1276,7 @@
+     @builtin(position) position: vec4<f32>,
+     @location(0) tile_position: vec2<f32>,
+     @location(1) @interpolate(flat) sprite_id: u32,
++    @location(2) local_position: vec2<f32>,
+     @location(3) clip_distances: vec4<f32>,
+ }
+ 
+@@ -1284,10 +1286,11 @@
+     let sprite = load_poly_sprite(instance_id);
+ 
+     var out = PolySpriteVarying();
+-    out.position = to_device_position(unit_vertex, sprite.bounds);
++    out.position = to_device_position_transformed(unit_vertex, sprite.bounds, sprite.transformation);
+     out.tile_position = to_tile_position(unit_vertex, sprite.tile);
++    out.local_position = unit_vertex * vec2<f32>(sprite.bounds.size) + sprite.bounds.origin;
+     out.sprite_id = instance_id;
+-    out.clip_distances = distance_from_clip_rect(unit_vertex, sprite.bounds, sprite.content_mask);
++    out.clip_distances = distance_from_clip_rect_transformed(unit_vertex, sprite.bounds, sprite.content_mask, sprite.transformation);
+     return out;
+ }
+ 
+@@ -1294,13 +1297,17 @@
+ @fragment
+ fn fs_poly_sprite(input: PolySpriteVarying) -> @location(0) vec4<f32> {
+-    let sample = textureSample(t_sprite, s_sprite, input.tile_position);
++    let sprite = load_poly_sprite(input.sprite_id);
++    // Keep linear filtering inside this image's atlas tile.
++    let atlas_size = vec2<f32>(textureDimensions(t_sprite, 0));
++    let tile_min = (vec2<f32>(sprite.tile.bounds.origin) + vec2<f32>(0.5)) / atlas_size;
++    let tile_max = (vec2<f32>(sprite.tile.bounds.origin) + vec2<f32>(sprite.tile.bounds.size) - vec2<f32>(0.5)) / atlas_size;
++    let sample = textureSample(t_sprite, s_sprite, clamp(input.tile_position, tile_min, tile_max));
+     // Alpha clip after using the derivatives.
+     if (any(input.clip_distances < vec4<f32>(0.0))) {
+         return vec4<f32>(0.0);
+     }
+ 
+-    let sprite = load_poly_sprite(input.sprite_id);
+-    let distance = quad_sdf(input.position.xy, sprite.bounds, sprite.corner_radii);
++    let distance = quad_sdf(input.local_position, sprite.bounds, sprite.corner_radii);
+ 
+     var color = sample;
+     if (sprite.grayscale != 0u) {
+--- a/vendor/gpui-pre-wgpu/src/shaders_webgl.wgsl
++++ b/vendor/gpui-pre-wgpu/src/shaders_webgl.wgsl
+@@ -248,7 +248,7 @@
+ }
+ 
+ fn load_poly_sprite(instance_id: u32) -> PolychromeSprite {
+-    var cursor = instance_cursor(instance_id * 24u);
++    var cursor = instance_cursor(instance_id * 30u);
+     return PolychromeSprite(
+         read_word(&cursor),
+         read_word(&cursor),
+@@ -258,5 +258,6 @@
+         read_bounds(&cursor),
+         read_corners(&cursor),
+         read_atlas_tile(&cursor),
+-    );
+-}
++        read_transformation(&cursor),
++    );
++}
+--- a/vendor/gpui-pre-wgpu/src/wgpu_renderer.rs
++++ b/vendor/gpui-pre-wgpu/src/wgpu_renderer.rs
+@@ -2806,7 +2806,7 @@
+         assert_eq!(std::mem::size_of::<Underline>(), 16 * 4);
+         assert_eq!(std::mem::size_of::<MonochromeSprite>(), 28 * 4);
+         assert_eq!(std::mem::size_of::<SubpixelSprite>(), 28 * 4);
+-        assert_eq!(std::mem::size_of::<PolychromeSprite>(), 24 * 4);
++        assert_eq!(std::mem::size_of::<PolychromeSprite>(), 30 * 4);
+     }
+ 
+     #[test]
