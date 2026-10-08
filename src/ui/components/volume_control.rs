@@ -120,6 +120,8 @@ impl VolumeControl {
     fn balloon(&self, percent: f32, colors: ColorTokens, cx: &mut Context<Self>) -> Stateful<Div> {
         div()
             .id("player-volume-balloon")
+            // 气泡和透明桥共同遮住下方命中区，避免 hover 穿透。
+            .occlude()
             .relative()
             .w(BALLOON_WIDTH)
             .h(BALLOON_HEIGHT + BALLOON_GAP + BRIDGE_OVERLAP)

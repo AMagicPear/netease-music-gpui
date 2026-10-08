@@ -811,6 +811,10 @@ impl Render for PlayerBar {
                                                             .items_center()
                                                             .gap(px(9.))
                                                             .px(px(16.))
+                                                            // GPUI 的 overflow_hidden() 只做矩形裁剪，因此此处加上底部圆角，让背景贴合弹层
+                                                            .when(quality == AudioQualityLevel::Standard, |row| {
+                                                                row.rounded_b(px(10.))
+                                                            })
                                                             .hover(|row| row.bg(colors.muted))
                                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                                 this.playback.update(cx, |playback, cx| {

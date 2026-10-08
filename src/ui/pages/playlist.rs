@@ -6,7 +6,7 @@ use gpui_kit::component::avatar::Avatar;
 use gpui_kit::component::native_menu::NativeMenu;
 use std::cell::Cell;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// 操作按钮的统一高度
 const ACTION_BUTTON_HEIGHT: Pixels = px(36.);
@@ -88,29 +88,68 @@ pub struct PlaylistPage {
     _library_subscription: Subscription,
     /// 原始歌单顺序保存在 detail.songs；这里只保存显示顺序。
     display_order: Vec<usize>,
+    /// 按原始歌曲索引缓存；排序只改变 display_order，不复制展示数据。
+    song_display: Vec<SongDisplay>,
+    columns: Rc<Vec<TableColumn>>,
     sort: Option<(SongSort, bool)>,
     album_share: f32,
     hovered_row: Option<u64>,
     table_header_hidden: Rc<Cell<bool>>,
+    measured_size: Rc<Cell<Option<Size<Pixels>>>>,
+    playing_indicator: Entity<PlayingIndicator>,
+    #[cfg(test)]
+    render_count: usize,
 }
 
-/// 使用同一段 StyledText，标题和副标题一起截断，只出现一个省略号。
-fn title_with_subtitle(song: &Song, colors: ColorTokens) -> StyledText {
-    let Some(subtitle) = song.tns.first().or_else(|| song.alia.first()) else {
-        return StyledText::new(song.name.clone());
-    };
+struct SongDisplay {
+    cover: Option<ImageSource>,
+    title: SharedString,
+    subtitle: std::ops::Range<usize>,
+    album: SharedString,
+    duration: SharedString,
+}
 
-    let subtitle = format!("（{subtitle}）");
-    let title_len = song.name.len();
-    let mut line = song.name.clone();
-    line.push_str(&subtitle);
+impl SongDisplay {
+    fn new(song: &Song) -> Self {
+        let mut title = song.name.clone();
+        let start = title.len();
+        if let Some(subtitle) = song.tns.first().or_else(|| song.alia.first()) {
+            title.push_str(&format!("（{subtitle}）"));
+        }
+        let end = title.len();
+        Self {
+            cover: song
+                .al
+                .pic_url
+                .as_ref()
+                .map(|url| thumbnail_url(url, 72).into()),
+            title: title.into(),
+            subtitle: start..end,
+            album: song
+                .al
+                .name
+                .as_deref()
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or("未知专辑")
+                .to_owned()
+                .into(),
+            duration: format_duration(song.duration()).into(),
+        }
+    }
+}
+
+/// 使用同一段 StyledText，标题和副标题一起截断；颜色随当前主题计算。
+fn title_with_subtitle(display: &SongDisplay, colors: ColorTokens) -> StyledText {
+    if display.subtitle.is_empty() {
+        return StyledText::new(display.title.clone());
+    }
 
     // highlight 先 blend 再 fade_out：先替换 RGB，再恢复 alpha。
     // 因此播放中的红色标题不会污染副标题，也无需预合成背景色。
     let subtitle_color = colors.muted_foreground;
 
-    StyledText::new(line).with_highlights([(
-        title_len..title_len + subtitle.len(),
+    StyledText::new(display.title.clone()).with_highlights([(
+        display.subtitle.clone(),
         HighlightStyle {
             color: Some(subtitle_color.alpha(1.)),
             font_weight: Some(SECONDARY_FONT_WEIGHT),
@@ -214,35 +253,65 @@ fn row_actions(index: u64, colors: ColorTokens) -> AnyElement {
         .into_any_element()
 }
 
-fn playing_indicator(song_id: u64, colors: ColorTokens) -> AnyElement {
-    let ids = [
-        "playlist-playing-bar-0",
-        "playlist-playing-bar-1",
-        "playlist-playing-bar-2",
-    ];
-    let bars = [0.0_f32, 0.33, 0.66]
-        .into_iter()
-        .enumerate()
-        .map(|(index, phase)| {
-            div().w(px(2.)).h(px(2.)).bg(colors.primary).with_animation(
-                (ids[index], song_id),
-                Animation::new(std::time::Duration::from_secs(2)).repeat(),
-                move |bar, progress| {
-                    let height =
-                        2. + ((progress + phase) * std::f32::consts::TAU).sin().abs() * 13.;
-                    bar.h(px(height))
-                },
-            )
-        });
+#[derive(Clone, Copy)]
+struct IndicatorPlacement {
+    bounds: Bounds<Pixels>,
+    mask: ContentMask<Pixels>,
+}
 
-    div()
-        .w(px(12.))
-        .h(px(15.))
-        .flex()
-        .items_end()
-        .justify_between()
-        .children(bars)
-        .into_any_element()
+/// 与缓存的歌单 View 同级挂载，动画通知不经过歌单的视图路径。
+struct PlayingIndicator {
+    placement: Rc<Cell<Option<IndicatorPlacement>>>,
+    started_at: Instant,
+}
+
+fn indicator_bars(bounds: Bounds<Pixels>, progress: f32) -> [Bounds<Pixels>; 3] {
+    [0, 1, 2].map(|index| {
+        let phase = index as f32 * 0.33;
+        let height = px(2. + ((progress + phase) * std::f32::consts::TAU).sin().abs() * 13.);
+        Bounds::new(
+            point(
+                bounds.left() + px(index as f32 * 5.),
+                bounds.bottom() - height,
+            ),
+            size(px(2.), height),
+        )
+    })
+}
+
+impl Render for PlayingIndicator {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let placement = self.placement.clone();
+        let started_at = self.started_at;
+        let color = Theme::global(cx).tokens.colors.primary;
+        canvas(
+            |_, _, _| (),
+            move |_, _, window, cx| {
+                // 此时歌单已完成 prepaint，位置来自本帧或仍有效的缓存。
+                let Some(placement) = placement.get() else {
+                    return;
+                };
+                if !placement.bounds.intersects(&placement.mask.bounds) {
+                    return;
+                }
+                let progress = if cx.reduce_motion() {
+                    0.
+                } else {
+                    started_at.elapsed().as_secs_f32() / 2.
+                };
+                window.with_content_mask(Some(placement.mask), |window| {
+                    for bounds in indicator_bars(placement.bounds, progress) {
+                        window.paint_quad(fill(bounds, color));
+                    }
+                });
+                if !cx.reduce_motion() {
+                    window.request_animation_frame();
+                }
+            },
+        )
+        .absolute()
+        .inset_0()
+    }
 }
 
 impl PlaylistPage {
@@ -259,10 +328,24 @@ impl PlaylistPage {
                 TabItem::new("收藏者"),
             ])
         });
-        let tabs_subscription = cx.subscribe(&tabs, |_, _, _: &TabChanged, cx| cx.notify());
-        let library_subscription = cx.observe(&library, |_, _, cx| cx.notify());
-        let playback_subscription = cx.observe(&playback, |_, _, cx| cx.notify());
+        let tabs_subscription = cx.subscribe(&tabs, |this, _, _: &TabChanged, cx| {
+            this.measured_size.set(None);
+            cx.notify();
+        });
+        let library_subscription = cx.observe(&library, |this, _, cx| {
+            this.measured_size.set(None);
+            cx.notify();
+        });
+        let mut playback_state = playlist_playback_state(playback.read(cx));
+        let playback_subscription = cx.observe(&playback, move |_, playback, cx| {
+            let next = playlist_playback_state(playback.read(cx));
+            if next != playback_state {
+                playback_state = next;
+                cx.notify();
+            }
+        });
         let detail_subscription = cx.observe(&detail, |this, detail, cx| {
+            this.measured_size.set(None);
             let detail = detail.read(cx);
             let changed = this.playlist_id != detail.id;
             if changed {
@@ -274,6 +357,8 @@ impl PlaylistPage {
                 || (0..detail.songs.len()).collect(),
                 |(key, descending)| song_order(&detail.songs, key, descending),
             );
+            this.song_display = detail.songs.iter().map(SongDisplay::new).collect();
+            this.columns = table_columns(this.display_order.len(), this.album_share);
             let playlist = detail.playlist.as_ref();
             let counts = [
                 playlist.map(|playlist| playlist.track_count.to_string()),
@@ -292,6 +377,10 @@ impl PlaylistPage {
             });
             cx.notify();
         });
+        let playing_indicator = cx.new(|_| PlayingIndicator {
+            placement: Rc::new(Cell::new(None)),
+            started_at: Instant::now(),
+        });
         Self {
             detail,
             _detail_subscription: detail_subscription,
@@ -303,11 +392,37 @@ impl PlaylistPage {
             _playback_subscription: playback_subscription,
             _library_subscription: library_subscription,
             display_order: Vec::new(),
+            song_display: Vec::new(),
+            columns: table_columns(0, 0.35),
             sort: None,
             album_share: 0.35,
             hovered_row: None,
             table_header_hidden: Rc::new(Cell::new(false)),
+            measured_size: Rc::new(Cell::new(None)),
+            playing_indicator,
+            #[cfg(test)]
+            render_count: 0,
         }
+    }
+
+    /// 缓存需要确定尺寸；首次布局或宽度改变时先正常测量，之后复用。
+    pub fn content(view: Entity<Self>, width: Pixels, cx: &App) -> AnyElement {
+        let measured = view.read(cx).measured_size.get();
+        match measured {
+            Some(size) if size.width == width => view
+                .cached(
+                    StyleRefinement::default()
+                        .w_full()
+                        .h(size.height)
+                        .flex_shrink(0.),
+                )
+                .into_any_element(),
+            _ => view.into_any_element(),
+        }
+    }
+
+    pub fn playing_overlay(&self) -> AnyElement {
+        self.playing_indicator.clone().into_any_element()
     }
 
     pub fn open(&mut self, id: Option<u64>, cx: &mut Context<Self>) {
@@ -479,16 +594,6 @@ impl PlaylistPage {
             )
     }
 
-    fn columns(&self) -> Rc<Vec<TableColumn>> {
-        Rc::new(vec![
-            TableColumn::new("#", Some(index_column_width(self.display_order.len()))).align_right(),
-            TableColumn::new("标题", None).weight(1. - self.album_share),
-            TableColumn::new("专辑", None).weight(self.album_share),
-            TableColumn::new("喜欢", Some(LIKE_COLUMN_WIDTH)),
-            TableColumn::new("时长", Some(DURATION_COLUMN_WIDTH)),
-        ])
-    }
-
     fn toggle_sort(&mut self, column: SongSort, cx: &mut Context<Self>) {
         self.sort = next_sort(self.sort, column);
         let songs = &self.detail.read(cx).songs;
@@ -557,6 +662,7 @@ impl PlaylistPage {
                         view.update(cx, |this, cx| {
                             if this.album_share != share {
                                 this.album_share = share;
+                                this.columns = table_columns(this.display_order.len(), share);
                                 cx.notify();
                             }
                         });
@@ -603,6 +709,7 @@ impl PlaylistPage {
         let library = self.library.read(cx);
         let detail = self.detail.read(cx);
         let song = &detail.songs[self.display_order[index]];
+        let display = &self.song_display[self.display_order[index]];
         let song_id = song.id;
         let playback = self.playback.read(cx);
         let is_current_song = playback
@@ -666,8 +773,21 @@ impl PlaylistPage {
                     )
                     .into_any_element()
             } else if is_current_song && is_playing {
+                let placement = self.playing_indicator.read(cx).placement.clone();
                 index_cell
-                    .child(playing_indicator(song_id, colors))
+                    .child(
+                        canvas(
+                            move |bounds, window, _| {
+                                placement.set(Some(IndicatorPlacement {
+                                    bounds,
+                                    mask: window.content_mask(),
+                                }));
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .w(px(12.))
+                        .h(px(15.)),
+                    )
                     .into_any_element()
             } else {
                 index_cell
@@ -688,10 +808,10 @@ impl PlaylistPage {
                         .overflow_hidden()
                         .bg(colors.muted)
                         // picUrl 可以直接使用 API 返回的远程地址。
-                        .when_some(song.al.pic_url.clone(), |cover, url| {
+                        .when_some(display.cover.clone(), |cover, source| {
                             // GPUI 的 overflow_hidden 按矩形裁剪，圆角需要直接设置在图片上。
                             cover.child(
-                                img(thumbnail_url(&url, 72))
+                                img(source)
                                     .size_full()
                                     .rounded(px(4.))
                                     .object_fit(ObjectFit::Cover),
@@ -721,7 +841,7 @@ impl PlaylistPage {
                                             colors.foreground
                                         })
                                         .truncate()
-                                        .child(title_with_subtitle(song, colors)),
+                                        .child(title_with_subtitle(display, colors)),
                                 )
                                 .child(
                                     // 歌手/制作人：音质徽章 + 名字。名字不写字号，继承行内的 ROW_TEXT_SIZE。
@@ -766,7 +886,7 @@ impl PlaylistPage {
                 } else {
                     colors.foreground.alpha(0.45)
                 })
-                .child(album_name.unwrap_or("未知专辑").to_owned())
+                .child(display.album.clone())
                 .into_any_element(),
             // 裸 SVG，没有圆形底色：已喜欢是实心红心，未喜欢是勾线灰心。
             svg()
@@ -794,10 +914,29 @@ impl PlaylistPage {
                 // 时长是辅助信息：比 `muted_foreground`(60%) 再淡一档（45%），字重也细一档。
                 .font_weight(SECONDARY_FONT_WEIGHT)
                 .text_color(colors.foreground.alpha(0.45))
-                .child(format_duration(song.duration()))
+                .child(display.duration.clone())
                 .into_any_element(),
         ]
     }
+}
+
+fn table_columns(row_count: usize, album_share: f32) -> Rc<Vec<TableColumn>> {
+    Rc::new(vec![
+        TableColumn::new("#", Some(index_column_width(row_count))).align_right(),
+        TableColumn::new("标题", None).weight(1. - album_share),
+        TableColumn::new("专辑", None).weight(album_share),
+        TableColumn::new("喜欢", Some(LIKE_COLUMN_WIDTH)),
+        TableColumn::new("时长", Some(DURATION_COLUMN_WIDTH)),
+    ])
+}
+
+fn playlist_playback_state(playback: &PlaybackController) -> (Option<u64>, bool, bool) {
+    let snapshot = playback.snapshot();
+    (
+        snapshot.current_song.as_ref().map(|song| song.id),
+        snapshot.is_playing,
+        playback.is_play_requested(),
+    )
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -934,6 +1073,11 @@ fn play_all_button(colors: ColorTokens, compact: bool) -> Button {
 
 impl Render for PlaylistPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        {
+            self.render_count += 1;
+        }
+        self.playing_indicator.read(cx).placement.set(None);
         self.table_header_hidden.set(false);
         let colors = Theme::global(cx).tokens.colors;
         let active_tab = [
@@ -1024,7 +1168,7 @@ impl Render for PlaylistPage {
                 let table = virtual_table(
                     cx.entity(),
                     "playlist-songs",
-                    self.columns(),
+                    self.columns.clone(),
                     self.display_order.len(),
                     |this, index, _, cx| this.song_cells(index, cx),
                     |this, index, cx| this.detail.read(cx).songs[this.display_order[index]].id,
@@ -1204,7 +1348,9 @@ impl Render for PlaylistPage {
                 )
             });
 
+        let measured_size = self.measured_size.clone();
         div()
+            .relative()
             // 封面标题区域
             .child(
                 div().flex().gap_6().child(cover).child(
@@ -1252,15 +1398,186 @@ impl Render for PlaylistPage {
                 )
             })
             .child(content)
+            .child(
+                canvas(
+                    move |bounds, _, _| measured_size.set(Some(bounds.size)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ALBUM_SHARE_MAX, ALBUM_SHARE_MIN, Song, SongSort, next_sort, one_line, play_count_label,
-        resized_album_share, song_order,
+        ALBUM_SHARE_MAX, ALBUM_SHARE_MIN, Song, SongDisplay, SongSort, next_sort, one_line,
+        play_count_label, resized_album_share, song_order,
     };
+
+    #[test]
+    fn indicator_bars_keep_fixed_layout_and_bottom_alignment() {
+        use super::*;
+        let bounds = Bounds::new(point(px(10.), px(20.)), size(px(12.), px(15.)));
+        for progress in [0., 0.25, 0.5, 0.75, 1.] {
+            for (index, bar) in indicator_bars(bounds, progress).into_iter().enumerate() {
+                assert_eq!(bar.left(), bounds.left() + px(index as f32 * 5.));
+                assert_eq!(bar.size.width, px(2.));
+                assert_eq!(bar.bottom(), bounds.bottom());
+                assert!(bar.size.height >= px(2.) && bar.size.height <= px(15.));
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn indicator_frames_reuse_page_but_page_changes_and_scrolling_repaint(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use super::*;
+
+        struct Host {
+            page: Entity<PlaylistPage>,
+            scroll: ScrollHandle,
+        }
+        impl Render for Host {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .size_full()
+                    .relative()
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .id("test-scroll")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.scroll)
+                            .child(PlaylistPage::content(
+                                self.page.clone(),
+                                window.viewport_size().width,
+                                cx,
+                            )),
+                    )
+                    .child(self.page.read(cx).playing_overlay())
+            }
+        }
+        cx.update(gpui_kit::init);
+        let library = cx.new(|_| MusicLibrary::default());
+        let playback = cx.new(|_| PlaybackController::default());
+        let page = cx.new(|cx| PlaylistPage::new(library.clone(), playback, cx));
+        let detail = page.read_with(cx, |page, _| page.detail.clone());
+        detail.update(cx, |detail, cx| {
+            detail.id = Some(1);
+            detail.songs = (1..=20)
+                .map(|id| Song {
+                    id,
+                    name: format!("歌曲{id}"),
+                    ..Default::default()
+                })
+                .collect();
+            cx.notify();
+        });
+        let scroll = ScrollHandle::default();
+        let window = cx.open_window(size(px(800.), px(600.)), |_, _| Host {
+            page: page.clone(),
+            scroll: scroll.clone(),
+        });
+        let draw = |cx: &mut TestAppContext| {
+            cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
+                .unwrap();
+        };
+        draw(cx);
+        draw(cx);
+        let (baseline, measured, placement) = page.read_with(cx, |page, cx| {
+            (
+                page.render_count,
+                page.measured_size.get().unwrap(),
+                page.playing_indicator.read(cx).placement.clone(),
+            )
+        });
+        assert_eq!(measured.width, px(800.));
+        assert!(measured.height > px(600.));
+        placement.set(Some(IndicatorPlacement {
+            bounds: Bounds::new(point(px(10.), px(300.)), size(px(12.), px(15.))),
+            mask: ContentMask {
+                bounds: Bounds::new(Point::default(), size(px(800.), px(600.))),
+            },
+        }));
+        draw(cx);
+        for _ in 0..6 {
+            cx.update_window(window.into(), |_, window, cx| {
+                assert!(window.simulate_next_frame(cx) > 0);
+            })
+            .unwrap();
+            draw(cx);
+        }
+        assert_eq!(
+            page.read_with(cx, |page, _| page.render_count),
+            baseline,
+            "indicator animation must not rebuild the cached page"
+        );
+
+        page.update(cx, |page, cx| page.set_hovered_row(1, true, cx));
+        draw(cx);
+        let after_hover = page.read_with(cx, |page, _| page.render_count);
+        assert!(after_hover > baseline);
+        assert!(
+            placement.get().is_none(),
+            "removed indicator must leave no overlay"
+        );
+
+        scroll.set_offset(point(px(0.), px(-200.)));
+        draw(cx);
+        assert!(
+            page.read_with(cx, |page, _| page.render_count) > after_hover,
+            "scrolling must recompute visible rows and overlay position"
+        );
+
+        detail.update(cx, |detail, cx| {
+            detail.songs.truncate(1);
+            cx.notify();
+        });
+        draw(cx);
+        let shorter = page.read_with(cx, |page, _| page.measured_size.get().unwrap());
+        assert!(
+            shorter.height < measured.height,
+            "song changes must remeasure scroll content"
+        );
+        cx.simulate_window_resize(window.into(), size(px(650.), px(600.)));
+        draw(cx);
+        assert_eq!(
+            page.read_with(cx, |page, _| page.measured_size.get().unwrap().width),
+            px(650.)
+        );
+    }
+
+    #[test]
+    fn cached_song_display_preserves_subtitle_and_thumbnail() {
+        let mut song = Song {
+            name: "歌曲".into(),
+            tns: vec!["翻译".into()],
+            alia: vec!["别名".into()],
+            ..Default::default()
+        };
+        song.al.pic_url = Some("http://p1.music.126.net/cover.jpg".into());
+        let display = SongDisplay::new(&song);
+        assert_eq!(display.title.as_ref(), "歌曲（翻译）");
+        assert_eq!(&display.title[display.subtitle], "（翻译）");
+        assert_eq!(display.album.as_ref(), "未知专辑");
+        assert_eq!(display.duration.as_ref(), "00:00");
+        let Some(gpui::ImageSource::Resource(gpui::Resource::Uri(uri))) = display.cover else {
+            panic!("remote cover must stay a URI resource");
+        };
+        assert_eq!(
+            uri.as_ref(),
+            "https://p1.music.126.net/cover.jpg?param=72y72"
+        );
+        song.tns.clear();
+        assert_eq!(SongDisplay::new(&song).title.as_ref(), "歌曲（别名）");
+        song.alia.clear();
+        assert!(SongDisplay::new(&song).subtitle.is_empty());
+    }
 
     #[test]
     fn play_count_switches_to_wan_at_one_hundred_thousand() {

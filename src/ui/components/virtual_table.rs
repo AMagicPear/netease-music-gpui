@@ -17,11 +17,23 @@ pub const CELL_PADDING: Pixels = px(7.);
 /// hover 投影的 Y 偏移（正数向下）、模糊半径与颜色透明度（颜色取主题墨色，见行 hover 处）。
 const ROW_HOVER_SHADOW_OFFSET_Y: Pixels = px(2.);
 const ROW_HOVER_SHADOW_BLUR: Pixels = px(12.);
+/// 柔光拖尾按几个 sigma 算：GPUI 的投影顶点着色器（`vs_shadow`）恰好把网格外扩 3σ，
+/// 片元里高斯又直接取 `sigma = blur_radius`，所以 3σ 就是能画到的最远处，且那里已经淡到看不见。
+const ROW_HOVER_SHADOW_TAIL_SIGMAS: f32 = 3.;
 
 /// 给阴影留出空间；GPUI 仍会与祖先裁剪框取交集。
 fn rows_clip(bounds: Bounds<Pixels>) -> ContentMask<Pixels> {
+    // 四边都要盖住 3σ 的拖尾，否则尾巴还剩百分之一点几的可见度时就被切断，边缘会留一道硬边。
+    // 调用这份代码的容器要给足水平留白（外层现在是 40px > 36px），超出部分会被祖先裁剪框截回来。
+    let tail = ROW_HOVER_SHADOW_BLUR * ROW_HOVER_SHADOW_TAIL_SIGMAS;
     ContentMask {
-        bounds: bounds.dilate(ROW_HOVER_SHADOW_BLUR + ROW_HOVER_SHADOW_OFFSET_Y),
+        bounds: bounds.extend(Edges {
+            left: tail,
+            right: tail,
+            // 投影整体下移了 offset_y，所以上边可以少留、下边要多留，合起来仍是两个 tail。
+            top: tail - ROW_HOVER_SHADOW_OFFSET_Y,
+            bottom: tail + ROW_HOVER_SHADOW_OFFSET_Y,
+        }),
     }
 }
 
@@ -57,10 +69,14 @@ impl TableColumn {
     }
 }
 
-fn cell(column: &TableColumn, content: AnyElement) -> Div {
+fn cell(column: &TableColumn, content: AnyElement, padded: bool) -> Div {
     // `min_w(0)` 是给 `truncate()` 让路的：flex 项默认最小宽度等于内容宽度，
     // 不压到 0 的话列会被文字撑宽，而不是把文字截断成省略号。
-    let cell = div().min_w(px(0.)).overflow_hidden().child(content);
+    let cell = div()
+        .min_w(px(0.))
+        .overflow_hidden()
+        .px(if padded { CELL_PADDING } else { px(0.) })
+        .child(content);
     match column.width {
         Some(width) => cell.w(width + CELL_PADDING * 2.).flex_none(),
         None => cell
@@ -71,7 +87,11 @@ fn cell(column: &TableColumn, content: AnyElement) -> Div {
 }
 
 /// 表头与数据行共用的骨架：撑满宽度、横向排列、列间距与字号一致，再按列宽把单元格摆好。
-fn table_row(columns: &[TableColumn], cells: impl IntoIterator<Item = AnyElement>) -> Div {
+fn table_row(
+    columns: &[TableColumn],
+    cells: impl IntoIterator<Item = AnyElement>,
+    padded: bool,
+) -> Div {
     div()
         .w_full()
         .flex()
@@ -82,7 +102,7 @@ fn table_row(columns: &[TableColumn], cells: impl IntoIterator<Item = AnyElement
             columns
                 .iter()
                 .zip(cells)
-                .map(|(column, content)| cell(column, content)),
+                .map(|(column, content)| cell(column, content, padded)),
         )
 }
 
@@ -116,6 +136,7 @@ pub fn virtual_table<V: Render>(
                 .child(render_header(column, index))
                 .into_any_element()
         }),
+        false,
     )
     .h(HEADER_HEIGHT)
     .on_children_prepainted(move |bounds, _, _| on_header_layout(bounds))
@@ -134,39 +155,29 @@ pub fn virtual_table<V: Render>(
                     columns.len(),
                     "one cell per table column is required"
                 );
-                let row = table_row(
-                    &columns,
-                    cells.into_iter().map(|content| {
-                        div()
-                            .w_full()
-                            .min_w(px(0.))
-                            .px(CELL_PADDING)
-                            .child(content)
-                            .into_any_element()
-                    }),
-                )
-                .id(("row", key))
-                .h(ROW_HEIGHT)
-                .text_color(colors.foreground)
-                // 悬浮状态交给调用者：`.hover()` 只能改这一层的样式，变不了子元素结构
-                // （比如把序号换成播放键、在标题右侧长出操作图标）。
-                .on_hover({
-                    let on_row_hover = on_row_hover.clone();
-                    cx.listener(move |view, hovered: &bool, _, cx| {
-                        on_row_hover(view, key, *hovered, cx);
+                let row = table_row(&columns, cells, true)
+                    .id(("row", key))
+                    .h(ROW_HEIGHT)
+                    .text_color(colors.foreground)
+                    // 悬浮状态交给调用者：`.hover()` 只能改这一层的样式，变不了子元素结构
+                    // （比如把序号换成播放键、在标题右侧长出操作图标）。
+                    .on_hover({
+                        let on_row_hover = on_row_hover.clone();
+                        cx.listener(move |view, hovered: &bool, _, cx| {
+                            on_row_hover(view, key, *hovered, cx);
+                        })
                     })
-                })
-                // hover 不是「把底色压深」，而是把整行托起来：底色换成项目的表面色
-                .hover(|style| {
-                    style.bg(colors.surface).rounded(px(12.)).shadow(vec![
-                        BoxShadow::new(
-                            px(0.),
-                            ROW_HOVER_SHADOW_OFFSET_Y,
-                            colors.foreground.alpha(0.1),
-                        )
-                        .blur_radius(ROW_HOVER_SHADOW_BLUR),
-                    ])
-                });
+                    // hover 不是「把底色压深」，而是把整行托起来：底色换成项目的表面色
+                    .hover(|style| {
+                        style.bg(colors.surface).rounded(px(12.)).shadow(vec![
+                            BoxShadow::new(
+                                px(0.),
+                                ROW_HOVER_SHADOW_OFFSET_Y,
+                                colors.foreground.alpha(0.1),
+                            )
+                            .blur_radius(ROW_HOVER_SHADOW_BLUR),
+                        ])
+                    });
                 row.into_any_element()
             })
         }),

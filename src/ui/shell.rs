@@ -351,16 +351,22 @@ fn page_header(
 }
 
 impl Render for MainContent {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = Theme::global(cx).tokens.colors;
         let user_profile = self.user_profile.read(cx);
         let active_page = self.active_page;
         let page_scroll = &self.page_scroll[&active_page];
         let page = match active_page {
-            ContentPage::FavoriteMusic | ContentPage::Playlist(_) => {
-                Some(self.playlist_page.clone().into())
-            }
-            _ => self.pages.get(&active_page).cloned(),
+            ContentPage::FavoriteMusic | ContentPage::Playlist(_) => Some(PlaylistPage::content(
+                self.playlist_page.clone(),
+                window.viewport_size().width - self.sidebar_width - px(80.),
+                cx,
+            )),
+            _ => self
+                .pages
+                .get(&active_page)
+                .cloned()
+                .map(IntoElement::into_any_element),
         };
         let drag_offset = Rc::new(Cell::new(px(0.)));
 
@@ -423,10 +429,12 @@ impl Render for MainContent {
                                     ContentPage::FavoriteMusic | ContentPage::Playlist(_)
                                 ),
                                 |container| {
-                                    container.child(
-                                        self.playlist_page
-                                            .update(cx, |page, cx| page.floating_header(cx)),
-                                    )
+                                    container
+                                        .child(self.playlist_page.read(cx).playing_overlay())
+                                        .child(
+                                            self.playlist_page
+                                                .update(cx, |page, cx| page.floating_header(cx)),
+                                        )
                                 },
                             )
                             // 滚动条放在外层，避免它的边界被计入滚动内容高度。
