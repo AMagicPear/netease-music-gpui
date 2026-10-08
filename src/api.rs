@@ -35,7 +35,7 @@ impl MusicApi {
 
         let runtime = Runtime::new()?;
         let audio_http = reqwest::Client::builder()
-            .tls_backend_rustls()
+            .use_rustls_tls()
             .connect_timeout(Duration::from_secs(10))
             .read_timeout(Duration::from_secs(20))
             .build()?;
