@@ -4,7 +4,7 @@ mod output;
 #[cfg(test)]
 mod tests;
 
-pub use output::BufferedSource;
+pub use output::{BufferedSource, DeviceOutput};
 
 use crate::models::{AudioQualityLevel, AudioSourceInfo};
 use download::Cache;
@@ -18,7 +18,7 @@ use std::{
 };
 
 /// 单个音源的生命周期：一次 seek 使旧读取器和旧 PCM 过期；取消则终止整个音源。
-/// 与控制器用于切歌/重载音质的 load_revision 相互独立。
+/// 与控制器用于切歌/重载音质的 snapshot revision 相互独立。
 #[derive(Default)]
 struct StreamControl {
     generation: AtomicU64,
@@ -34,7 +34,6 @@ impl StreamControl {
 
 /// 组装下载、解码和输出，并统一拥有跳转与取消的生命周期。
 pub struct StreamingAudio {
-    control: Arc<StreamControl>,
     cache: Arc<Cache>,
     pcm: Arc<Pcm>,
     download: tokio::task::AbortHandle,
@@ -50,12 +49,11 @@ impl StreamingAudio {
         let control = Arc::new(StreamControl::default());
         let (cache, download) = Cache::open(http, &source, control.clone()).await?;
         let pcm = Arc::new(Pcm {
-            control: control.clone(),
+            control,
             ..Default::default()
         });
         pcm.buffering.store(true, Ordering::Release);
         let mut audio = Self {
-            control,
             cache: cache.clone(),
             pcm: pcm.clone(),
             download,
@@ -91,7 +89,7 @@ impl StreamingAudio {
         self.pcm
             .position_us
             .store(position.as_micros() as u64, Ordering::Release);
-        let generation = self.control.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let generation = self.pcm.control.generation.fetch_add(1, Ordering::AcqRel) + 1;
         self.pcm.changed.notify_all();
         // 持有 PCM 锁直到旧下载被中断，避免取消新代次已提交的请求。
         self.cache.interrupt(generation);
@@ -121,7 +119,7 @@ impl Drop for StreamingAudio {
         self.download.abort();
         {
             let _data = self.pcm.data.lock().unwrap();
-            self.control.cancelled.store(true, Ordering::Release);
+            self.pcm.control.cancelled.store(true, Ordering::Release);
             self.pcm.changed.notify_all();
         }
         // 在各自的等待锁内通知，防止读者在检查取消后才进入等待而漏掉唤醒。

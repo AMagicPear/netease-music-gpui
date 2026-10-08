@@ -5,7 +5,6 @@ use super::{
     output::Chunk,
     *,
 };
-use rodio::Source;
 use std::{
     collections::BTreeMap,
     io::Read,
@@ -152,11 +151,16 @@ async fn wait_pcm(pcm: &Arc<Pcm>) {
     .unwrap();
 }
 
+fn read_frame(output: &mut BufferedSource) -> Option<Vec<f32>> {
+    let mut frame = vec![0.; output.channels() as usize];
+    output.read_frame(&mut frame).then_some(frame)
+}
+
 async fn next_audible(output: &mut BufferedSource) -> f32 {
     // 回调碰到生产者持锁会输出一帧静音，这是设计行为；测试等待真正消费 PCM。
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            let sample = output.next().expect("播放源不应在取消前退出");
+            let sample = read_frame(output).expect("播放源不应在取消前退出")[0];
             if sample != 0. {
                 return sample;
             }
@@ -174,7 +178,6 @@ fn source(pcm: Arc<Pcm>) -> BufferedSource {
         sample_rate: 1000,
         chunk: None,
         sample_index: 0,
-        channel_index: 0,
     }
 }
 
@@ -211,7 +214,6 @@ async fn cache_is_bounded_and_seek_cannot_hide_terminal_download_errors() {
     }
     let task = tokio::spawn(async {});
     let audio = StreamingAudio {
-        control,
         cache: cache.clone(),
         pcm,
         download: task.abort_handle(),
@@ -306,7 +308,10 @@ async fn seek_fetches_target_range_and_cached_return_interrupts_stalled_download
     .unwrap();
     assert_eq!(next_audible(&mut source).await, 1000. / 32768.);
     audio.seek(Duration::from_secs(10));
-    assert_eq!(source.next(), Some(0.));
+    assert_eq!(
+        read_frame(&mut source),
+        Some(vec![0.; source.channels() as usize])
+    );
     // 直接访问目标区间，不读取位于中间的第 1、2 块。
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(3), server.requests.recv())
@@ -321,7 +326,7 @@ async fn seek_fetches_target_range_and_cached_return_interrupts_stalled_download
     assert!(server.requests.try_recv().is_err(), "回退应复用文件头缓存");
     assert!(audio.error().is_none());
     drop(audio);
-    assert_eq!(source.next(), None);
+    assert_eq!(read_frame(&mut source), None);
 }
 
 #[tokio::test]
@@ -357,7 +362,7 @@ async fn dropping_audio_wakes_a_reader_waiting_for_a_stalled_range() {
             .unwrap()
             .is_err()
     );
-    assert_eq!(output.next(), None);
+    assert_eq!(read_frame(&mut output), None);
 }
 
 #[tokio::test]
@@ -393,11 +398,14 @@ async fn ignored_range_falls_back_and_eof_source_remains_seekable() {
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         while !audio.finished() {
             assert!(std::time::Instant::now() < deadline);
-            assert!(source.next().is_some());
+            assert!(read_frame(&mut source).is_some());
             std::thread::yield_now();
         }
         assert!(audio.error().is_none());
-        assert_eq!(source.next(), Some(0.));
+        assert_eq!(
+            read_frame(&mut source),
+            Some(vec![0.; source.channels() as usize])
+        );
         (audio, source)
     })
     .await
@@ -419,7 +427,7 @@ async fn truncated_audio_is_error_instead_of_normal_eof() {
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         while audio.error().is_none() {
             assert!(std::time::Instant::now() < deadline);
-            source.next();
+            read_frame(&mut source);
             std::thread::yield_now();
         }
         assert!(!audio.finished());
@@ -440,8 +448,8 @@ async fn mp3_hires_flac_and_aac_decode_seek_and_finish_without_a_device() {
         let (audio, mut source) = open_with_duration(&server, Some(Duration::from_secs(1))).await;
         assert!((audio.duration.unwrap().as_secs_f64() - 1.).abs() < 0.1);
         if bytes.starts_with(b"fLaC") {
-            assert_eq!(source.sample_rate().get(), 96000);
-            assert_eq!(source.channels().get(), 2);
+            assert_eq!(source.sample_rate(), 96000);
+            assert_eq!(source.channels(), 2);
             let pcm = audio.pcm.clone();
             tokio::task::spawn_blocking(move || {
                 let data = pcm.data.lock().unwrap();
@@ -464,7 +472,7 @@ async fn mp3_hires_flac_and_aac_decode_seek_and_finish_without_a_device() {
             let mut audible = false;
             while !audio.finished() && audio.error().is_none() {
                 assert!(std::time::Instant::now() < deadline);
-                audible |= source.next().unwrap().abs() > 0.001;
+                audible |= read_frame(&mut source).unwrap()[0].abs() > 0.001;
                 std::thread::yield_now();
             }
             assert!(audible);
@@ -514,7 +522,7 @@ async fn corrupt_flac_reports_decoder_error() {
                     std::time::Instant::now() < deadline,
                     "损坏的 FLAC 必须报告错误"
                 );
-                output.next();
+                read_frame(&mut output);
                 std::thread::yield_now();
             }
         })
@@ -529,10 +537,9 @@ fn output_is_nonblocking_and_silence_preserves_stereo_alignment_and_progress() {
     let mut output = source(pcm.clone());
     {
         let _busy = pcm.data.lock().unwrap();
-        assert_eq!(output.next(), Some(0.));
-        assert_eq!(output.next(), Some(0.));
+        assert_eq!(read_frame(&mut output), Some(vec![0., 0.]));
     }
-    assert_eq!(output.next(), Some(0.));
+    assert_eq!(pcm.position_us.load(Ordering::Acquire), 0);
     {
         let mut data = pcm.data.lock().unwrap();
         data.queued_samples = 2;
@@ -542,10 +549,7 @@ fn output_is_nonblocking_and_silence_preserves_stereo_alignment_and_progress() {
             generation: 0,
         });
     }
-    assert_eq!(output.next(), Some(0.));
-    assert_eq!(pcm.position_us.load(Ordering::Acquire), 0);
-    assert_eq!(output.next(), Some(0.25));
-    assert_eq!(output.next(), Some(0.75));
+    assert_eq!(read_frame(&mut output), Some(vec![0.25, 0.75]));
     assert_eq!(pcm.position_us.load(Ordering::Acquire), 1000);
     output.chunk = Some(Chunk {
         samples: vec![0.5, 0.5],
@@ -554,8 +558,7 @@ fn output_is_nonblocking_and_silence_preserves_stereo_alignment_and_progress() {
     });
     pcm.control.generation.store(1, Ordering::Release);
     pcm.position_us.store(5_000_000, Ordering::Release);
-    assert_eq!(output.next(), Some(0.));
-    assert_eq!(output.next(), Some(0.));
+    assert_eq!(read_frame(&mut output), Some(vec![0., 0.]));
     assert_eq!(pcm.position_us.load(Ordering::Acquire), 5_000_000);
     // 解码结束不代表输出结束，必须先消费最后一个完整声道帧。
     let mut data = pcm.data.lock().unwrap();
@@ -567,18 +570,79 @@ fn output_is_nonblocking_and_silence_preserves_stereo_alignment_and_progress() {
     });
     data.decode_finished = true;
     drop(data);
-    assert_eq!(output.next(), Some(0.25));
+    assert_eq!(read_frame(&mut output), Some(vec![0.25, 0.75]));
     assert!(!pcm.output_drained.load(Ordering::Acquire));
-    assert_eq!(output.next(), Some(0.75));
-    assert!(!pcm.output_drained.load(Ordering::Acquire));
-    assert_eq!(output.next(), Some(0.));
+    assert_eq!(read_frame(&mut output), Some(vec![0., 0.]));
     assert!(pcm.output_drained.load(Ordering::Acquire));
-    // 输出只在完整声道帧的起点检查状态，先消费完这帧静音。
-    assert_eq!(output.next(), Some(0.));
 
     let mut data = pcm.data.lock().unwrap();
     data.error = Some("损坏音频".into());
     drop(data);
-    assert_eq!(output.next(), Some(0.));
+    assert_eq!(read_frame(&mut output), Some(vec![0., 0.]));
     assert!(!pcm.output_drained.load(Ordering::Acquire));
+    pcm.control.cancelled.store(true, Ordering::Release);
+    let mut frame = [1_f32; 2];
+    assert!(!output.read_frame(&mut frame));
+    assert_eq!(frame, [0., 0.]);
+}
+
+#[test]
+fn device_output_converts_frames_and_pause_and_seek_preserve_state() {
+    fn pcm() -> Arc<Pcm> {
+        let pcm = Arc::new(Pcm::default());
+        let samples = vec![0.2, 0.6, 0.4, 0.8, 0.6, 1.0, 0.8, 0.4];
+        let mut data = pcm.data.lock().unwrap();
+        data.queued_samples = samples.len();
+        data.chunks.push_back(Chunk {
+            samples,
+            position: Duration::ZERO,
+            generation: 0,
+        });
+        drop(data);
+        pcm
+    }
+    let shared = pcm();
+    let mut output = DeviceOutput::new(source(shared.clone()), 1000);
+    let mut buffer = [1_f32; 4];
+    output.write(&mut buffer, 2, false, 0.5);
+    assert_eq!(buffer, [0.; 4]);
+    assert_eq!(shared.position_us.load(Ordering::Acquire), 0);
+    output.write(&mut buffer, 2, true, 0.5);
+    assert_eq!(buffer, [0.1, 0.3, 0.2, 0.4]);
+    assert_eq!(shared.position_us.load(Ordering::Acquire), 2000);
+
+    let mut mono = DeviceOutput::new(source(pcm()), 1000);
+    let mut floats = [0_f32; 2];
+    mono.write(&mut floats, 1, true, 1.);
+    assert!((floats[0] - 0.4).abs() < 1e-6);
+    assert!((floats[1] - 0.6).abs() < 1e-6);
+    let mut silence = [0_u16; 4];
+    mono.write(&mut silence, 2, false, 1.);
+    assert_eq!(silence, [32768; 4]);
+
+    for (rate, expected) in [(2000, [0.2, 0.3, 0.4, 0.5]), (500, [0.2, 0.6, 0., 0.])] {
+        let shared = pcm();
+        let mut output = DeviceOutput::new(source(shared.clone()), rate);
+        let mut frames = [0_f32; 8];
+        output.write(&mut frames, 2, true, 1.);
+        for (frame, expected) in frames.chunks(2).zip(expected) {
+            assert!((frame[0] - expected).abs() < 1e-6, "{rate}: {frames:?}");
+        }
+        shared.control.generation.store(1, Ordering::Release);
+        let mut data = shared.data.lock().unwrap();
+        data.queued_samples = 2;
+        data.chunks.push_back(Chunk {
+            samples: vec![-0.5, -0.5],
+            position: Duration::from_secs(5),
+            generation: 1,
+        });
+        drop(data);
+        let mut frame = [0_f32; 2];
+        output.write(&mut frame, 2, true, 1.);
+        assert_eq!(
+            frame,
+            [-0.5, -0.5],
+            "seek must discard interpolation history"
+        );
+    }
 }

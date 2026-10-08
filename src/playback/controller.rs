@@ -18,8 +18,6 @@ pub struct PlaybackController {
     state: PlaybackSnapshot,
     engine: PlayerEngine,
     queue: Vec<Song>,
-    // 切歌或重载音质递增；与音源内部的 seek generation 分开。
-    load_revision: u64,
     play_when_ready: bool,
     request: Option<tokio::task::AbortHandle>,
     pending_position: Duration,
@@ -109,8 +107,7 @@ impl PlaybackController {
 
     fn stop(&mut self) {
         // 使停止之前的加载结果失效，防止异步完成后重新开始播放。
-        self.load_revision = self.load_revision.wrapping_add(1);
-        self.state.revision = self.load_revision;
+        self.state.revision = self.state.revision.wrapping_add(1);
         if let Some(request) = self.request.take() {
             request.abort();
         }
@@ -151,9 +148,8 @@ impl PlaybackController {
     }
 
     fn load_song(&mut self, song: Song, position: Duration, play: bool, cx: &mut Context<Self>) {
-        self.load_revision = self.load_revision.wrapping_add(1);
-        let load_revision = self.load_revision;
-        self.state.revision = load_revision;
+        self.state.revision = self.state.revision.wrapping_add(1);
+        let load_revision = self.state.revision;
         self.pending_position = position;
         if let Some(request) = self.request.take() {
             request.abort();
@@ -168,11 +164,6 @@ impl PlaybackController {
         self.state.actual_quality = None;
         self.state.error = None;
         self.play_when_ready = play;
-        if let Err(error) = self.engine.ensure_device() {
-            self.fail(error);
-            cx.notify();
-            return;
-        }
         self.state.loading = true;
         let api = MusicApi::global(cx);
         let client = api.client.clone();
@@ -203,7 +194,7 @@ impl PlaybackController {
         result: Result<(StreamingAudio, BufferedSource), String>,
     ) -> bool {
         // 同一首歌也可能重新请求；旧结果在这里丢弃，资源会随之取消。
-        if self.load_revision != load_revision {
+        if self.state.revision != load_revision {
             return false;
         }
         self.request = None;
@@ -393,7 +384,7 @@ mod tests {
     #[test]
     fn system_stop_invalidates_pending_load_and_resets_position() {
         let mut controller = PlaybackController::default();
-        controller.load_revision = 3;
+        controller.state.revision = 3;
         controller.play_when_ready = true;
         controller.state.loading = true;
         controller.state.position = Duration::from_secs(12);
@@ -406,7 +397,7 @@ mod tests {
         assert_eq!(controller.state.position, Duration::ZERO);
         assert_eq!(controller.pending_position, Duration::ZERO);
         assert!(controller.state.error.is_none());
-        assert_eq!(controller.state.revision, controller.load_revision);
+        assert_eq!(controller.state.revision, 4);
     }
 
     #[test]
@@ -430,7 +421,7 @@ mod tests {
     #[test]
     fn obsolete_load_cannot_replace_current_snapshot() {
         let mut controller = PlaybackController::default();
-        controller.load_revision = 3;
+        controller.state.revision = 3;
         controller.state.loading = true;
         assert!(!controller.finish(1, Err("旧请求失败".into())));
         assert!(controller.snapshot().loading);

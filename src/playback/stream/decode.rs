@@ -255,7 +255,6 @@ fn decode_generation(
                     sample_rate: spec.rate,
                     chunk: None,
                     sample_index: 0,
-                    channel_index: 0,
                 };
                 if sender.send((source, duration)).is_err() {
                     return Ok(());

@@ -81,7 +81,7 @@ python3 scripts/test_package.py
 | GPUI / gpui-kit | 原生窗口、布局、组件与 Entity 状态管理 |
 | ncm-api-rs | 网易云账号、歌单、歌曲详情和播放地址接口 |
 | Tokio / reqwest | 异步网络请求与音频下载 |
-| rodio | 音频设备输出 |
+| CPAL | 音频设备与直接 PCM 输出 |
 | Symphonia | 音频格式解析、跳转和可报告错误的后台解码 |
 | serde / serde_json | API 数据解析 |
 
@@ -102,7 +102,7 @@ src/
 │   └── stream/
 │       ├── download.rs      HTTP Range 下载和字节缓存
 │       ├── decode.rs        Symphonia 解析、定位和解码
-│       ├── output.rs        PCM 队列和 rodio Source 适配
+│       ├── output.rs        PCM 队列、采样率与声道转换
 │       └── tests.rs         本地 HTTP 与音频回归测试
 └── ui/
     ├── shell.rs             主窗口布局和导航协调

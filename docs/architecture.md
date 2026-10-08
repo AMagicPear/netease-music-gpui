@@ -16,12 +16,12 @@ src/
 ├── playback.rs              对外类型与只读 PlaybackSnapshot
 ├── playback/
 │   ├── controller.rs        GPUI Entity：控制入口、队列、请求、通知
-│   ├── engine.rs            rodio 设备、当前播放源、暂停、音量
+│   ├── engine.rs            CPAL 输出流、暂停、音量与设备错误
 │   ├── stream.rs            音源组装、跳转和取消生命周期
 │   └── stream/
 │       ├── download.rs      HTTP Range 下载、字节缓存、Read + Seek
 │       ├── decode.rs        Symphonia 解析、定位和解码
-│       ├── output.rs        有界 PCM 队列与 rodio Source 适配
+│       ├── output.rs        有界 PCM 队列、采样率与声道转换
 │       └── tests.rs         本地 HTTP 与音频回归测试
 └── ui/
     ├── shell.rs             主窗口布局、导航协调、页面生命周期
@@ -74,7 +74,7 @@ flowchart LR
     S --> D[download: HTTP Range 字节缓存]
     D -->|CacheReader: Read + Seek| F[decode: Symphonia 解码]
     F --> P[output: 有界 PCM 队列]
-    P -->|BufferedSource| E[PlayerEngine: rodio Player / MixerDeviceSink]
+    P -->|BufferedSource| E[PlayerEngine: CPAL 输出回调]
     E --> C
     C -->|snapshot + notify| UI
 ```
@@ -83,9 +83,9 @@ flowchart LR
 
 首次请求发送 HTTP Range，以实际的 206 响应确认支持分段下载，并校验 Content-Range、文件长度和响应数据长度。缓存按 256 KiB 分块，解码器需要哪个字节区间，就请求哪个区间；Range 缓存上限为 32 MiB，保留文件头，超出时淘汰旧块。已有 ETag 或 Last-Modified 时使用 If-Range，防止混用发生变化的资源。服务器忽略首次 Range 并返回 200 时，自动回退到顺序下载，缓存上限为 256 MiB。
 
-分段数据到达时立即发布到缓存，不必等满一个 256 KiB 块才开始播放；尚未完成的首次请求同样可以被新的 seek 抢占。后台 Symphonia 解码线程通过 `Read + Seek` 读取缓存，缺数据时在该线程等待。解码结果进入约 400 ms 的有界 PCM 队列，容量依据实际样本量计算，避免 Hi-Res 小包导致缓冲时长缩水；rodio 输出线程只取已准备好的样本，缺数据时输出完整声道帧的静音，不等待网络。解码错误、文件截断与校验失败会记录为错误，不作为正常 EOF 自动切歌。
+分段数据到达时立即发布到缓存，不必等满一个 256 KiB 块才开始播放；尚未完成的首次请求同样可以被新的 seek 抢占。后台 Symphonia 解码线程通过 `Read + Seek` 读取缓存，缺数据时在该线程等待。解码结果进入约 400 ms 的有界 PCM 队列，容量依据实际样本量计算，避免 Hi-Res 小包导致缓冲时长缩水；CPAL 输出回调只取已准备好的样本，缺数据时输出完整声道帧的静音，不等待网络。解码错误、文件截断与校验失败会记录为错误，不作为正常 EOF 自动切歌。
 
-引擎长期保留 MixerDeviceSink，换歌时创建新的 Player，释放旧播放源并取消旧下载。控制器每 250 ms 读取已交给输出链路的歌曲样本位置，缓冲静音不计入进度；这不是声卡实际输出时间的精确测量。正常 EOF 且 PCM 消费完毕后，由控制器自动切歌；播放源在此之前仍留在 Player 中，避免末尾 seek 与源被移除发生竞争。队列末尾停止；下载或解码失败则停止并记录错误，点击播放可重试，保留失败时的播放位置。请求代次防止过期加载结果覆盖新歌曲。
+引擎首次播放时使用默认输出设备的 `default_output_config()` 创建 CPAL 输出流，固定输出声道数和采样率；正常切歌或停止只释放音源、取消旧下载，保留输出流。歌曲采样率不同于输出配置时，采用线性插值调整采样率，不再按歌曲搜索设备配置。设备报错后释放输出流，下次播放重新打开设备；暂不监听默认设备或系统采样率设置的实时变化。相同采样率直接输出；单声道复制到设备声道，多声道转单声道取平均，其余按声道索引输出，多余设备声道写静音，不实现环绕声布局混音。线性插值不是带限重采样，降采样的抗混叠质量有限。回调缓冲在创建时分配；暂停时仅写静音，不消费 PCM，音量通过原子值在回调中应用。音源替换通过独立互斥锁同步，设备回调只使用 `try_lock`，遇到切歌持锁便写静音，不等待控制器。设备错误反馈给控制器并停止播放。控制器每 1000 ms 读取已消费的歌曲样本位置，缓冲静音不计入进度；这不是声卡实际输出时间的精确测量，重采样还会预读最多两帧。正常 EOF 且 PCM 消费完毕后，由控制器自动切歌；输出源保留到控制器停止，末尾仍可 seek。队列末尾停止；下载或解码失败则停止并记录错误，点击播放可重试，保留失败时的播放位置。请求代次防止过期加载结果覆盖新歌曲。
 
 Seek 清空旧 PCM 并立即提交目标，同时唤醒正在等待网络的旧读取器并取消旧 Range 请求。解码线程为新 seek 重建读取器和解码器，避免被中断的解析留下半包状态；seek 失败后线程仍等待后续跳转，可以恢复。新一轮解析需要的文件头来自缓存，随后请求目标附近区间。FLAC、MP4 使用格式自身的定位机制；MP3 使用 Coarse 定位，VBR 文件的跳转位置可能近似，避免 Accurate 模式从头扫描。服务器不支持 Range 时，未下载的位置仍需等待顺序下载。
 
@@ -95,9 +95,9 @@ Seek 清空旧 PCM 并立即提交目标，同时唤醒正在等待网络的旧�
 
 ## 流控制与状态归属
 
-`StreamingAudio` 组装三个内部模块，并负责一次跳转的协调和整个音源的取消。下载缓存不再引用 PCM 队列：两者共享独立的 `StreamControl`，其中只有跳转代次和一个取消标志。跳转时持有 PCM 锁，先清空旧样本、提交目标并递增代次，再中断旧下载，最后释放锁。这样解码线程不会先启动新一轮读取、随后又被旧请求的取消操作打断。释放音源时取消下载任务，并在各自等待锁内唤醒字节读者和解码线程；输出源看到同一个取消标志后结束。
+`StreamingAudio` 组装三个内部模块，并负责一次跳转的协调和整个音源的取消。下载缓存不再引用 PCM 队列：两者共享独立的 `StreamControl`，其中只有跳转代次和一个取消标志。跳转时持有 PCM 锁，先清空旧样本、提交目标并递增代次，再中断旧下载，最后释放锁。这样解码线程不会先启动新一轮读取、随后又被旧请求的取消操作打断。释放音源时取消下载任务，并在各自等待锁内唤醒字节读者和解码线程；音源统一从 `pcm.control` 访问跳转代次和取消标志，不重复保存控制句柄。输出源按完整声道帧读取 PCM，缺数据时整帧写静音，取消后返回 false 并写静音。
 
-这里有两种独立的代次。控制器的 `load_revision` 在切歌或重载音质时递增，同时写入快照 `revision`，隔离旧的接口结果和 UI 拖动事件。音源内部的 `StreamControl.generation` 只在 seek 时递增，使旧读取器、解码结果和 PCM 失效，但保留同一资源已下载的字节。
+这里有两种独立的代次。控制器只保存快照中的 `revision`，在切歌、重载音质或停止时递增，同时隔离旧的接口结果和 UI 拖动事件。音源内部的 `StreamControl.generation` 只在 seek 时递增，使旧读取器、解码结果和 PCM 失效，但保留同一资源已下载的字节。
 
 | 状态 | 写入者 | 含义 |
 | --- | --- | --- |
@@ -105,7 +105,7 @@ Seek 清空旧 PCM 并立即提交目标，同时唤醒正在等待网络的旧�
 | `play_when_ready` | 控制器 | 用户的播放意图，加载期间也能暂停或继续。 |
 | `is_playing` | 控制器 | 音源已加载并请求播放；缓冲时可能仍为 true。 |
 | `decode_finished` | 解码线程；seek 时由音源重置 | 解码正常结束，仍可能有未消费的 PCM。 |
-| `output_drained` | 输出源；seek 时由音源重置 | 最后一个 PCM 已交给 rodio，控制器才允许自动切歌；不表示设备缓冲也已排空。 |
+| `output_drained` | 输出源；seek 时由音源重置 | 最后一个 PCM 已交给输出端，控制器才允许自动切歌；不表示设备缓冲也已排空。 |
 | `buffering` | 输出源，控制器同步到快照 | 输出暂时取不到 PCM；快照在暂停或加载时为 false。 |
 | `position_us` | 输出源；seek 时由音源设置目标 | 已交给输出链路的歌曲位置，缓冲静音不推进它。 |
 
@@ -121,6 +121,16 @@ Seek 清空旧 PCM 并立即提交目标，同时唤醒正在等待网络的旧�
 
 ## 依赖版本
 
-使用 rodio 0.22.2、Symphonia 0.5.5 和 reqwest 0.13.5。Symphonia 直接处理 MP3、FLAC、AAC、ALAC、Vorbis 和 PCM 解码，rodio 负责设备输出，不开启录音功能。GPUI 与其 reqwest 适配器保持一致的 0.3.7。
+使用 CPAL 0.17.3、Symphonia 0.5.5 和 reqwest 0.13.5。Symphonia 处理 MP3、FLAC、AAC、ALAC、Vorbis 和 PCM 解码，CPAL 直接输出 PCM，不经过混音器或播放器包装。GPUI 与其 reqwest 适配器保持一致的 0.3.7。
 
 SDK 内部依赖的 reqwest 0.12、GPUI 分支依赖等由各自上游决定，本项目的音频下载使用 0.13；不能只修改锁文件就把这些类型替换成同一个版本。
+
+## 输出结构参考
+
+核对了以下固定版本源码，借鉴输出流复用、音源适配固定输出格式的结构，没有复制其代码或引入其播放器抽象：
+
+- [Psst CPAL 输出](https://github.com/jpochyla/psst/blob/3c3621aa79f820c737dd899e7e359b1359292466/psst-core/src/audio/output/cpal.rs)：优先双声道 F32 / 44.1 kHz，否则回退到设备默认配置；通过替换回调音源复用输出流。
+- [Psst 音源适配](https://github.com/jpochyla/psst/blob/3c3621aa79f820c737dd899e7e359b1359292466/psst-core/src/player/worker.rs)：不同采样率使用 libsamplerate 的 SincMediumQuality，并映射输出声道；重采样包装由输出回调拉取，不是在解码线程里完成。
+- [librespot 输出配置](https://github.com/librespot-org/librespot/blob/e023adbbf017ae1fc10d01531dbe50c409786f2d/playback/src/audio_backend/rodio.rs)：优先固定双声道 44.1 kHz，再回退到设备默认采样率和配置；它的 Symphonia 解码路径限制输入为双声道 44.1 kHz，不是任意采样率播放的完整参考。
+
+本项目直接采用设备默认配置，保留已有线性重采样与多格式输出，未引入 Psst 的 actor、音源 trait 或 sinc 重采样依赖。设备回调目前仍负责重采样；带限重采样和后台转换未实现。
