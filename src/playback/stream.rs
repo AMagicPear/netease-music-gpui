@@ -4,7 +4,7 @@ mod output;
 #[cfg(test)]
 mod tests;
 
-pub use output::{BufferedSource, DeviceOutput};
+pub use output::BufferedSource;
 
 use crate::models::{AudioQualityLevel, AudioSourceInfo};
 use download::Cache;

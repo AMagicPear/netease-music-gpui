@@ -1,5 +1,4 @@
 use super::StreamControl;
-use cpal::{FromSample, SizedSample};
 use std::{
     collections::VecDeque,
     sync::{
@@ -40,8 +39,8 @@ pub(super) struct Pcm {
 /// 网络不足与 EOF 均输出静音；播放源保持可 seek，自动切歌由控制器接管。
 pub struct BufferedSource {
     pub(super) pcm: Arc<Pcm>,
-    pub(super) channels: u16,
-    pub(super) sample_rate: u32,
+    pub(crate) channels: u16,
+    pub(crate) sample_rate: u32,
     pub(super) chunk: Option<Chunk>,
     pub(super) sample_index: usize,
 }
@@ -98,96 +97,12 @@ impl BufferedSource {
         true
     }
 
-    pub fn channels(&self) -> u16 {
-        self.channels
-    }
-
-    pub fn sample_rate(&self) -> u32 {
-        self.sample_rate
-    }
-}
-
-/// CPAL 回调拥有输出端；缓冲在创建时分配，回调不等待网络或 PCM 锁。
-pub struct DeviceOutput {
-    source: BufferedSource,
-    current: Vec<f32>,
-    next: Vec<f32>,
-    phase: f64,
-    ratio: f64,
-    generation: u64,
-    primed: bool,
-}
-
-impl DeviceOutput {
-    pub fn new(source: BufferedSource, sample_rate: u32) -> Self {
-        let channels = source.channels() as usize;
-        let ratio = f64::from(source.sample_rate()) / f64::from(sample_rate);
-        Self {
-            source,
-            current: vec![0.; channels],
-            next: vec![0.; channels],
-            phase: 0.,
-            ratio,
-            generation: 0,
-            primed: false,
-        }
-    }
-
-    pub fn write<T: SizedSample + FromSample<f32>>(
-        &mut self,
-        output: &mut [T],
-        channels: usize,
-        playing: bool,
-        volume: f32,
-    ) {
-        if !playing {
-            output.fill(T::from_sample(0.));
-            return;
-        }
-        for frame in output.chunks_mut(channels) {
-            let generation = self.source.pcm.control.generation.load(Ordering::Acquire);
-            if generation != self.generation {
-                self.generation = generation;
-                self.primed = false;
-                self.phase = 0.;
-            }
-            if self.ratio == 1. {
-                self.source.read_frame(&mut self.current);
-            } else {
-                if !self.primed {
-                    self.source.read_frame(&mut self.current);
-                    self.source.read_frame(&mut self.next);
-                    self.primed = true;
-                }
-                while self.phase >= 1. {
-                    std::mem::swap(&mut self.current, &mut self.next);
-                    self.source.read_frame(&mut self.next);
-                    self.phase -= 1.;
-                }
-            }
-            // ponytail: 设备不支持原采样率时线性插值；需要高质量降采样时换带限重采样。
-            let sample_at = |index: usize| {
-                if self.ratio == 1. {
-                    self.current[index]
-                } else {
-                    self.current[index]
-                        + (self.next[index] - self.current[index]) * self.phase as f32
-                }
-            };
-            for (channel, sample) in frame.iter_mut().enumerate() {
-                let value = if channels == 1 {
-                    (0..self.current.len()).map(sample_at).sum::<f32>() / self.current.len() as f32
-                } else if self.current.len() == 1 {
-                    sample_at(0)
-                } else if channel < self.current.len() {
-                    sample_at(channel)
-                } else {
-                    0.
-                };
-                *sample = T::from_sample((value * volume).clamp(-1., 1.));
-            }
-            if self.ratio != 1. {
-                self.phase += self.ratio;
+    /// 直接填充 CPAL 的交错 f32 缓冲，并应用音量。
+    pub fn write(&mut self, output: &mut [f32], volume: f32) {
+        for frame in output.chunks_mut(self.channels as usize) {
+            self.read_frame(frame);
+            for sample in frame {
+                *sample = (*sample * volume).clamp(-1., 1.);
             }
         }
     }

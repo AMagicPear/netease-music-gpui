@@ -152,7 +152,7 @@ async fn wait_pcm(pcm: &Arc<Pcm>) {
 }
 
 fn read_frame(output: &mut BufferedSource) -> Option<Vec<f32>> {
-    let mut frame = vec![0.; output.channels() as usize];
+    let mut frame = vec![0.; output.channels as usize];
     output.read_frame(&mut frame).then_some(frame)
 }
 
@@ -310,7 +310,7 @@ async fn seek_fetches_target_range_and_cached_return_interrupts_stalled_download
     audio.seek(Duration::from_secs(10));
     assert_eq!(
         read_frame(&mut source),
-        Some(vec![0.; source.channels() as usize])
+        Some(vec![0.; source.channels as usize])
     );
     // 直接访问目标区间，不读取位于中间的第 1、2 块。
     assert_eq!(
@@ -404,7 +404,7 @@ async fn ignored_range_falls_back_and_eof_source_remains_seekable() {
         assert!(audio.error().is_none());
         assert_eq!(
             read_frame(&mut source),
-            Some(vec![0.; source.channels() as usize])
+            Some(vec![0.; source.channels as usize])
         );
         (audio, source)
     })
@@ -448,8 +448,8 @@ async fn mp3_hires_flac_and_aac_decode_seek_and_finish_without_a_device() {
         let (audio, mut source) = open_with_duration(&server, Some(Duration::from_secs(1))).await;
         assert!((audio.duration.unwrap().as_secs_f64() - 1.).abs() < 0.1);
         if bytes.starts_with(b"fLaC") {
-            assert_eq!(source.sample_rate(), 96000);
-            assert_eq!(source.channels(), 2);
+            assert_eq!(source.sample_rate, 96000);
+            assert_eq!(source.channels, 2);
             let pcm = audio.pcm.clone();
             tokio::task::spawn_blocking(move || {
                 let data = pcm.data.lock().unwrap();
@@ -587,7 +587,7 @@ fn output_is_nonblocking_and_silence_preserves_stereo_alignment_and_progress() {
 }
 
 #[test]
-fn device_output_converts_frames_and_pause_and_seek_preserve_state() {
+fn buffered_output_preserves_channels_rates_volume_and_seek() {
     fn pcm() -> Arc<Pcm> {
         let pcm = Arc::new(Pcm::default());
         let samples = vec![0.2, 0.6, 0.4, 0.8, 0.6, 1.0, 0.8, 0.4];
@@ -602,32 +602,31 @@ fn device_output_converts_frames_and_pause_and_seek_preserve_state() {
         pcm
     }
     let shared = pcm();
-    let mut output = DeviceOutput::new(source(shared.clone()), 1000);
+    let mut output = source(shared.clone());
     let mut buffer = [1_f32; 4];
-    output.write(&mut buffer, 2, false, 0.5);
-    assert_eq!(buffer, [0.; 4]);
-    assert_eq!(shared.position_us.load(Ordering::Acquire), 0);
-    output.write(&mut buffer, 2, true, 0.5);
+    output.write(&mut buffer, 0.5);
     assert_eq!(buffer, [0.1, 0.3, 0.2, 0.4]);
     assert_eq!(shared.position_us.load(Ordering::Acquire), 2000);
 
-    let mut mono = DeviceOutput::new(source(pcm()), 1000);
-    let mut floats = [0_f32; 2];
-    mono.write(&mut floats, 1, true, 1.);
-    assert!((floats[0] - 0.4).abs() < 1e-6);
-    assert!((floats[1] - 0.6).abs() < 1e-6);
-    let mut silence = [0_u16; 4];
-    mono.write(&mut silence, 2, false, 1.);
-    assert_eq!(silence, [32768; 4]);
-
-    for (rate, expected) in [(2000, [0.2, 0.3, 0.4, 0.5]), (500, [0.2, 0.6, 0., 0.])] {
-        let shared = pcm();
-        let mut output = DeviceOutput::new(source(shared.clone()), rate);
+    for channels in [1, 2] {
+        let mut output = source(pcm());
+        output.channels = channels;
         let mut frames = [0_f32; 8];
-        output.write(&mut frames, 2, true, 1.);
-        for (frame, expected) in frames.chunks(2).zip(expected) {
-            assert!((frame[0] - expected).abs() < 1e-6, "{rate}: {frames:?}");
-        }
+        output.write(&mut frames, 1.);
+        assert_eq!(frames, [0.2, 0.6, 0.4, 0.8, 0.6, 1.0, 0.8, 0.4]);
+    }
+
+    for rate in [44100, 48000, 96000] {
+        let shared = pcm();
+        let mut output = source(shared.clone());
+        output.sample_rate = rate;
+        let mut frames = [0_f32; 8];
+        output.write(&mut frames, 1.);
+        assert_eq!(frames, [0.2, 0.6, 0.4, 0.8, 0.6, 1.0, 0.8, 0.4]);
+        assert_eq!(
+            shared.position_us.load(Ordering::Acquire),
+            4_000_000 / u64::from(rate)
+        );
         shared.control.generation.store(1, Ordering::Release);
         let mut data = shared.data.lock().unwrap();
         data.queued_samples = 2;
@@ -638,11 +637,7 @@ fn device_output_converts_frames_and_pause_and_seek_preserve_state() {
         });
         drop(data);
         let mut frame = [0_f32; 2];
-        output.write(&mut frame, 2, true, 1.);
-        assert_eq!(
-            frame,
-            [-0.5, -0.5],
-            "seek must discard interpolation history"
-        );
+        output.write(&mut frame, 1.);
+        assert_eq!(frame, [-0.5, -0.5], "seek must discard old PCM");
     }
 }

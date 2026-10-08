@@ -102,7 +102,7 @@ src/
 │   └── stream/
 │       ├── download.rs      HTTP Range 下载和字节缓存
 │       ├── decode.rs        Symphonia 解析、定位和解码
-│       ├── output.rs        PCM 队列、采样率与声道转换
+│       ├── output.rs        PCM 队列与 f32 帧输出
 │       └── tests.rs         本地 HTTP 与音频回归测试
 └── ui/
     ├── shell.rs             主窗口布局和导航协调

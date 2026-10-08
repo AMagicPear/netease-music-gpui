@@ -1,8 +1,5 @@
-use super::stream::{BufferedSource, DeviceOutput, StreamingAudio};
-use cpal::{
-    FromSample, SizedSample,
-    traits::{DeviceTrait, HostTrait, StreamTrait},
-};
+use super::stream::{BufferedSource, StreamingAudio};
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::{
     sync::{
         Arc, Mutex,
@@ -15,7 +12,7 @@ struct OutputControl {
     playing: AtomicBool,
     volume: AtomicU32,
     error: Mutex<Option<String>>,
-    source: Mutex<Option<DeviceOutput>>,
+    source: Mutex<Option<BufferedSource>>,
 }
 
 impl Default for OutputControl {
@@ -29,10 +26,10 @@ impl Default for OutputControl {
     }
 }
 
-/// 输出端固定使用设备默认配置；切歌只替换音源，复用同一个 CPAL 流。
+/// 按歌曲采样率和声道数提交 f32 PCM，由系统共享输出适配设备格式。
 #[derive(Default)]
 pub(super) struct PlayerEngine {
-    device: Option<(cpal::Stream, cpal::SupportedStreamConfig)>,
+    device: Option<(cpal::Stream, cpal::StreamConfig)>,
     audio: Option<StreamingAudio>,
     control: Arc<OutputControl>,
 }
@@ -40,47 +37,47 @@ pub(super) struct PlayerEngine {
 impl PlayerEngine {
     pub fn load(&mut self, audio: StreamingAudio, source: BufferedSource) -> Result<(), String> {
         self.stop();
-        self.ensure_device()?;
-        let config = &self.device.as_ref().unwrap().1;
-        let output = DeviceOutput::new(source, config.sample_rate());
-        *self.control.source.lock().unwrap() = Some(output);
+        self.ensure_device(source.sample_rate, source.channels)?;
+        *self.control.source.lock().unwrap() = Some(source);
         self.audio = Some(audio);
         Ok(())
     }
 
-    fn ensure_device(&mut self) -> Result<(), String> {
-        if self.device.is_some() {
+    fn ensure_device(&mut self, sample_rate: u32, channels: u16) -> Result<(), String> {
+        if self.device.as_ref().is_some_and(|(_, config)| {
+            config.sample_rate == sample_rate && config.channels == channels
+        }) {
             return Ok(());
         }
+        self.device = None;
+        *self.control.error.lock().unwrap() = None;
         let device = cpal::default_host()
             .default_output_device()
             .ok_or("没有可用的音频输出设备")?;
-        let config = device
-            .default_output_config()
-            .map_err(|error| format!("无法读取音频输出配置：{error}"))?;
-        let stream_config = config.config();
+        let stream_config = cpal::StreamConfig {
+            channels,
+            sample_rate,
+            buffer_size: cpal::BufferSize::Default,
+        };
+        // ponytail: 依赖共享后端适配格式；其他后端拒绝时报告错误，支持它们时再加适配。
         let control = self.control.clone();
-        let stream = match config.sample_format() {
-            cpal::SampleFormat::I8 => build_stream::<i8>(&device, &stream_config, control),
-            cpal::SampleFormat::I16 => build_stream::<i16>(&device, &stream_config, control),
-            cpal::SampleFormat::I24 => build_stream::<cpal::I24>(&device, &stream_config, control),
-            cpal::SampleFormat::I32 => build_stream::<i32>(&device, &stream_config, control),
-            cpal::SampleFormat::I64 => build_stream::<i64>(&device, &stream_config, control),
-            cpal::SampleFormat::U8 => build_stream::<u8>(&device, &stream_config, control),
-            cpal::SampleFormat::U16 => build_stream::<u16>(&device, &stream_config, control),
-            cpal::SampleFormat::U24 => build_stream::<cpal::U24>(&device, &stream_config, control),
-            cpal::SampleFormat::U32 => build_stream::<u32>(&device, &stream_config, control),
-            cpal::SampleFormat::U64 => build_stream::<u64>(&device, &stream_config, control),
-            cpal::SampleFormat::F32 => build_stream::<f32>(&device, &stream_config, control),
-            cpal::SampleFormat::F64 => build_stream::<f64>(&device, &stream_config, control),
-            format => return Err(format!("不支持的音频输出格式：{format}")),
-        }
-        .map_err(|error| format!("无法创建音频输出流：{error}"))?;
+        let errors = self.control.clone();
+        let stream = device
+            .build_output_stream(
+                &stream_config,
+                move |buffer: &mut [f32], _| write_output(buffer, &control),
+                move |error| {
+                    errors.playing.store(false, Ordering::Release);
+                    *errors.error.lock().unwrap() = Some(format!("音频输出失败：{error}"));
+                },
+                None,
+            )
+            .map_err(|error| format!("无法创建音频输出流：{error}"))?;
         // 保持流运行，暂停时回调只写静音，不消费 PCM，也不推进位置。
         stream
             .play()
             .map_err(|error| format!("无法启动音频输出：{error}"))?;
-        self.device = Some((stream, config));
+        self.device = Some((stream, stream_config));
         Ok(())
     }
 
@@ -157,42 +154,18 @@ impl PlayerEngine {
     }
 }
 
-fn build_stream<T: SizedSample + FromSample<f32>>(
-    device: &cpal::Device,
-    config: &cpal::StreamConfig,
-    control: Arc<OutputControl>,
-) -> Result<cpal::Stream, cpal::BuildStreamError> {
-    let channels = config.channels as usize;
-    let errors = control.clone();
-    device.build_output_stream(
-        config,
-        move |buffer: &mut [T], _| write_output(buffer, channels, &control),
-        move |error| {
-            errors.playing.store(false, Ordering::Release);
-            *errors.error.lock().unwrap() = Some(format!("音频输出失败：{error}"));
-        },
-        None,
-    )
-}
-
 /// 回调只尝试获取当前音源；切歌持锁或暂停时写静音，不阻塞设备线程。
-fn write_output<T: SizedSample + FromSample<f32>>(
-    buffer: &mut [T],
-    channels: usize,
-    control: &OutputControl,
-) {
+fn write_output(buffer: &mut [f32], control: &OutputControl) {
     if control.playing.load(Ordering::Acquire)
         && let Ok(mut source) = control.source.try_lock()
         && let Some(source) = source.as_mut()
     {
         source.write(
             buffer,
-            channels,
-            true,
             f32::from_bits(control.volume.load(Ordering::Acquire)),
         );
     } else {
-        buffer.fill(T::from_sample(0.));
+        buffer.fill(0.);
     }
 }
 
@@ -203,17 +176,17 @@ mod tests {
     #[test]
     fn output_silences_missing_paused_or_busy_source_without_blocking() {
         let control = OutputControl::default();
-        let mut buffer = [0_u16; 4];
-        write_output(&mut buffer, 2, &control);
-        assert_eq!(buffer, [32768; 4]);
+        let mut buffer = [1_f32; 4];
+        write_output(&mut buffer, &control);
+        assert_eq!(buffer, [0.; 4]);
         control.playing.store(true, Ordering::Release);
-        buffer.fill(0);
-        write_output(&mut buffer, 2, &control);
-        assert_eq!(buffer, [32768; 4]);
+        buffer.fill(1.);
+        write_output(&mut buffer, &control);
+        assert_eq!(buffer, [0.; 4]);
         let _busy = control.source.lock().unwrap();
-        buffer.fill(0);
-        write_output(&mut buffer, 2, &control);
-        assert_eq!(buffer, [32768; 4]);
+        buffer.fill(1.);
+        write_output(&mut buffer, &control);
+        assert_eq!(buffer, [0.; 4]);
     }
 
     #[test]
