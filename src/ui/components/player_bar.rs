@@ -34,10 +34,15 @@ pub struct PlayerBar {
     cover_rotation_elapsed: Duration,
     cover_rotation_started: Option<Instant>,
     cover_images: [Option<RotatingCover>; 2],
+    album_expanded: bool,
     _playback_subscription: Subscription,
     _progress_subscription: Subscription,
     _library_subscription: Subscription,
 }
+
+pub struct OpenAlbumLyrics;
+
+impl EventEmitter<OpenAlbumLyrics> for PlayerBar {}
 
 impl PlayerBar {
     pub fn new(
@@ -69,6 +74,7 @@ impl PlayerBar {
             cover_rotation_elapsed: Duration::ZERO,
             cover_rotation_started: None,
             cover_images: [None, None],
+            album_expanded: false,
             _playback_subscription: playback_subscription,
             _progress_subscription: progress_subscription,
             _library_subscription: library_subscription,
@@ -78,12 +84,75 @@ impl PlayerBar {
         this
     }
 
+    pub(crate) fn set_album_expanded(&mut self, expanded: bool, cx: &mut Context<Self>) {
+        if self.album_expanded != expanded {
+            self.album_expanded = expanded;
+            cx.notify();
+        }
+    }
+
     fn sync_cover_rotation(&mut self, now: Instant, cx: &App) {
         if self.playback.read(cx).snapshot().is_playing {
             self.cover_rotation_started.get_or_insert(now);
         } else if let Some(started) = self.cover_rotation_started.take() {
             self.cover_rotation_elapsed += now.duration_since(started);
         }
+    }
+
+    /// 大小唱片共用播放时钟与图片缓存，展开、收起时保持旋转角度连续。
+    pub(crate) fn vinyl(&mut self, side: f32, window: &mut Window, cx: &mut App) -> Div {
+        let elapsed = self.cover_rotation_elapsed
+            + self
+                .cover_rotation_started
+                .map_or(Duration::ZERO, |started| started.elapsed());
+        // 40 秒一圈，最多每秒生成 30 张旋转图；其他重绘复用缓存。
+        let angle = ((elapsed.as_secs_f64() % 40.) * 30.).floor() as f32 / (40. * 30.)
+            * std::f32::consts::TAU;
+        if self.cover_rotation_started.is_some() {
+            window.request_animation_frame();
+        }
+        let cover_url = self
+            .playback
+            .read(cx)
+            .snapshot()
+            .current_song
+            .as_ref()
+            .and_then(|song| song.al.pic_url.clone());
+        let cover_side = side * 2. / 3.;
+        let inset = (side - cover_side) / 2.;
+        div()
+            .size(px(side))
+            .flex_none()
+            .relative()
+            .child(
+                self.rotating_image(
+                    0,
+                    Resource::Embedded("images/miniVinyl.png".into()),
+                    angle,
+                    side,
+                    window,
+                    cx,
+                )
+                .size_full(),
+            )
+            .when_some(cover_url, |vinyl, url| {
+                vinyl.child(
+                    self.rotating_image(
+                        1,
+                        Resource::Uri(thumbnail_url(&url, (cover_side * 2.).ceil() as u32).into()),
+                        angle,
+                        cover_side,
+                        window,
+                        cx,
+                    )
+                    .absolute()
+                    .left(px(inset))
+                    .top(px(inset))
+                    .size(px(cover_side))
+                    .rounded_full()
+                    .object_fit(ObjectFit::Cover),
+                )
+            })
     }
 
     fn rotating_image(
@@ -363,16 +432,6 @@ fn hover_icon(
 impl Render for PlayerBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = Theme::global(cx).tokens.colors;
-        let elapsed = self.cover_rotation_elapsed
-            + self
-                .cover_rotation_started
-                .map_or(Duration::ZERO, |started| started.elapsed());
-        // 40 秒一圈，最多每秒生成 30 张旋转图；其他重绘复用缓存。
-        let cover_angle = ((elapsed.as_secs_f64() % 40.) * 30.).floor() as f32 / (40. * 30.)
-            * std::f32::consts::TAU;
-        if self.cover_rotation_started.is_some() {
-            window.request_animation_frame();
-        }
         let expanded = self.progress_bar.read(cx).expanded();
         let shadow_opacity = transition(
             "player-bar-shadow",
@@ -392,7 +451,7 @@ impl Render for PlayerBar {
         } else {
             IconSize::Large.pixels()
         };
-        let (title, artist, cover_url, song_id, is_playing) = {
+        let (title, artist, song_id, is_playing) = {
             let playback = self.playback.read(cx);
             playback
                 .snapshot()
@@ -402,7 +461,6 @@ impl Render for PlayerBar {
                     (
                         song.name.clone(),
                         artist_label(song, colors),
-                        song.al.pic_url.clone(),
                         Some(song.id),
                         playback.is_play_requested(),
                     )
@@ -411,7 +469,6 @@ impl Render for PlayerBar {
                     (
                         String::new(),
                         StyledText::new(""),
-                        None,
                         None,
                         playback.is_play_requested(),
                     )
@@ -475,41 +532,17 @@ impl Render for PlayerBar {
                             .flex()
                             .items_center()
                             .gap(px(10.))
-                            .child(
+                            .when(!self.album_expanded, |left| left.child(
                                 div()
+                                    .id("player-album-cover")
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|_, _, _, cx| {
+                                        cx.emit(OpenAlbumLyrics);
+                                    }))
                                     .size(px(60.))
                                     .flex_none()
-                                    .relative()
-                                    .child(
-                                        self.rotating_image(
-                                            0,
-                                            Resource::Embedded("images/miniVinyl.png".into()),
-                                            cover_angle,
-                                            60.,
-                                            window,
-                                            cx,
-                                        )
-                                        .size_full(),
-                                    )
-                                    .when_some(cover_url, |vinyl, url| {
-                                        vinyl.child(
-                                            self.rotating_image(
-                                                1,
-                                                Resource::Uri(thumbnail_url(&url, 80).into()),
-                                                cover_angle,
-                                                40.,
-                                                window,
-                                                cx,
-                                            )
-                                            .absolute()
-                                            .left(px(10.))
-                                            .top(px(10.))
-                                            .size(px(40.))
-                                            .rounded_full()
-                                            .object_fit(ObjectFit::Cover),
-                                        )
-                                    }),
-                            )
+                                    .child(self.vinyl(60., window, cx)),
+                            ))
                             .child(
                                 div()
                                     .flex()
@@ -973,6 +1006,17 @@ impl Render for PlayerBar {
 #[cfg(test)]
 mod tests {
     use super::{format_count, rotate_cover};
+
+    #[test]
+    #[ignore = "手动测量 Retina 大唱片的旋转耗时"]
+    fn large_cover_rotation_timing() {
+        let source = image::RgbaImage::from_pixel(628, 628, image::Rgba([30, 80, 150, 255]));
+        let started = std::time::Instant::now();
+        for frame in 0..30 {
+            std::hint::black_box(rotate_cover(&source, frame as f32 * 0.01));
+        }
+        eprintln!("30 frames: {:?}", started.elapsed());
+    }
 
     #[test]
     fn cover_rotates_clockwise_and_keeps_colors() {

@@ -37,6 +37,8 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSVi
 futures = "0.3"
 
 [profile.dev.package]
+# 唱片旋转在本 crate 中逐像素重采样，开发运行也需要优化这一热路径。
+netease-music-gpui = { opt-level = 2 }
 gpui-pre = { opt-level = 3 }
 gpui-component = { opt-level = 3 }
 gpui-kit = { opt-level = 3 }

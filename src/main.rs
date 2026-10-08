@@ -49,10 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     MainContent::new(window, user_profile, library.clone(), playback.clone(), cx)
                 });
                 let player_bar = cx.new(|cx| PlayerBar::new(playback, library, window, cx));
-                cx.new(|_| MainWindow {
-                    main_content,
-                    player_bar,
-                })
+                cx.new(|cx| MainWindow::new(main_content, player_bar, cx))
             },
         )
         .unwrap();

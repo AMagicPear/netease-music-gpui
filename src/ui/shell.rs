@@ -3,8 +3,9 @@ use std::{cell::Cell, collections::HashMap, rc::Rc};
 use gpui::prelude::{FluentBuilder, StatefulInteractiveElement};
 use gpui::*;
 
+use super::album_lyrics::AlbumLyrics;
 use super::assets::thumbnail_url;
-use super::components::{PlayerBar, ResizeDragPreview, window_drag_area};
+use super::components::{OpenAlbumLyrics, PlayerBar, ResizeDragPreview, window_drag_area};
 use super::pages::{ContentPage, playlist::PlaylistPage};
 use super::sidebar::{SidebarChanged, SidebarPage};
 use super::theme::{IconSize, PRESSED_ICON_ALPHA};
@@ -22,10 +23,41 @@ const MAX_SIDEBAR_WIDTH: Pixels = px(627.);
 const SEARCH_BOX_WIDTH: Pixels = px(258.);
 /// 搜索框的压缩下限
 const SEARCH_BOX_MIN_WIDTH: Pixels = px(40.);
+pub(super) const WINDOW_HEADER_HEIGHT: f32 = 30.;
+pub(super) const PAGE_HEADER_HEIGHT: f32 = 42.;
 
 pub struct MainWindow {
     pub main_content: Entity<MainContent>,
     pub player_bar: Entity<PlayerBar>,
+    album_lyrics: Entity<AlbumLyrics>,
+    _album_subscription: Subscription,
+    _lyrics_subscription: Subscription,
+}
+
+impl MainWindow {
+    pub fn new(
+        main_content: Entity<MainContent>,
+        player_bar: Entity<PlayerBar>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let album_lyrics = cx.new(|cx| AlbumLyrics::new(player_bar.clone(), cx));
+        let album_subscription = cx.subscribe(&player_bar, |this, _, _: &OpenAlbumLyrics, cx| {
+            this.album_lyrics.update(cx, |page, cx| page.open(cx));
+        });
+        let lyrics_subscription = cx.observe(&album_lyrics, |this, lyrics, cx| {
+            let expanded = lyrics.read(cx).is_open();
+            this.player_bar.update(cx, |player, cx| {
+                player.set_album_expanded(expanded, cx);
+            });
+        });
+        Self {
+            main_content,
+            player_bar,
+            album_lyrics,
+            _album_subscription: album_subscription,
+            _lyrics_subscription: lyrics_subscription,
+        }
+    }
 }
 
 impl Render for MainWindow {
@@ -37,21 +69,34 @@ impl Render for MainWindow {
             .flex_col()
             .bg(colors.background)
             .child(
-                TitleBar::new()
-                    .on_close_window(|_, window, cx| crate::desktop::close_window(window, cx))
-                    .h(px(30.))
-                    .pl(px(0.))
-                    .border_b_0()
-                    .bg(colors.background)
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .overflow_hidden()
+                    .flex()
+                    .flex_col()
                     .child(
-                        div()
-                            .w(self.main_content.read(cx).sidebar_width)
-                            .h_full()
-                            .flex_none()
-                            .bg(colors.foreground.alpha(0.03)),
-                    ),
+                        TitleBar::new()
+                            .on_close_window(|_, window, cx| {
+                                crate::desktop::close_window(window, cx)
+                            })
+                            .h(px(WINDOW_HEADER_HEIGHT))
+                            .pl(px(0.))
+                            .border_b_0()
+                            .bg(colors.background)
+                            .child(
+                                div()
+                                    .w(self.main_content.read(cx).sidebar_width)
+                                    .h_full()
+                                    .flex_none()
+                                    .bg(colors.foreground.alpha(0.03)),
+                            ),
+                    )
+                    .child(self.main_content.clone())
+                    .child(self.album_lyrics.clone()),
             )
-            .child(self.main_content.clone())
             .child(self.player_bar.clone())
     }
 }
@@ -180,7 +225,7 @@ fn search_box(input: Entity<InputState>, colors: ColorTokens) -> impl IntoElemen
         .child(Input::new(&input))
 }
 
-fn hover_icon(
+pub(super) fn hover_icon(
     id: &'static str,
     label: &'static str,
     path: &'static str,
@@ -212,7 +257,7 @@ fn page_header(
     vip_badge: Option<String>,
 ) -> impl IntoElement {
     window_drag_area("page-header")
-        .h(px(42.))
+        .h(px(PAGE_HEADER_HEIGHT))
         .flex_none()
         .w_full()
         .bg(colors.background)

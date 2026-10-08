@@ -12,7 +12,7 @@ mod virtual_table;
 mod volume_control;
 
 pub use drag_preview::ResizeDragPreview;
-pub use player_bar::PlayerBar;
+pub use player_bar::{OpenAlbumLyrics, PlayerBar};
 pub use popover::Popover;
 pub use tab_bar::{TabBar, TabChanged, TabItem};
 pub use virtual_table::{
