@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_kit::base::{Button, ColorTokens, Theme, Transition, transition};
+use gpui_kit::base::{Button, ColorTokens, Interpolate, Theme, Transition, transition};
 
 use super::progress_bar::ProgressBar;
 use super::volume_control::VolumeControl;
@@ -12,8 +12,11 @@ use crate::models::AudioQualityLevel;
 use crate::playback::PlaybackController;
 use crate::state::library::MusicLibrary;
 use crate::ui::assets::thumbnail_url;
-use crate::ui::cover_color::{Backdrop, dark_colors};
+use crate::ui::cover_color::{Backdrop, blend_colors, dark_colors};
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
+
+/// 播放栏固定高度；专辑歌词页据此估算可视区域高度。
+pub const PLAYER_BAR_HEIGHT: f32 = 86.;
 
 pub struct PlayerBar {
     playback: Entity<PlaybackController>,
@@ -362,17 +365,24 @@ fn hover_icon(
 impl Render for PlayerBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme_colors = Theme::global(cx).tokens.colors;
-        let colors = if self.album_expanded {
-            dark_colors(
-                theme_colors,
-                self.album_backdrop
-                    .get()
-                    .map(|(_, gradient)| Hsla::from(gradient.0[1]))
-                    .unwrap_or(hsla(0., 0., 0.12, 1.)),
-            )
-        } else {
-            theme_colors
-        };
+        // 展开/收起时整条栏的颜色跟着黑胶页的滑入一起过渡，而不是瞬间跳变。
+        let expand = transition(
+            "player-bar-expand",
+            if self.album_expanded { 1_f32 } else { 0. },
+            Transition::new(Duration::from_millis(500)).ease(ease_out_quint()),
+            window,
+            cx,
+        );
+        let backdrop_color = self
+            .album_backdrop
+            .get()
+            .map(|(_, gradient)| Hsla::from(gradient.0[1]))
+            .unwrap_or(hsla(0., 0., 0.12, 1.));
+        let colors = blend_colors(
+            theme_colors,
+            dark_colors(theme_colors, backdrop_color),
+            expand,
+        );
         let expanded = self.progress_bar.read(cx).expanded();
         let shadow_opacity = transition(
             "player-bar-shadow",
@@ -442,7 +452,7 @@ impl Render for PlayerBar {
 
         div()
             .w_full()
-            .h(px(86.))
+            .h(px(PLAYER_BAR_HEIGHT))
             .flex_none()
             .flex()
             .flex_col()
@@ -462,9 +472,11 @@ impl Render for PlayerBar {
             .relative()
             .when(self.album_expanded, |bar| {
                 let backdrop = self.album_backdrop.clone();
+                let surface = theme_colors.surface;
                 bar.child(canvas(|_, _, _| {}, move |bounds, _, window, _| {
+                    // 绘制时读取同一帧的渐变底端，再按展开进度从普通底色过渡过去。
                     let bottom = backdrop.get().map(|(_, gradient)| gradient.0[1]).unwrap_or_else(|| hsla(0., 0., 0.12, 1.).into());
-                    window.paint_quad(fill(bounds, bottom));
+                    window.paint_quad(fill(bounds, surface.interpolate(&Hsla::from(bottom), expand)));
                 }).absolute().inset_0())
             })
             // 进度条覆盖渲染

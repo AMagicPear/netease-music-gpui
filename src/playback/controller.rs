@@ -25,7 +25,12 @@ pub struct PlaybackController {
     pending_position: Duration,
     system_media: Option<SystemMedia>,
     persistence: Persistence,
+    /// tick 每 1 秒运行一次；攒够若干次才写一次缓存，关键事件仍立即写。
+    ticks_since_save: u32,
 }
+
+/// 播放中周期性落盘的间隔（tick 数）。暂停时 tick 不再写盘。
+const SAVE_INTERVAL_TICKS: u32 = 5;
 
 impl PlaybackController {
     pub fn new(window: &Window, persistence: Persistence, cx: &mut Context<Self>) -> Self {
@@ -40,7 +45,8 @@ impl PlaybackController {
                 .find(|song| song.id == cache.song_id)
                 .cloned()
             {
-                this.load_song(song, cache.position, cache.was_playing, cx);
+                // 启动时只恢复队列与进度，不自动播放；等用户手动按下播放。
+                this.load_song(song, cache.position, false, cx);
             }
         }
         match SystemMedia::new(window) {
@@ -201,6 +207,8 @@ impl PlaybackController {
             StreamingAudio::open(http, source).await
         });
         self.request = Some(request.abort_handle());
+        // 切歌/切歌单立即落盘一次，避免等下一个 tick 才记录新的歌曲。
+        self.save_cache();
         cx.spawn(async move |this, cx| {
             let result = request
                 .await
@@ -266,6 +274,7 @@ impl PlaybackController {
         }
         self.state.is_playing = false;
         self.state.buffering = false;
+        self.save_cache();
         cx.notify();
     }
 
@@ -285,6 +294,7 @@ impl PlaybackController {
                 return;
             }
         }
+        self.save_cache();
         cx.notify();
     }
 
@@ -346,6 +356,7 @@ impl PlaybackController {
             self.state.position = position;
             self.state.error = None;
             self.state.buffering = self.state.is_playing;
+            self.save_cache();
             cx.notify();
         }
     }
@@ -366,7 +377,7 @@ impl PlaybackController {
             return;
         }
         if !self.state.is_playing {
-            self.save_cache();
+            // 暂停时状态没有变化，不写盘也不重绘。
             return;
         }
         self.state.buffering = self.engine.buffering();
@@ -380,25 +391,26 @@ impl PlaybackController {
             // 从真实 PCM 消费量取进度，等待数据的静音不计入歌曲时间。
             self.state.position = self.engine.position().min(self.state.duration);
         }
-        self.save_cache();
+        self.ticks_since_save += 1;
+        if self.ticks_since_save >= SAVE_INTERVAL_TICKS {
+            self.save_cache();
+        }
         cx.notify();
     }
 
-    fn save_cache(&self) {
+    /// 组装最新快照并交给后台写入线程；本方法自身不再做磁盘 I/O。
+    fn save_cache(&mut self) {
+        self.ticks_since_save = 0;
         let (Some(playlist_id), Some(song)) = (self.playlist_id, self.state.current_song.as_ref())
         else {
             return;
         };
-        let cache = PlaybackState {
+        self.persistence.request_playback(PlaybackState {
             playlist_id,
             queue: self.queue.clone(),
             song_id: song.id,
             position: self.state.position,
-            was_playing: self.is_play_requested(),
-        };
-        if let Err(error) = self.persistence.save_playback(&cache) {
-            eprintln!("保存播放缓存失败：{error}");
-        }
+        });
     }
 
     fn fail(&mut self, error: String) {
@@ -416,7 +428,9 @@ impl PlaybackController {
 
 impl Drop for PlaybackController {
     fn drop(&mut self) {
+        // 退出时等最后一次缓存真正落盘，确保下次启动能恢复到最后的位置。
         self.save_cache();
+        self.persistence.flush();
         if let Some(request) = self.request.take() {
             request.abort();
         }
@@ -476,5 +490,30 @@ mod tests {
         assert!(controller.finish(3, Err("当前请求失败".into())));
         assert!(!controller.snapshot().loading);
         assert_eq!(controller.snapshot().error.as_deref(), Some("当前请求失败"));
+    }
+
+    #[test]
+    fn cache_round_trips_through_the_background_writer() {
+        let directory = std::env::temp_dir().join(format!(
+            "netease-music-gpui-controller-cache-{}",
+            std::process::id()
+        ));
+        let mut controller = PlaybackController::default();
+        controller.persistence = Persistence::at(directory.clone());
+        controller.playlist_id = Some(5);
+        controller.queue = vec![Song {
+            id: 9,
+            ..Default::default()
+        }];
+        controller.state.current_song = Some(controller.queue[0].clone());
+        controller.state.position = Duration::from_secs(7);
+        controller.save_cache();
+        controller.persistence.flush();
+
+        let loaded = controller.persistence.load_playback().unwrap();
+        assert_eq!(loaded.playlist_id, 5);
+        assert_eq!(loaded.song_id, 9);
+        assert_eq!(loaded.position, Duration::from_secs(7));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

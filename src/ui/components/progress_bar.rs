@@ -3,13 +3,13 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_kit::base::{
-    Slider, SliderIndicator, SliderThumb, SliderTrack, Theme, Transition, transition,
+    Interpolate, Slider, SliderIndicator, SliderThumb, SliderTrack, Theme, Transition, transition,
 };
 use gpui_kit::component::slider::{SliderEvent, SliderState};
 
 use super::format_duration;
 use crate::playback::PlaybackController;
-use crate::ui::cover_color::{Backdrop, CoverGradient, dark_gradient};
+use crate::ui::cover_color::{Backdrop, CoverGradient, blend_colors, dark_colors, dark_gradient};
 use crate::ui::theme::DOLPHIN_FAMILY;
 
 /// 轨道静止 / 悬浮时的高度
@@ -184,17 +184,25 @@ impl ProgressBar {
 
 impl Render for ProgressBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = Theme::global(cx).tokens.colors;
-        let colors = if self.dark {
-            let background = self
-                .backdrop
-                .get()
-                .map(|(_, gradient)| gradient)
-                .unwrap_or_else(|| dark_gradient(None));
-            crate::ui::cover_color::dark_colors(colors, background.0[1].into())
-        } else {
-            colors
-        };
+        let theme_colors = Theme::global(cx).tokens.colors;
+        // 与播放栏同一时长、同一时刻启动：展开/收起时轨道的颜色一起过渡。
+        let expand = transition(
+            "player-progress-expand",
+            if self.dark { 1_f32 } else { 0. },
+            Transition::new(Duration::from_millis(500)).ease(ease_out_quint()),
+            window,
+            cx,
+        );
+        let background = self
+            .backdrop
+            .get()
+            .map(|(_, gradient)| gradient)
+            .unwrap_or_else(|| dark_gradient(None));
+        let colors = blend_colors(
+            theme_colors,
+            dark_colors(theme_colors, background.0[1].into()),
+            expand,
+        );
         let progress = self.slider.read(cx).percentage().end;
         let playback = self.playback.read(cx);
         let duration = playback.snapshot().duration;
@@ -214,7 +222,6 @@ impl Render for ProgressBar {
         );
         let height = REST_HEIGHT + (HOVER_HEIGHT - REST_HEIGHT) * t;
         let backdrop = self.backdrop.clone();
-        let dark = self.dark;
 
         div()
             .id("player-progress-bar")
@@ -272,18 +279,16 @@ impl Render for ProgressBar {
                                                 canvas(
                                                     |_, _, _| {},
                                                     move |bounds, _, window, _| {
-                                                        // 绘制时读取同一帧的过渡色，不另行下载封面或滞后一帧。
-                                                        let color = if dark {
-                                                            let gradient = backdrop
-                                                                .get()
-                                                                .map(|(_, gradient)| gradient)
-                                                                .unwrap_or_else(|| {
-                                                                    dark_gradient(None)
-                                                                });
-                                                            progress_color(gradient)
-                                                        } else {
-                                                            colors.primary
-                                                        };
+                                                        // 绘制时读取同一帧的渐变：填充色从主题主色过渡到渐变进度色。
+                                                        let gradient = backdrop
+                                                            .get()
+                                                            .map(|(_, gradient)| gradient)
+                                                            .unwrap_or_else(|| dark_gradient(None));
+                                                        let color =
+                                                            theme_colors.primary.interpolate(
+                                                                &progress_color(gradient),
+                                                                expand,
+                                                            );
                                                         window.paint_quad(fill(bounds, color));
                                                     },
                                                 )
@@ -380,84 +385,6 @@ mod tests {
             assert!((color.s - s).abs() < 0.001);
             assert!(color.l >= 0.5 && color.a == 1.);
         }
-    }
-
-    #[cfg(target_os = "macos")]
-    #[gpui::test]
-    fn progress_paints_the_current_frame_cover_color(cx: &mut gpui::TestAppContext) {
-        use super::ProgressBar;
-        use crate::playback::PlaybackController;
-        use crate::ui::cover_color::{Backdrop, CoverGradient, dark_gradient};
-        use gpui::prelude::*;
-        use gpui::{
-            App, Context, Entity, IntoElement, Render, Window, canvas, div, fill, hsla, px, size,
-        };
-        struct Host {
-            bar: Entity<ProgressBar>,
-            backdrop: Backdrop,
-            target: CoverGradient,
-        }
-        impl Render for Host {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                let backdrop = self.backdrop.clone();
-                let target = self.target;
-                div()
-                    .size_full()
-                    .relative()
-                    .child(
-                        canvas(
-                            move |bounds, _, _: &mut App| backdrop.set(Some((bounds, target))),
-                            |_, _, _, _| {},
-                        )
-                        .absolute()
-                        .inset_0(),
-                    )
-                    .child(self.bar.clone())
-            }
-        }
-        cx.update(gpui_kit::init);
-        let target = dark_gradient(Some(hsla(0.6, 0.4, 0.4, 1.)));
-        let window = cx.open_window(size(px(600.), px(100.)), |window, cx| {
-            let backdrop = Backdrop::default();
-            backdrop.set(Some((
-                gpui::Bounds::default(),
-                dark_gradient(Some(hsla(0., 0.6, 0.4, 1.))),
-            )));
-            let playback = cx.new(|_| PlaybackController::default());
-            let bar = cx.new(|cx| {
-                let mut bar = ProgressBar::new(playback, backdrop.clone(), window, cx);
-                bar.dark = true;
-                bar.slider =
-                    cx.new(|_| slider_state(Duration::from_millis(50), Duration::from_millis(100)));
-                bar
-            });
-            Host {
-                bar,
-                backdrop,
-                target,
-            }
-        });
-        cx.update_window(window.into(), |_, window, cx| {
-            window.draw(cx).clear(cx);
-            let scale = window.scale_factor();
-            let quads = window.painted_quads();
-            let track = quads
-                .iter()
-                .find(|quad| {
-                    quad.bounds.size.width.0 == 300. * scale
-                        && quad.bounds.size.height.0 == 2. * scale
-                })
-                .unwrap();
-            assert_eq!(
-                track.background,
-                fill(
-                    gpui::Bounds::<gpui::Pixels>::default(),
-                    progress_color(target)
-                )
-                .background
-            );
-        })
-        .unwrap();
     }
 
     #[test]

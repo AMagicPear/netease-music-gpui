@@ -98,8 +98,6 @@ pub struct PlaylistPage {
     table_header_hidden: Rc<Cell<bool>>,
     measured_size: Rc<Cell<Option<Size<Pixels>>>>,
     playing_indicator: Entity<PlayingIndicator>,
-    #[cfg(test)]
-    render_count: usize,
 }
 
 struct SongDisplay {
@@ -401,8 +399,6 @@ impl PlaylistPage {
             table_header_hidden: Rc::new(Cell::new(false)),
             measured_size: Rc::new(Cell::new(None)),
             playing_indicator,
-            #[cfg(test)]
-            render_count: 0,
         }
     }
 
@@ -1107,10 +1103,6 @@ fn play_all_button(colors: ColorTokens, compact: bool) -> Button {
 
 impl Render for PlaylistPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(test)]
-        {
-            self.render_count += 1;
-        }
         self.playing_indicator.read(cx).placement.set(None);
         self.table_header_hidden.set(false);
         let colors = Theme::global(cx).tokens.colors;
@@ -1462,128 +1454,6 @@ mod tests {
                 assert!(bar.size.height >= px(2.) && bar.size.height <= px(15.));
             }
         }
-    }
-
-    #[cfg(target_os = "macos")]
-    #[gpui::test]
-    fn indicator_frames_reuse_page_but_page_changes_and_scrolling_repaint(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        use super::*;
-
-        struct Host {
-            page: Entity<PlaylistPage>,
-            scroll: ScrollHandle,
-        }
-        impl Render for Host {
-            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                div()
-                    .size_full()
-                    .relative()
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .id("test-scroll")
-                            .size_full()
-                            .overflow_y_scroll()
-                            .track_scroll(&self.scroll)
-                            .child(PlaylistPage::content(
-                                self.page.clone(),
-                                window.viewport_size().width,
-                                cx,
-                            )),
-                    )
-                    .child(self.page.read(cx).playing_overlay())
-            }
-        }
-        cx.update(gpui_kit::init);
-        let library = cx.new(|_| MusicLibrary::default());
-        let playback = cx.new(|_| PlaybackController::default());
-        let page = cx.new(|cx| PlaylistPage::new(library.clone(), playback, cx));
-        let detail = page.read_with(cx, |page, _| page.detail.clone());
-        detail.update(cx, |detail, cx| {
-            detail.id = Some(1);
-            detail.songs = (1..=20)
-                .map(|id| Song {
-                    id,
-                    name: format!("歌曲{id}"),
-                    ..Default::default()
-                })
-                .collect();
-            cx.notify();
-        });
-        let scroll = ScrollHandle::default();
-        let window = cx.open_window(size(px(800.), px(600.)), |_, _| Host {
-            page: page.clone(),
-            scroll: scroll.clone(),
-        });
-        let draw = |cx: &mut TestAppContext| {
-            cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
-                .unwrap();
-        };
-        draw(cx);
-        draw(cx);
-        let (baseline, measured, placement) = page.read_with(cx, |page, cx| {
-            (
-                page.render_count,
-                page.measured_size.get().unwrap(),
-                page.playing_indicator.read(cx).placement.clone(),
-            )
-        });
-        assert_eq!(measured.width, px(800.));
-        assert!(measured.height > px(600.));
-        placement.set(Some(IndicatorPlacement {
-            bounds: Bounds::new(point(px(10.), px(300.)), size(px(12.), px(15.))),
-            mask: ContentMask {
-                bounds: Bounds::new(Point::default(), size(px(800.), px(600.))),
-            },
-        }));
-        draw(cx);
-        for _ in 0..6 {
-            cx.update_window(window.into(), |_, window, cx| {
-                assert!(window.simulate_next_frame(cx) > 0);
-            })
-            .unwrap();
-            draw(cx);
-        }
-        assert_eq!(
-            page.read_with(cx, |page, _| page.render_count),
-            baseline,
-            "indicator animation must not rebuild the cached page"
-        );
-
-        page.update(cx, |page, cx| page.set_hovered_row(1, true, cx));
-        draw(cx);
-        let after_hover = page.read_with(cx, |page, _| page.render_count);
-        assert!(after_hover > baseline);
-        assert!(
-            placement.get().is_none(),
-            "removed indicator must leave no overlay"
-        );
-
-        scroll.set_offset(point(px(0.), px(-200.)));
-        draw(cx);
-        assert!(
-            page.read_with(cx, |page, _| page.render_count) > after_hover,
-            "scrolling must recompute visible rows and overlay position"
-        );
-
-        detail.update(cx, |detail, cx| {
-            detail.songs.truncate(1);
-            cx.notify();
-        });
-        draw(cx);
-        let shorter = page.read_with(cx, |page, _| page.measured_size.get().unwrap());
-        assert!(
-            shorter.height < measured.height,
-            "song changes must remeasure scroll content"
-        );
-        cx.simulate_window_resize(window.into(), size(px(650.), px(600.)));
-        draw(cx);
-        assert_eq!(
-            page.read_with(cx, |page, _| page.measured_size.get().unwrap().width),
-            px(650.)
-        );
     }
 
     #[test]

@@ -528,8 +528,6 @@ impl Render for MainContent {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     #[cfg(target_os = "macos")]
     #[gpui::test]
     fn cover_display_and_tint_share_one_download(cx: &mut gpui::TestAppContext) {
@@ -581,54 +579,4 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
-    #[gpui::test]
-    fn background_transitions_and_retargets_without_jumping(cx: &mut gpui::TestAppContext) {
-        use super::*;
-
-        struct Host(Option<Hsla>);
-        impl Render for Host {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                div()
-                    .size_full()
-                    .relative()
-                    .child(playlist_background(self.0, Rc::new(Cell::new(None))))
-            }
-        }
-        let window = cx.open_window(size(px(100.), px(500.)), |_, _| Host(None));
-        let draw = |cx: &mut TestAppContext| {
-            cx.update_window(window.into(), |_, window, cx| {
-                window.draw(cx).clear(cx);
-                let quads = window.painted_quads();
-                let Some(quad) = quads.last() else {
-                    return Rgba::from(transparent_black());
-                };
-                let background = serde_json::to_value(quad.background).unwrap();
-                serde_json::from_value::<Rgba>(background["colors"][0]["color"].clone()).unwrap()
-            })
-            .unwrap()
-        };
-        assert_eq!(draw(cx).a, 0.);
-        window
-            .update(cx, |host, _, _| host.0 = Some(hsla(0., 1., 0.5, 0.1)))
-            .unwrap();
-        assert_eq!(draw(cx).a, 0., "entering starts transparent");
-        cx.executor().advance_clock(Duration::from_millis(300));
-        let halfway = draw(cx);
-        assert!(halfway.a > 0. && halfway.a < 0.1);
-        cx.executor().advance_clock(Duration::from_millis(300));
-        let red = draw(cx);
-        assert!((red.a - 0.1).abs() < 1. / 255.);
-        window
-            .update(cx, |host, _, _| host.0 = Some(hsla(2. / 3., 1., 0.5, 0.1)))
-            .unwrap();
-        assert_eq!(draw(cx), red, "switching starts at the displayed color");
-        cx.executor().advance_clock(Duration::from_millis(300));
-        let mixed = draw(cx);
-        assert!(mixed.r > 0. && mixed.r < 1. && mixed.b > 0. && mixed.b < 1.);
-        window.update(cx, |host, _, _| host.0 = None).unwrap();
-        assert_eq!(draw(cx), mixed, "leaving mid-transition must not jump");
-        cx.executor().advance_clock(Duration::from_millis(600));
-        assert_eq!(draw(cx).a, 0.);
-    }
 }

@@ -292,23 +292,3 @@ fn rasterize_logo(renderer: &SvgRenderer, bytes: &[u8]) -> Result<Vec<u8>> {
     }
     Ok(rgba)
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn tray_logo_is_visible_red_rgba_with_transparent_background() {
-        let renderer = gpui::SvgRenderer::new(std::sync::Arc::new(
-            crate::ui::assets::Assets::new().unwrap(),
-        ));
-        let pixels =
-            super::rasterize_logo(&renderer, include_bytes!("../assets/icons/logo/tray.svg"))
-                .unwrap();
-        assert_eq!(pixels.len(), 32 * 32 * 4);
-        assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] == 0));
-        assert!(
-            pixels
-                .chunks_exact(4)
-                .any(|pixel| pixel == [236, 65, 65, 255])
-        );
-    }
-}

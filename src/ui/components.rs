@@ -3,18 +3,22 @@ use gpui::{Hsla, InteractiveElement, MouseButton, div};
 use gpui_kit::base::{ColorTokens, InteractiveElementExt};
 use std::{cell::Cell, rc::Rc};
 
+mod comment_row;
 mod drag_preview;
 mod player_bar;
 mod popover;
 mod progress_bar;
 mod tab_bar;
+mod vinyl_stage;
 mod virtual_table;
 mod volume_control;
 
+pub use comment_row::comment_row;
 pub use drag_preview::ResizeDragPreview;
-pub use player_bar::{OpenAlbumLyrics, PlayerBar};
+pub use player_bar::{OpenAlbumLyrics, PLAYER_BAR_HEIGHT, PlayerBar};
 pub use popover::Popover;
 pub use tab_bar::{TabBar, TabChanged, TabItem};
+pub use vinyl_stage::{Tonearm, vinyl_stage};
 pub use virtual_table::{
     CELL_PADDING, COLUMN_GAP, HEADER_HEIGHT, ROW_TEXT_SIZE, TableColumn, virtual_table,
 };

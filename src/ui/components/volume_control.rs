@@ -1,10 +1,14 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_kit::base::{ColorTokens, Slider, SliderIndicator, SliderThumb, SliderTrack, Theme};
+use gpui_kit::base::{
+    ColorTokens, Slider, SliderIndicator, SliderThumb, SliderTrack, Theme, Transition, transition,
+};
 use gpui_kit::component::slider::{SliderEvent, SliderState};
+use std::time::Duration;
 
 use super::{LAYER_VOLUME_BALLOON, icon_hover_color};
 use crate::playback::PlaybackController;
+use crate::ui::cover_color::{blend_colors, dark_colors};
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA};
 
 /// 气泡圆角。
@@ -282,13 +286,21 @@ impl VolumeControl {
 }
 
 impl Render for VolumeControl {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = Theme::global(cx).tokens.colors;
-        let colors = if self.dark {
-            crate::ui::cover_color::dark_colors(colors, hsla(0., 0., 0.12, 1.))
-        } else {
-            colors
-        };
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme_colors = Theme::global(cx).tokens.colors;
+        // 与播放栏同一时长、同一时刻启动，音量图标也跟着一起过渡。
+        let expand = transition(
+            "player-volume-expand",
+            if self.dark { 1_f32 } else { 0. },
+            Transition::new(Duration::from_millis(500)).ease(ease_out_quint()),
+            window,
+            cx,
+        );
+        let colors = blend_colors(
+            theme_colors,
+            dark_colors(theme_colors, hsla(0., 0., 0.12, 1.)),
+            expand,
+        );
         let percent = self.slider.read(cx).percentage().end;
         // 指针还在图标上就已经算"展开"了，所以图标高亮直接看 open。
         let icon_color = if self.open {

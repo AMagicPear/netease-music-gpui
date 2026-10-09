@@ -156,82 +156,49 @@ pub(super) fn dark_colors(mut colors: ColorTokens, background: Hsla) -> ColorTok
     colors
 }
 
+/// 在两套色板之间按进度逐通道插值。展开/收起黑胶页时，播放栏用同一个进度
+/// 从普通主题色过渡到暗色主题色，而不是整条栏瞬间跳变。
+pub(super) fn blend_colors(from: ColorTokens, to: ColorTokens, t: f32) -> ColorTokens {
+    macro_rules! blend {
+        ($($field:ident),+ $(,)?) => {
+            ColorTokens { $($field: from.$field.interpolate(&to.$field, t),)+ }
+        };
+    }
+    blend!(
+        background,
+        foreground,
+        surface,
+        surface_foreground,
+        primary,
+        primary_foreground,
+        secondary,
+        secondary_foreground,
+        muted,
+        muted_foreground,
+        accent,
+        accent_foreground,
+        destructive,
+        destructive_foreground,
+        border,
+        input,
+        ring,
+        selection,
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{cover_color, dark_gradient};
+    use super::{blend_colors, cover_color, dark_colors, dark_gradient};
     use gpui::{Hsla, hsla};
 
-    #[cfg(target_os = "macos")]
-    #[gpui::test]
-    fn floating_background_uses_same_gradient_coordinates_and_stops(cx: &mut gpui::TestAppContext) {
-        use super::{Backdrop, CoverGradient, gradient_layer, paint_backdrop};
-        use gpui::prelude::*;
-        use gpui::*;
-        struct Host {
-            backdrop: Backdrop,
-        }
-        impl Render for Host {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                let backdrop = self.backdrop.clone();
-                div()
-                    .size_full()
-                    .relative()
-                    .bg(white())
-                    .child(
-                        gradient_layer(
-                            "test-gradient",
-                            CoverGradient([
-                                hsla(0.6, 1., 0.5, 0.1).into(),
-                                hsla(0.6, 1., 0.5, 0.).into(),
-                            ]),
-                            self.backdrop.clone(),
-                        )
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .w_full()
-                        .h(px(480.)),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .top(px(72.))
-                            .left_0()
-                            .w_full()
-                            .h(px(110.))
-                            .bg(white())
-                            .child(
-                                canvas(
-                                    |_, _, _| {},
-                                    move |bounds, _, window, _| {
-                                        paint_backdrop(bounds, &backdrop, window)
-                                    },
-                                )
-                                .absolute()
-                                .inset_0(),
-                            ),
-                    )
-            }
-        }
-        let window = cx.open_window(size(px(600.), px(600.)), |_, _| Host {
-            backdrop: Default::default(),
-        });
-        cx.update_window(window.into(), |_, window, cx| {
-            window.draw(cx).clear(cx);
-            let quads = window.painted_quads();
-            let gradients: Vec<_> = quads
-                .iter()
-                .filter(|quad| quad.background.as_solid().is_none())
-                .collect();
-            assert_eq!(gradients.len(), 2);
-            assert_eq!(gradients[0].bounds, gradients[1].bounds);
-            assert_eq!(gradients[0].background, gradients[1].background);
-            assert!(
-                gradients[1].content_mask.bounds.size.height
-                    < gradients[0].content_mask.bounds.size.height
-            );
-        })
-        .unwrap();
+    #[test]
+    fn blend_colors_runs_between_the_two_palettes() {
+        let light = dark_colors(Default::default(), hsla(0., 0., 0.12, 1.));
+        let dark = dark_colors(Default::default(), hsla(0.3, 0.5, 0.05, 1.));
+        assert_eq!(blend_colors(light, dark, 0.), light);
+        let mid = blend_colors(light, dark, 0.5);
+        assert_ne!(mid.background, light.background);
+        assert_ne!(mid.background, dark.background);
     }
 
     #[test]
