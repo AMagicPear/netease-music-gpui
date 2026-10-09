@@ -1,4 +1,4 @@
-use crate::models::Song;
+use crate::models::{AudioQualityLevel, PlayMode, Song};
 use serde::{Deserialize, Serialize};
 use std::{
     fs, io,
@@ -34,6 +34,12 @@ pub struct PlaybackState {
     pub queue: Vec<Song>,
     pub song_id: u64,
     pub position: Duration,
+    /// 上次的播放方式；早期缓存没有这个字段，缺失时回落到顺序播放。
+    #[serde(default)]
+    pub mode: PlayMode,
+    /// 选择的音质；早期缓存没有这个字段，缺失时回落到默认档位。
+    #[serde(default)]
+    pub quality: AudioQualityLevel,
 }
 
 impl Default for Persistence {
@@ -148,6 +154,8 @@ mod tests {
             }],
             song_id: 7,
             position: Duration::from_secs(13),
+            mode: PlayMode::Shuffle,
+            quality: AudioQualityLevel::Lossless,
         };
 
         store.request_playback(state);
@@ -157,6 +165,36 @@ mod tests {
         assert_eq!(loaded.queue[0].id, 7);
         assert_eq!(loaded.song_id, 7);
         assert_eq!(loaded.position, Duration::from_secs(13));
+        assert_eq!(loaded.mode, PlayMode::Shuffle);
+        assert_eq!(loaded.quality, AudioQualityLevel::Lossless);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// 旧版缓存没有 mode 字段，不能被整份丢弃——队列和进度仍然要恢复。
+    #[test]
+    fn legacy_cache_without_play_mode_still_loads() {
+        let directory = std::env::temp_dir().join(format!(
+            "netease-music-gpui-legacy-cache-{}",
+            std::process::id()
+        ));
+        let store = Persistence::at(directory.clone());
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("playback.json"),
+            serde_json::json!({
+                "playlist_id": 42,
+                "queue": [],
+                "song_id": 7,
+                "position": {"secs": 5, "nanos": 0},
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let loaded = store.load_playback().unwrap();
+        assert_eq!(loaded.song_id, 7);
+        assert_eq!(loaded.mode, PlayMode::default());
+        assert_eq!(loaded.quality, AudioQualityLevel::default());
         fs::remove_dir_all(directory).unwrap();
     }
 }

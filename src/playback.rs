@@ -5,7 +5,7 @@ mod system_media;
 
 pub use controller::PlaybackController;
 
-use crate::models::{AudioQualityLevel, Song};
+use crate::models::{AudioQualityLevel, PlayMode, Song};
 use std::time::Duration;
 
 /// 控制器的只读视图；UI 通过 snapshot() 借用，不能直接修改播放状态。
@@ -21,6 +21,8 @@ pub struct PlaybackSnapshot {
     pub loading: bool,
     /// 播放期间输出端暂时取不到 PCM；暂停和加载时由控制器置为 false。
     pub buffering: bool,
+    /// 当前播放方式；决定播完后的去向和随机/循环时的手动切歌。
+    pub mode: PlayMode,
     pub quality: AudioQualityLevel,
     pub actual_quality: Option<AudioQualityLevel>,
     /// 下载、解码或设备错误；失败后停止，可从保留的位置重试。
@@ -39,6 +41,7 @@ impl Default for PlaybackSnapshot {
             is_playing: false,
             loading: false,
             buffering: false,
+            mode: PlayMode::default(),
             quality: AudioQualityLevel::default(),
             actual_quality: None,
             error: None,

@@ -1269,10 +1269,13 @@ mod tests {
         let item =
             |top: f32, height: f32| Bounds::new(point(px(0.), px(top)), size(px(400.), px(height)));
 
-        // 锚点在视口 40% 处（y=160）；行中心 1030 对上去 → 需要 -870。
+        // 锚点位置由 LYRIC_ANCHOR_RATIO 决定，这里也从常量现算：
+        // 之后再调锚点，这条用例会跟着走，不需要回来改死数字。
+        let anchor = px(400. * super::LYRIC_ANCHOR_RATIO);
+        // 不超出可滚动范围时，行中心正好落在锚点上。
         assert_eq!(
-            super::anchored_offset(viewport, item(1010., 40.), px(900.)),
-            px(-870.)
+            px(1030.) + super::anchored_offset(viewport, item(1010., 40.), px(900.)),
+            anchor
         );
         // 超出可滚动范围时夹到底，不会滑过头。
         assert_eq!(

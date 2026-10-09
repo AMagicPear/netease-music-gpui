@@ -640,7 +640,7 @@ impl PlaylistPage {
             .map(|&index| detail.songs[index].clone())
             .collect();
         self.playback.update(cx, |playback, cx| {
-            playback.play_from_queue(playlist_id, songs, song_id, cx);
+            playback.play_list(playlist_id, songs, song_id, cx);
         });
     }
 

@@ -6,20 +6,26 @@ use super::{
 };
 use crate::{
     api::MusicApi,
-    models::{AudioQualityLevel, Song},
+    models::{AudioQualityLevel, PlayMode, Song},
     persistence::{Persistence, PlaybackState},
 };
 use gpui::{Context, ReadGlobal, Window};
+use rand::seq::SliceRandom;
 use souvlaki::{MediaControlEvent, SeekDirection};
 use std::time::Duration;
 
-/// 共享 GPUI Entity：统一接收 UI 命令，管理队列、异步请求和状态通知。
+/// 共享 GPUI Entity：统一接收 UI 命令，管理播放列表、异步请求和状态通知。
 #[derive(Default)]
 pub struct PlaybackController {
     state: PlaybackSnapshot,
     engine: PlayerEngine,
+    /// 当前播放列表。它是一份自己的顺序，和任何页面上的歌单互不影响：
+    /// 换来源、洗牌、插入歌曲都只改这里，页面歌单的排序或过滤不会带走播放。
     queue: Vec<Song>,
-    playlist_id: Option<u64>,
+    /// 当前歌曲在 `queue` 中的位置；有它就不必按歌曲 id 反查，列表里有重复歌曲也没问题。
+    queue_cursor: Option<usize>,
+    /// 列表的来源歌单，只用来显示「来自哪个歌单」。
+    queue_source: Option<u64>,
     play_when_ready: bool,
     request: Option<tokio::task::AbortHandle>,
     pending_position: Duration,
@@ -37,15 +43,13 @@ impl PlaybackController {
         let mut this = Self::default();
         this.persistence = persistence;
         if let Some(cache) = this.persistence.load_playback() {
-            this.queue = cache.queue;
-            this.playlist_id = Some(cache.playlist_id);
-            if let Some(song) = this
-                .queue
-                .iter()
-                .find(|song| song.id == cache.song_id)
-                .cloned()
-            {
-                // 启动时只恢复队列与进度，不自动播放；等用户手动按下播放。
+            // 列表、音质和播放方式一起恢复；列表里保存的就是当时的播放顺序，
+            // 随机模式洗好的顺序已经落在里面，不必重新洗一遍。
+            this.set_list(Some(cache.playlist_id), cache.queue, Some(cache.song_id));
+            this.state.mode = cache.mode;
+            this.state.quality = cache.quality;
+            if let Some(song) = this.current_list_song() {
+                // 启动时只恢复列表与进度，不自动播放；等用户手动按下播放。
                 this.load_song(song, cache.position, false, cx);
             }
         }
@@ -147,22 +151,25 @@ impl PlaybackController {
         &self.state
     }
 
+    /// 来源歌单，只用于显示；播放列表本身已经和页面脱钩。
     pub(crate) fn playlist_id(&self) -> Option<u64> {
-        self.playlist_id
+        self.queue_source
     }
 
-    pub fn play_from_queue(
+    /// 把页面上选中的歌曲换成一份新的播放列表并开始播放。
+    /// 列表进来之后就是独立数据：页面再排序、切走或刷新都不影响它。
+    pub fn play_list(
         &mut self,
-        playlist_id: u64,
+        source: u64,
         songs: Vec<Song>,
         song_id: u64,
         cx: &mut Context<Self>,
     ) {
-        let Some(song) = songs.iter().find(|song| song.id == song_id).cloned() else {
+        let Some(song) = self.set_list(Some(source), songs, Some(song_id)) else {
             return;
         };
-        self.queue = songs;
-        self.playlist_id = Some(playlist_id);
+        // 新列表也要服从当前的播放方式：随机模式下当场洗一遍。
+        self.apply_mode_to_list(self.state.mode);
         if self
             .state
             .current_song
@@ -173,6 +180,95 @@ impl PlaybackController {
             self.resume(cx);
         } else {
             self.select_song(song, cx);
+        }
+    }
+
+    /// 换列表并把游标指到 `song_id`；不做任何其他判断，方便离线构造与测试。
+    fn set_list(
+        &mut self,
+        source: Option<u64>,
+        songs: Vec<Song>,
+        song_id: Option<u64>,
+    ) -> Option<Song> {
+        self.queue_source = source;
+        self.queue = songs;
+        self.queue_cursor =
+            song_id.and_then(|song_id| self.queue.iter().position(|song| song.id == song_id));
+        self.current_list_song()
+    }
+
+    /// 游标所指的那首歌。
+    fn current_list_song(&self) -> Option<Song> {
+        let cursor = self.queue_cursor?;
+        self.queue.get(cursor).cloned()
+    }
+
+    /// 手动切歌：`direction` 只取符号，`mode.wraps()` 决定能否越过两端。
+    fn step_list(&mut self, direction: isize) -> Option<Song> {
+        let mode = self.state.mode;
+        let len = self.queue.len();
+        if len == 0 {
+            return None;
+        }
+        let cursor = self.queue_cursor? as isize + direction.signum();
+        let cursor = if mode.wraps() {
+            cursor.rem_euclid(len as isize)
+        } else if (0..len as isize).contains(&cursor) {
+            cursor
+        } else {
+            // 顺序播放和单曲循环下，手动切歌走到两端就没有去处了。
+            return None;
+        };
+        self.queue_cursor = Some(cursor as usize);
+        self.current_list_song()
+    }
+
+    /// 播完一首后前进一格；返回 None 表示整个列表播完。
+    /// 单曲循环不在这里处理：那是「不前进」，由控制器决定。
+    fn advance_list(&mut self) -> Option<Song> {
+        let len = self.queue.len();
+        if len == 0 {
+            return None;
+        }
+        let next = self.queue_cursor? + 1;
+        if next < len {
+            self.queue_cursor = Some(next);
+        } else if self.state.mode.wraps() {
+            self.queue_cursor = Some(0);
+        } else {
+            return None;
+        }
+        self.current_list_song()
+    }
+
+    /// 就地洗牌：列表此刻的顺序就是之后的播放顺序，不需要另存一份原始顺序。
+    fn apply_mode_to_list(&mut self, mode: PlayMode) {
+        if !mode.shuffles() {
+            return;
+        }
+        let len = self.queue.len();
+        if len < 2 {
+            return;
+        }
+        // 正在播放的歌不能变，记下它，洗完牌让游标跟着走到新位置。
+        let current = self
+            .queue_cursor
+            .and_then(|cursor| self.queue.get(cursor).map(|song| song.id));
+        // shuffle 内部就是 Fisher–Yates，随机源交给 rand 的线程随机数发生器。
+        self.queue.shuffle(&mut rand::rng());
+        self.queue_cursor = current.and_then(|id| self.queue.iter().position(|song| song.id == id));
+    }
+
+    /// 下一首插入：插到当前歌曲之后。「播完这首就听它」和心动模式穿插推荐都走这里。
+    #[allow(dead_code, reason = "下一首插入与心动模式尚未接入 UI")]
+    pub fn insert_next(&mut self, song: Song, cx: &mut Context<Self>) {
+        match self.queue_cursor {
+            Some(cursor) => {
+                self.queue.insert(cursor + 1, song);
+                self.save_cache();
+                cx.notify();
+            }
+            None => self.queue.insert(0, song),
         }
     }
 
@@ -319,8 +415,11 @@ impl PlaybackController {
         };
         self.state.quality = quality;
         if let Some(song) = self.state.current_song.clone() {
+            // load_song 自己会落盘，音质跟着这次重载一起写进缓存。
             self.load_song(song, position, play, cx);
         } else {
+            // 没有正在播放的歌曲也要记住选择，下次启动沿用。
+            self.save_cache();
             cx.notify();
         }
     }
@@ -332,18 +431,57 @@ impl PlaybackController {
         self.change_song(1, cx);
     }
 
-    fn queued_song(&self, direction: isize) -> Option<Song> {
-        let id = self.state.current_song.as_ref()?.id;
-        let index = self.queue.iter().position(|song| song.id == id)?;
-        self.queue
-            .get(index.checked_add_signed(direction)?)
-            .cloned()
-    }
-
     fn change_song(&mut self, direction: isize, cx: &mut Context<Self>) {
-        if let Some(song) = self.queued_song(direction) {
+        if let Some(song) = self.step_list(direction) {
             self.select_song(song, cx);
         }
+    }
+
+    /// 一首歌播完后按当前播放方式决定去向。
+    fn advance_on_finished(&mut self, cx: &mut Context<Self>) {
+        if self.state.mode.repeats_current() {
+            self.replay(cx);
+            return;
+        }
+        let Some(song) = self.advance_list() else {
+            // 顺序播放到队尾：停在末尾不动，位置保留，再按播放会重播当前歌曲。
+            self.engine.stop();
+            self.save_cache();
+            cx.notify();
+            return;
+        };
+        self.select_song(song, cx);
+    }
+
+    /// 回到开头重播当前歌曲：音源还在，回绕即可，不用再向接口要一次播放地址。
+    fn replay(&mut self, cx: &mut Context<Self>) {
+        if self.engine.seek_to(Duration::ZERO) && self.engine.resume() {
+            self.state.position = Duration::ZERO;
+            self.state.is_playing = true;
+            self.state.buffering = self.engine.buffering();
+        } else if let Some(song) = self.state.current_song.clone() {
+            // 音源已释放或设备出错时退回重新加载，行为与普通切歌一致。
+            self.select_song(song, cx);
+            return;
+        }
+        self.save_cache();
+        cx.notify();
+    }
+
+    /// 播放栏按钮切换到下一种播放方式。
+    pub fn cycle_mode(&mut self, cx: &mut Context<Self>) {
+        self.set_mode(self.state.mode.next(), cx);
+    }
+
+    pub fn set_mode(&mut self, mode: PlayMode, cx: &mut Context<Self>) {
+        if self.state.mode == mode {
+            return;
+        }
+        self.state.mode = mode;
+        // 只在进入随机模式的那一刻洗牌；离开随机不再还原，洗好的顺序就是列表顺序。
+        self.apply_mode_to_list(mode);
+        self.save_cache();
+        cx.notify();
     }
 
     pub fn can_seek(&self) -> bool {
@@ -385,8 +523,7 @@ impl PlaybackController {
             self.state.position = self.state.duration;
             self.state.is_playing = false;
             self.state.buffering = false;
-            self.engine.stop();
-            self.next(cx);
+            self.advance_on_finished(cx);
         } else {
             // 从真实 PCM 消费量取进度，等待数据的静音不计入歌曲时间。
             self.state.position = self.engine.position().min(self.state.duration);
@@ -399,10 +536,11 @@ impl PlaybackController {
     }
 
     /// 组装最新快照并交给后台写入线程；本方法自身不再做磁盘 I/O。
+    ///
+    /// 存的就是列表现在的样子：随机模式洗好的顺序跟着一起落盘，重启后继续顺着它播。
     fn save_cache(&mut self) {
         self.ticks_since_save = 0;
-        let (Some(playlist_id), Some(song)) = (self.playlist_id, self.state.current_song.as_ref())
-        else {
+        let (Some(playlist_id), Some(song)) = (self.queue_source, self.current_list_song()) else {
             return;
         };
         self.persistence.request_playback(PlaybackState {
@@ -410,6 +548,8 @@ impl PlaybackController {
             queue: self.queue.clone(),
             song_id: song.id,
             position: self.state.position,
+            mode: self.state.mode,
+            quality: self.state.quality,
         });
     }
 
@@ -461,22 +601,81 @@ mod tests {
         assert_eq!(controller.state.revision, 4);
     }
 
-    #[test]
-    fn queue_keeps_boundaries() {
+    /// 造一份播放列表，选中 `song_id`，并把当前歌曲同步到快照上。
+    fn controller_with(ids: &[u64], song_id: u64, mode: PlayMode) -> PlaybackController {
         let mut controller = PlaybackController::default();
-        controller.queue = [1, 2, 3]
-            .map(|id| Song {
+        let songs: Vec<Song> = ids
+            .iter()
+            .map(|&id| Song {
                 id,
                 ..Default::default()
             })
-            .into();
-        controller.state.current_song = Some(controller.queue[0].clone());
-        assert!(controller.queued_song(-1).is_none());
-        assert_eq!(controller.queued_song(1).unwrap().id, 2);
-        controller.state.current_song = Some(controller.queue[2].clone());
-        assert!(controller.queued_song(1).is_none());
-        assert_eq!(controller.queued_song(-1).unwrap().id, 2);
-        assert!(!controller.can_seek());
+            .collect();
+        let song = controller.set_list(Some(7), songs, Some(song_id));
+        controller.state.mode = mode;
+        controller.state.current_song = song;
+        controller
+    }
+
+    fn ids(controller: &PlaybackController) -> Vec<u64> {
+        controller.queue.iter().map(|song| song.id).collect()
+    }
+
+    #[test]
+    fn advancing_uses_the_cursor_not_the_song_id() {
+        // 同一首歌在列表里出现两次：游标按位置走，不会被 id 反查带回第一次出现的地方。
+        let mut controller = controller_with(&[1, 2, 1, 3], 1, PlayMode::Sequential);
+        assert_eq!(controller.queue_cursor, Some(0));
+        assert_eq!(controller.advance_list().unwrap().id, 2);
+        assert_eq!(controller.advance_list().unwrap().id, 1);
+        assert_eq!(controller.queue_cursor, Some(2));
+    }
+
+    #[test]
+    fn manual_switching_follows_the_selected_mode() {
+        // 顺序播放走到两端就没有去处。
+        let mut sequential = controller_with(&[1, 2, 3], 1, PlayMode::Sequential);
+        assert!(sequential.step_list(-1).is_none());
+        assert_eq!(sequential.step_list(1).unwrap().id, 2);
+        let mut last = controller_with(&[1, 2, 3], 3, PlayMode::Sequential);
+        assert!(last.step_list(1).is_none());
+
+        // 列表循环把两端接起来。
+        let mut last = controller_with(&[1, 2, 3], 3, PlayMode::RepeatAll);
+        assert_eq!(last.step_list(1).unwrap().id, 1);
+        let mut first = controller_with(&[1, 2, 3], 1, PlayMode::RepeatAll);
+        assert_eq!(first.step_list(-1).unwrap().id, 3);
+
+        // 单曲循环只管自动续播，手动切歌仍沿列表走。
+        let mut repeat_one = controller_with(&[1, 2, 3], 2, PlayMode::RepeatOne);
+        assert_eq!(repeat_one.step_list(1).unwrap().id, 3);
+    }
+
+    #[test]
+    fn finishing_a_song_follows_the_list_and_the_mode() {
+        let mut sequential = controller_with(&[1, 2, 3], 1, PlayMode::Sequential);
+        assert_eq!(sequential.advance_list().unwrap().id, 2);
+        assert_eq!(sequential.advance_list().unwrap().id, 3);
+        assert!(sequential.advance_list().is_none());
+
+        let mut repeat_all = controller_with(&[1, 2, 3], 3, PlayMode::RepeatAll);
+        assert_eq!(repeat_all.advance_list().unwrap().id, 1);
+    }
+
+    #[test]
+    fn shuffle_rewrites_the_list_order_and_keeps_the_current_song() {
+        // 借列表循环走完整条列表：洗牌后每首歌仍然恰好排在播放序列上一次。
+        let mut controller = controller_with(&[1, 2, 3, 4, 5], 3, PlayMode::RepeatAll);
+        let before = ids(&controller);
+        controller.apply_mode_to_list(PlayMode::Shuffle);
+        assert_eq!(controller.current_list_song().unwrap().id, 3);
+
+        let mut played = vec![controller.current_list_song().unwrap().id];
+        while played.len() < controller.queue.len() {
+            played.push(controller.advance_list().unwrap().id);
+        }
+        played.sort_unstable();
+        assert_eq!(played, before);
     }
 
     #[test]
@@ -500,13 +699,18 @@ mod tests {
         ));
         let mut controller = PlaybackController::default();
         controller.persistence = Persistence::at(directory.clone());
-        controller.playlist_id = Some(5);
-        controller.queue = vec![Song {
-            id: 9,
-            ..Default::default()
-        }];
-        controller.state.current_song = Some(controller.queue[0].clone());
+        controller.set_list(
+            Some(5),
+            vec![Song {
+                id: 9,
+                ..Default::default()
+            }],
+            Some(9),
+        );
+        controller.state.current_song = controller.current_list_song();
         controller.state.position = Duration::from_secs(7);
+        controller.state.mode = PlayMode::RepeatAll;
+        controller.state.quality = AudioQualityLevel::Lossless;
         controller.save_cache();
         controller.persistence.flush();
 
@@ -514,6 +718,8 @@ mod tests {
         assert_eq!(loaded.playlist_id, 5);
         assert_eq!(loaded.song_id, 9);
         assert_eq!(loaded.position, Duration::from_secs(7));
+        assert_eq!(loaded.mode, PlayMode::RepeatAll);
+        assert_eq!(loaded.quality, AudioQualityLevel::Lossless);
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

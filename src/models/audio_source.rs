@@ -1,8 +1,11 @@
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 /// 音质档位，与网易云 `song_url_v1` 的 `level` 参数一一对应（共 9 档）。
+///
+/// 派生 `Serialize` 是因为用户选择的音质要写进播放缓存；JSON 里存的是档位名。
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub enum AudioQualityLevel {
     #[default]
     Standard,

@@ -79,6 +79,7 @@ impl PlayerBar {
             (
                 state.revision,
                 controller.is_play_requested(),
+                state.mode,
                 state.quality,
                 state.actual_quality,
             )
@@ -89,6 +90,7 @@ impl PlayerBar {
             let next = (
                 state.revision,
                 controller.is_play_requested(),
+                state.mode,
                 state.quality,
                 state.actual_quality,
             );
@@ -435,6 +437,8 @@ impl Render for PlayerBar {
         let liked =
             song_id.is_some_and(|song_id| self.library.read(cx).liked_song_ids.contains(&song_id));
         let snapshot = self.playback.read(cx).snapshot();
+        // 播放模式的图标和按下后的目标都由控制器给出，这里只负责显示。
+        let mode = snapshot.mode;
         let selected_quality = snapshot.quality;
         // 优先显示实际拿到的音质，降级时不会谎报。
         let quality_label = snapshot
@@ -581,14 +585,20 @@ impl Render for PlayerBar {
                             .items_center()
                             .gap(px(20.))
                             .text_color(colors.foreground)
-                            .child(hover_icon(
-                                "player-order-button",
-                                "播放顺序",
-                                "icons/播放顺序/顺序.svg",
-                                IconSize::Large.pixels(),
-                                colors.muted_foreground,
-                                colors,
-                            ))
+                            .child(
+                                hover_icon(
+                                    "player-order-button",
+                                    mode.label(),
+                                    mode.icon_path(),
+                                    IconSize::Large.pixels(),
+                                    colors.muted_foreground,
+                                    colors,
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.playback
+                                        .update(cx, |playback, cx| playback.cycle_mode(cx));
+                                })),
+                            )
                             .child(
                                 hover_icon(
                                     "player-previous-button",
