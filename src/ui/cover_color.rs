@@ -112,6 +112,18 @@ impl Backdrop {
         self.paint_ramp(bounds, (0., 1.), window);
     }
 
+    /// 铺满 `bounds` 并渐出到透明：浮层顶部盖住滚出去的内容。
+    /// `strength` 是顶端的不透明度，由调用方按滚出的距离给——顶部留白很薄时，
+    /// 没滚动就该是 0，否则会把还没开始滚的第一行一起盖掉。
+    pub(super) fn paint_top_fade(
+        &self,
+        bounds: Bounds<Pixels>,
+        strength: f32,
+        window: &mut Window,
+    ) {
+        self.paint_ramp(bounds, (strength, 0.), window);
+    }
+
     /// `alpha` 是上下两端的透明度系数，乘到渐变自身的不透明度上。
     /// 渐变本身可能就带透明度（歌单背景是「主色→透明」），所以必须乘不能盖。
     fn paint_ramp(&self, bounds: Bounds<Pixels>, alpha: (f32, f32), window: &mut Window) {

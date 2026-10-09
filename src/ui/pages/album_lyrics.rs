@@ -48,8 +48,10 @@ const CONTENT_MAX_ASPECT: f32 = 1.6;
 const SUMMARY_WIDTH_RATIO: f32 = 0.8;
 /// 当前歌词行滚动到居中的时长，也是摘要胶囊回顶部的时长。
 const SCROLL_DURATION: Duration = Duration::from_millis(450);
-/// 歌词底部渐隐带的高度。
+/// 歌词上下渐隐带的高度。
 const LYRIC_FADE_HEIGHT: f32 = 96.;
+/// 歌词顶部与「歌词/百科」胶囊之间的留白，也是滚动内容的顶部内边距。
+const LYRIC_TOP_PADDING: f32 = 20.;
 /// 当前歌词行在歌词区里的竖直锚点：`0.` 是顶端，`0.5` 是正中。
 const LYRIC_ANCHOR_RATIO: f32 = 0.33;
 /// 歌词行距（每行底边留白）。
@@ -582,8 +584,16 @@ impl AlbumLyrics {
     }
 
     /// 歌词分区：空态/错误重试，或可滚动的逐行歌词（当前行高亮、点击跳转）。
-    fn render_lyrics(&self, layout: &Layout, cx: &mut Context<Self>) -> AnyElement {
-        if self.lyrics.is_empty() {
+    ///
+    /// `visible` 是 [`visible_lyrics`] 算出的非空行下标：LRC 里的空时间行只负责
+    /// 清空高亮，不占版面，所以渲染和滚动都按这个子集编号。
+    fn render_lyrics(
+        &self,
+        layout: &Layout,
+        visible: &[usize],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if visible.is_empty() {
             return div()
                 .pt(px(80.))
                 .text_color(layout.colors.muted_foreground)
@@ -607,7 +617,7 @@ impl AlbumLyrics {
                 })
                 .into_any_element();
         }
-        // 外面包一层 relative：滚动区铺满，底部渐隐固定在下方。
+        // 外面包一层 relative：滚动区铺满，上下渐隐固定在两端。
         div()
             .relative()
             .flex_1()
@@ -622,13 +632,14 @@ impl AlbumLyrics {
                         this.lyric_scroll_anim.playing = None;
                         cx.stop_propagation();
                     }))
-                    .pt(px(72.))
+                    .pt(px(LYRIC_TOP_PADDING))
                     .pb(px(160.))
-                    .children(self.lyrics.iter().enumerate().map(|(index, line)| {
+                    .children(visible.iter().enumerate().map(|(slot, &index)| {
+                        let line = &self.lyrics[index];
                         let time = line.time;
                         let active = Some(index) == self.active_lyric;
                         div()
-                            .id(("song-lyric-line", index))
+                            .id(("song-lyric-line", slot))
                             .w_full()
                             .pb(px(LYRIC_LINE_GAP))
                             .text_size(px(if active {
@@ -660,6 +671,11 @@ impl AlbumLyrics {
                             })
                     })),
             )
+            // 顶部渐隐：歌词滚出上沿时淡入背景，强度随滚出的距离增长。
+            .child(lyrics_top_fade(
+                self.backdrop.clone(),
+                self.lyric_scroll.clone(),
+            ))
             // 底部渐隐：歌词滚到底时淡入背景，不做硬切。
             .child(lyrics_fade(self.backdrop.clone()))
             .into_any_element()
@@ -992,8 +1008,11 @@ impl Render for AlbumLyrics {
         if active != self.active_lyric {
             self.active_lyric = active;
         }
+        // 空行不上版面，居中时要用渲染后的行号；间奏落在空行上就沿用前一行。
+        let visible_lines = visible_lyrics(&self.lyrics);
+        let active_slot = active.and_then(|index| lyric_slot(&visible_lines, index));
         if self.tab == SongTab::Lyrics && !layout.show_comments {
-            self.sync_lyric_scroll(active, window);
+            self.sync_lyric_scroll(active_slot, window);
         } else {
             self.lyric_scroll_anim.aim(&self.lyric_scroll, None);
         }
@@ -1018,7 +1037,7 @@ impl Render for AlbumLyrics {
         .debug_selector(|| "album-summary-vinyl".into());
 
         // 先构建两块内容区，再自底向上拼装。
-        let lyric_content = self.render_lyrics(&layout, cx);
+        let lyric_content = self.render_lyrics(&layout, &visible_lines, cx);
         let tab_content = self.render_tab(&layout, lyric_content);
         let song_info = self.render_song_info(&layout, tab_content, cx);
         let comments = self.render_comments(&layout, cx);
@@ -1152,6 +1171,55 @@ fn lyrics_fade(backdrop: Backdrop) -> impl IntoElement {
     .h(px(LYRIC_FADE_HEIGHT))
 }
 
+/// 歌词顶部的渐隐带：从当地底色向下渐出到透明，把滚出上沿的歌词吃掉。
+///
+/// 和底部那条不同，它的强度跟着已经滚出的距离走：顶部只有 [`LYRIC_TOP_PADDING`]
+/// 那么薄，若也常年不透明，歌曲开头还没开始滚的首行就被背景盖住了。
+/// 底色同样按自身位置现采；不带 hitbox，滚轮与点击照旧落到下面的歌词上。
+fn lyrics_top_fade(backdrop: Backdrop, scroll: ScrollHandle) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            // 偏移在 paint 里现读：手动滚轮只重绘、不重跑 render，
+            // 用 render 时算好的值会慢一帧，跟手滚动时会看到渐隐滞后。
+            let strength = (-f32::from(scroll.offset().y) / LYRIC_FADE_HEIGHT).clamp(0., 1.);
+            backdrop.paint_top_fade(bounds, strength, window);
+        },
+    )
+    .absolute()
+    .left_0()
+    .top_0()
+    .w_full()
+    .h(px(LYRIC_FADE_HEIGHT))
+}
+
+/// 会占位的一行：正文和译文都空才不排版面（LRC 的空时间行用来清空高亮）。
+fn is_blank(line: &LyricLine) -> bool {
+    line.text.trim().is_empty()
+        && line
+            .translation
+            .as_ref()
+            .is_none_or(|text| text.trim().is_empty())
+}
+
+/// 非空歌词在 `lyrics` 里的原始下标，即渲染出来的行序。
+fn visible_lyrics(lyrics: &[LyricLine]) -> Vec<usize> {
+    lyrics
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| !is_blank(line))
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// 当前行落在渲染后的第几行；当前行本身是空行（间奏）时沿用前一行，
+/// 免得歌词在间奏里被拽回顶部。
+fn lyric_slot(visible: &[usize], active: usize) -> Option<usize> {
+    visible
+        .partition_point(|&index| index <= active)
+        .checked_sub(1)
+}
+
 /// 唱片区：居中内容区，左唱片右信息，整体受内容宽/唱片边长约束。
 fn build_song_page(layout: &Layout, song_info: AnyElement, vinyl: Option<Div>) -> AnyElement {
     div()
@@ -1282,11 +1350,40 @@ mod tests {
             super::anchored_offset(viewport, item(1010., 40.), px(500.)),
             px(-500.)
         );
-        // 靠前的行没有负滚动空间，只能顶到开头。
+        // 靠前的行没有负滚动空间，只能顶到开头：首行离视口顶只有顶部留白那么远。
         assert_eq!(
-            super::anchored_offset(viewport, item(72., 28.), px(900.)),
+            super::anchored_offset(viewport, item(super::LYRIC_TOP_PADDING, 28.), px(900.)),
             px(0.)
         );
+    }
+
+    #[test]
+    fn blank_lines_hold_no_row_but_keep_the_previous_one_anchored() {
+        use super::{is_blank, lyric_slot, visible_lyrics};
+        use crate::models::LyricLine;
+        use std::time::Duration;
+
+        let line = |text: &str, translation: Option<&str>| LyricLine {
+            time: Duration::ZERO,
+            text: text.into(),
+            translation: translation.map(str::to_owned),
+        };
+        let lyrics = vec![
+            line("一", None),
+            line("", None),
+            line("二", None),
+            line("  ", None),
+            line("", Some("二译")),
+        ];
+        // 空行不上版面；只留译文的行仍占一行。
+        assert_eq!(visible_lyrics(&lyrics), vec![0, 2, 4]);
+        assert!(!is_blank(&lyrics[4]) && is_blank(&lyrics[3]));
+        // 间奏落在空行上时沿用前一行，歌词不会被拽回顶部。
+        assert_eq!(lyric_slot(&[0, 2, 4], 0), Some(0));
+        assert_eq!(lyric_slot(&[0, 2, 4], 1), Some(0));
+        assert_eq!(lyric_slot(&[0, 2, 4], 2), Some(1));
+        assert_eq!(lyric_slot(&[0, 2, 4], 3), Some(1));
+        assert_eq!(lyric_slot(&[0, 2, 4], 4), Some(2));
     }
 
     #[cfg(target_os = "macos")]
