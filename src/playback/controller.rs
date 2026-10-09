@@ -7,6 +7,7 @@ use super::{
 use crate::{
     api::MusicApi,
     models::{AudioQualityLevel, Song},
+    persistence::{Persistence, PlaybackState},
 };
 use gpui::{Context, ReadGlobal, Window};
 use souvlaki::{MediaControlEvent, SeekDirection};
@@ -18,15 +19,30 @@ pub struct PlaybackController {
     state: PlaybackSnapshot,
     engine: PlayerEngine,
     queue: Vec<Song>,
+    playlist_id: Option<u64>,
     play_when_ready: bool,
     request: Option<tokio::task::AbortHandle>,
     pending_position: Duration,
     system_media: Option<SystemMedia>,
+    persistence: Persistence,
 }
 
 impl PlaybackController {
-    pub fn new(window: &Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &Window, persistence: Persistence, cx: &mut Context<Self>) -> Self {
         let mut this = Self::default();
+        this.persistence = persistence;
+        if let Some(cache) = this.persistence.load_playback() {
+            this.queue = cache.queue;
+            this.playlist_id = Some(cache.playlist_id);
+            if let Some(song) = this
+                .queue
+                .iter()
+                .find(|song| song.id == cache.song_id)
+                .cloned()
+            {
+                this.load_song(song, cache.position, cache.was_playing, cx);
+            }
+        }
         match SystemMedia::new(window) {
             Ok((media, mut events)) => {
                 this.system_media = Some(media);
@@ -125,11 +141,18 @@ impl PlaybackController {
         &self.state
     }
 
-    pub fn play_from_queue(&mut self, songs: Vec<Song>, song_id: u64, cx: &mut Context<Self>) {
+    pub fn play_from_queue(
+        &mut self,
+        playlist_id: u64,
+        songs: Vec<Song>,
+        song_id: u64,
+        cx: &mut Context<Self>,
+    ) {
         let Some(song) = songs.iter().find(|song| song.id == song_id).cloned() else {
             return;
         };
         self.queue = songs;
+        self.playlist_id = Some(playlist_id);
         if self
             .state
             .current_song
@@ -339,6 +362,7 @@ impl PlaybackController {
             return;
         }
         if !self.state.is_playing {
+            self.save_cache();
             return;
         }
         self.state.buffering = self.engine.buffering();
@@ -352,7 +376,25 @@ impl PlaybackController {
             // 从真实 PCM 消费量取进度，等待数据的静音不计入歌曲时间。
             self.state.position = self.engine.position().min(self.state.duration);
         }
+        self.save_cache();
         cx.notify();
+    }
+
+    fn save_cache(&self) {
+        let (Some(playlist_id), Some(song)) = (self.playlist_id, self.state.current_song.as_ref())
+        else {
+            return;
+        };
+        let cache = PlaybackState {
+            playlist_id,
+            queue: self.queue.clone(),
+            song_id: song.id,
+            position: self.state.position,
+            was_playing: self.is_play_requested(),
+        };
+        if let Err(error) = self.persistence.save_playback(&cache) {
+            eprintln!("保存播放缓存失败：{error}");
+        }
     }
 
     fn fail(&mut self, error: String) {
@@ -370,6 +412,7 @@ impl PlaybackController {
 
 impl Drop for PlaybackController {
     fn drop(&mut self) {
+        self.save_cache();
         if let Some(request) = self.request.take() {
             request.abort();
         }

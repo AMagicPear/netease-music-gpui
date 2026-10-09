@@ -1,11 +1,13 @@
 mod api;
 mod desktop;
 mod models;
+mod persistence;
 mod playback;
 mod state;
 mod ui;
 
 use gpui::*;
+use persistence::Persistence;
 use playback::PlaybackController;
 use state::{account::AccountState, library::MusicLibrary};
 use ui::{
@@ -17,6 +19,7 @@ use ui::{
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let assets = Assets::new()?;
+    let persistence = Persistence::new()?;
     let api = api::MusicApi::from_env()?;
     let application = gpui_kit::application()
         .with_http_client(api.http_client())
@@ -42,7 +45,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             cx,
             |window, cx| {
                 desktop::configure_window(window, cx);
-                let playback = cx.new(|cx| PlaybackController::new(window, cx));
+                let playback =
+                    cx.new(|cx| PlaybackController::new(window, persistence.clone(), cx));
                 let user_profile = cx.new(AccountState::new);
                 let library = cx.new(|cx| MusicLibrary::new(user_profile.clone(), cx));
                 let main_content = cx.new(|cx| {

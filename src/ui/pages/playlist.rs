@@ -606,13 +606,14 @@ impl PlaylistPage {
 
     fn select_song(&mut self, song_id: u64, cx: &mut Context<Self>) {
         let detail = self.detail.read(cx);
+        let playlist_id = detail.playlist.as_ref().map_or(0, |playlist| playlist.id);
         let songs = self
             .display_order
             .iter()
             .map(|&index| detail.songs[index].clone())
             .collect();
         self.playback.update(cx, |playback, cx| {
-            playback.play_from_queue(songs, song_id, cx);
+            playback.play_from_queue(playlist_id, songs, song_id, cx);
         });
     }
 
