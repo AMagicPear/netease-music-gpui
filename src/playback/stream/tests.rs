@@ -417,6 +417,53 @@ async fn ignored_range_falls_back_and_eof_source_remains_seekable() {
 }
 
 #[tokio::test]
+async fn seeking_to_end_while_paused_finishes_on_output_and_can_seek_back() {
+    for bytes in [
+        include_bytes!("../../../tests/fixtures/tone.mp3").as_slice(),
+        include_bytes!("../../../tests/fixtures/tone-vbr.mp3").as_slice(),
+        include_bytes!("../../../tests/fixtures/tone.flac").as_slice(),
+        include_bytes!("../../../tests/fixtures/tone.m4a").as_slice(),
+    ] {
+        let server = serve(bytes.to_vec(), true, None, None).await;
+        let (audio, mut output) = open_with_duration(&server, Some(Duration::from_secs(1))).await;
+        // 进度条的最大值使用整数毫秒，可能比精确时长少不足 1 ms。
+        let end = Duration::from_millis(audio.duration.unwrap().as_millis() as u64);
+        audio.seek(end);
+        let pcm = audio.pcm.clone();
+        tokio::task::spawn_blocking(move || {
+            let data = pcm.data.lock().unwrap();
+            let (data, timeout) = pcm
+                .changed
+                .wait_timeout_while(data, Duration::from_secs(3), |data| {
+                    !data.decode_finished && data.error.is_none()
+                })
+                .unwrap();
+            let error = data.error.clone();
+            let empty = data.chunks.is_empty();
+            drop(data);
+            assert!(!timeout.timed_out());
+            assert!(error.is_none(), "{error:?}");
+            assert!(empty);
+        })
+        .await
+        .unwrap();
+        assert!(!audio.finished(), "暂停时尚未消费输出，不能触发切歌");
+        assert_eq!(
+            read_frame(&mut output),
+            Some(vec![0.; output.channels as usize])
+        );
+        assert!(audio.finished());
+        assert!(!audio.buffering());
+        assert!(audio.error().is_none());
+        audio.seek(Duration::from_millis(500));
+        assert!(!audio.finished());
+        wait_pcm(&audio.pcm).await;
+        assert!(next_audible(&mut output).await.abs() > 0.);
+        assert!(audio.error().is_none());
+    }
+}
+
+#[tokio::test]
 async fn truncated_audio_is_error_instead_of_normal_eof() {
     let mut bytes = wav(2);
     bytes.truncate(44 + 48000 * 2);

@@ -119,6 +119,11 @@ fn decode_generation(
         native_duration
     };
     if let Some(duration) = duration {
+        // 进度条以整数毫秒表示终点；显式跳到终点无需向容器请求不存在的帧。
+        // 初次加载仍需解码以创建输出源，结束状态由输出端消费后交给控制器。
+        if ready.is_none() && !target.is_zero() && target.as_millis() >= duration.as_millis() {
+            return Ok(());
+        }
         target = target.min(duration.saturating_sub(Duration::from_micros(1)));
     }
     // MP3 无 Xing 时容器时长是估计。按可信 API 时长换算粗定位的比例，避免提前钳制目标。
