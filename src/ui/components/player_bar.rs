@@ -18,6 +18,10 @@ use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPA
 /// 播放栏固定高度；专辑歌词页据此估算可视区域高度。
 pub const PLAYER_BAR_HEIGHT: f32 = 86.;
 
+/// 黑胶页展开/收起的时长。播放栏左封面滑出、整栏配色、进度条、音量、
+/// 页面滑入都用这一个值，它们在同一帧启动、同一时长结束；改这里整体一起变。
+pub const ALBUM_REVEAL_DURATION: Duration = Duration::from_millis(500);
+
 pub struct PlayerBar {
     playback: Entity<PlaybackController>,
     /// 喜欢状态不在播放控制器里，而在音乐库中，红心要据此显示实心/空心。
@@ -369,14 +373,14 @@ impl Render for PlayerBar {
         let expand = transition(
             "player-bar-expand",
             if self.album_expanded { 1_f32 } else { 0. },
-            Transition::new(Duration::from_millis(500)).ease(ease_out_quint()),
+            Transition::new(ALBUM_REVEAL_DURATION).ease(ease_out_quint()),
             window,
             cx,
         );
         let backdrop_color = self
             .album_backdrop
-            .get()
-            .map(|(_, gradient)| Hsla::from(gradient.0[1]))
+            .gradient()
+            .map(|gradient| Hsla::from(gradient.0[1]))
             .unwrap_or(hsla(0., 0., 0.12, 1.));
         let colors = blend_colors(
             theme_colors,
@@ -475,7 +479,7 @@ impl Render for PlayerBar {
                 let surface = theme_colors.surface;
                 bar.child(canvas(|_, _, _| {}, move |bounds, _, window, _| {
                     // 绘制时读取同一帧的渐变底端，再按展开进度从普通底色过渡过去。
-                    let bottom = backdrop.get().map(|(_, gradient)| gradient.0[1]).unwrap_or_else(|| hsla(0., 0., 0.12, 1.).into());
+                    let bottom = backdrop.gradient().map(|gradient| Hsla::from(gradient.0[1])).unwrap_or_else(|| hsla(0., 0., 0.12, 1.));
                     window.paint_quad(fill(bounds, surface.interpolate(&Hsla::from(bottom), expand)));
                 }).absolute().inset_0())
             })
@@ -496,7 +500,10 @@ impl Render for PlayerBar {
                             .flex()
                             .items_center()
                             .gap(px(10.))
-                            .when(!self.album_expanded, |left| left.child(
+                            // 封面尺寸固定 60，动画只改它在布局里占的位置：收起时整块向左滑出
+                            // 70px（自身 60 + 间隔 10），后边的歌名与互动区随之平滑左移；
+                            // 滑出部分由左侧容器的 overflow_hidden 裁掉。
+                            .child(
                                 div()
                                     .id("player-album-cover")
                                     .cursor_pointer()
@@ -505,8 +512,10 @@ impl Render for PlayerBar {
                                     }))
                                     .size(px(60.))
                                     .flex_none()
+                                    .ml(px(-70. * expand))
+                                    .opacity(1. - expand)
                                     .child(self.vinyl(60., "images/miniVinyl.png", window, cx)),
-                            ))
+                            )
                             .child(
                                 div()
                                     .flex()

@@ -51,9 +51,9 @@ use crate::ui::assets::thumbnail_url;
 use crate::ui::components::{
     CELL_PADDING, COLUMN_GAP, HEADER_HEIGHT, ROW_TEXT_SIZE, ResizeDragPreview, TabBar, TabChanged,
     TabItem, TableColumn, artist_label, format_duration, like_icon_path, quality_badge_path,
-    virtual_table,
+    spinner, virtual_table,
 };
-use crate::ui::cover_color::{Backdrop, paint_backdrop};
+use crate::ui::cover_color::Backdrop;
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
 
 // 「更多」菜单里的三个命令。
@@ -559,9 +559,7 @@ impl PlaylistPage {
                         .child(
                             canvas(move |bounds, _, _| bounds, {
                                 let backdrop = backdrop.clone();
-                                move |bounds, _, window, _| {
-                                    paint_backdrop(bounds, &backdrop, window)
-                                }
+                                move |bounds, _, window, _| backdrop.paint(bounds, window)
                             })
                             .absolute()
                             .inset_0(),
@@ -1149,21 +1147,11 @@ impl Render for PlaylistPage {
                 .py(px(36.))
                 .flex()
                 .justify_center()
-                .child(
-                    svg()
-                        .path("icons/loading.svg")
-                        .size(px(20.))
-                        .text_color(colors.muted_foreground)
-                        .with_animation(
-                            "playlist-loading-animation",
-                            Animation::new(std::time::Duration::from_millis(900)).repeat(),
-                            |icon, progress| {
-                                icon.with_transformation(Transformation::rotate(percentage(
-                                    progress,
-                                )))
-                            },
-                        ),
-                )
+                .child(spinner(
+                    "playlist-loading-animation",
+                    20.,
+                    colors.muted_foreground,
+                ))
                 .into_any_element(),
             _ if error.is_some() => div()
                 .text_color(colors.muted_foreground)

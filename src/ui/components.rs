@@ -8,6 +8,7 @@ mod drag_preview;
 mod player_bar;
 mod popover;
 mod progress_bar;
+mod spinner;
 mod tab_bar;
 mod vinyl_stage;
 mod virtual_table;
@@ -15,8 +16,9 @@ mod volume_control;
 
 pub use comment_row::comment_row;
 pub use drag_preview::ResizeDragPreview;
-pub use player_bar::{OpenAlbumLyrics, PLAYER_BAR_HEIGHT, PlayerBar};
+pub use player_bar::{ALBUM_REVEAL_DURATION, OpenAlbumLyrics, PLAYER_BAR_HEIGHT, PlayerBar};
 pub use popover::Popover;
+pub use spinner::spinner;
 pub use tab_bar::{TabBar, TabChanged, TabItem};
 pub use vinyl_stage::{Tonearm, vinyl_stage};
 pub use virtual_table::{

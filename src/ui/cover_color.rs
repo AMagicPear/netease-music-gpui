@@ -45,6 +45,20 @@ impl CoverGradient {
             linear_color_stop(self.0[1], 1.),
         )
     }
+
+    /// 按位置取色：`0.` 是渐变顶端，`1.` 是底端。
+    /// 供悬浮层按自己在屏幕上的位置采出恰好对得上的底色。
+    pub(super) fn sample(self, position: f32) -> Hsla {
+        let position = position.clamp(0., 1.);
+        let (from, to) = (self.0[0], self.0[1]);
+        // 与 `interpolate` 一致地用 RGB 插值，避免色相绕行。
+        Hsla::from(Rgba {
+            r: from.r + (to.r - from.r) * position,
+            g: from.g + (to.g - from.g) * position,
+            b: from.b + (to.b - from.b) * position,
+            a: from.a + (to.a - from.a) * position,
+        })
+    }
 }
 
 impl Interpolate for CoverGradient {
@@ -63,8 +77,64 @@ impl Interpolate for CoverGradient {
     }
 }
 
-/// 保存当前帧的颜色和窗口坐标，悬浮栏从相同的渐变位置裁取背景。
-pub(super) type Backdrop = Rc<Cell<Option<(Bounds<Pixels>, CoverGradient)>>>;
+/// 页面背景那一层渐变，连同它在屏幕上的位置。
+///
+/// 渐变铺满整页且不随内容滚动，所以贴在内容上的浮层要把它当背景时，
+/// 必须按自己当前在屏幕上的位置现采，否则一滚就和身后错位。
+/// 共享是必需的（多处浮层读同一份），回填是必需的（由绘制阶段写），所以是 `Rc<Cell<_>>`。
+#[derive(Clone, Default)]
+pub(super) struct Backdrop(Rc<Cell<Option<Frame>>>);
+
+/// 一帧的背景快照。
+#[derive(Clone, Copy)]
+struct Frame {
+    /// 渐变铺开的范围。
+    bounds: Bounds<Pixels>,
+    gradient: CoverGradient,
+}
+
+impl Backdrop {
+    fn set(&self, bounds: Bounds<Pixels>, gradient: CoverGradient) {
+        self.0.set(Some(Frame { bounds, gradient }));
+    }
+
+    /// 当前帧的渐变；还没画过背景时是 `None`。
+    pub(super) fn gradient(&self) -> Option<CoverGradient> {
+        self.0.get().map(|frame| frame.gradient)
+    }
+
+    /// 原样铺满 `bounds`：悬浮栏要和身后连成一片。
+    pub(super) fn paint(&self, bounds: Bounds<Pixels>, window: &mut Window) {
+        self.paint_ramp(bounds, (1., 1.), window);
+    }
+
+    /// 铺满 `bounds` 并从透明渐入：浮层底部淡出到背景。
+    pub(super) fn paint_fade(&self, bounds: Bounds<Pixels>, window: &mut Window) {
+        self.paint_ramp(bounds, (0., 1.), window);
+    }
+
+    /// `alpha` 是上下两端的透明度系数，乘到渐变自身的不透明度上。
+    /// 渐变本身可能就带透明度（歌单背景是「主色→透明」），所以必须乘不能盖。
+    fn paint_ramp(&self, bounds: Bounds<Pixels>, alpha: (f32, f32), window: &mut Window) {
+        let Some(frame) = self.0.get() else {
+            return;
+        };
+        let height = f32::from(frame.bounds.size.height).max(1.);
+        let at = |y: Pixels| {
+            frame
+                .gradient
+                .sample((f32::from(y) - f32::from(frame.bounds.top())) / height)
+        };
+        window.paint_quad(fill(
+            bounds,
+            linear_gradient(
+                180.,
+                linear_color_stop(at(bounds.top()).opacity(alpha.0), 0.),
+                linear_color_stop(at(bounds.bottom()).opacity(alpha.1), 1.),
+            ),
+        ));
+    }
+}
 
 pub(super) fn gradient_layer(
     id: &'static str,
@@ -80,19 +150,11 @@ pub(super) fn gradient_layer(
                 window,
                 cx,
             );
-            backdrop.set(Some((bounds, gradient)));
+            backdrop.set(bounds, gradient);
             gradient
         },
         |bounds, gradient, window, _| window.paint_quad(fill(bounds, gradient.background())),
     )
-}
-
-pub(super) fn paint_backdrop(bounds: Bounds<Pixels>, backdrop: &Backdrop, window: &mut Window) {
-    if let Some((gradient_bounds, gradient)) = backdrop.get() {
-        window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            window.paint_quad(fill(gradient_bounds, gradient.background()));
-        });
-    }
 }
 
 /// 网易黑胶页的亮度分段映射；保留主色的色相，把上下端点都压入暗色范围。
@@ -188,8 +250,41 @@ pub(super) fn blend_colors(from: ColorTokens, to: ColorTokens, t: f32) -> ColorT
 
 #[cfg(test)]
 mod tests {
-    use super::{blend_colors, cover_color, dark_colors, dark_gradient};
-    use gpui::{Hsla, hsla};
+    use super::{CoverGradient, blend_colors, cover_color, dark_colors, dark_gradient};
+    use gpui::{Hsla, Rgba, hsla};
+
+    #[test]
+    fn gradient_sampling_hits_its_stops_and_clamps() {
+        let stops = [
+            Rgba {
+                r: 0.1,
+                g: 0.2,
+                b: 0.3,
+                a: 1.,
+            },
+            Rgba {
+                r: 0.7,
+                g: 0.8,
+                b: 0.9,
+                a: 1.,
+            },
+        ];
+        let gradient = CoverGradient(stops);
+        assert_eq!(gradient.sample(0.), Hsla::from(stops[0]));
+        assert_eq!(gradient.sample(1.), Hsla::from(stops[1]));
+        // 中点落在两站之间，而不是贴到某一端。
+        assert!(gradient.sample(0.).l < gradient.sample(0.5).l);
+        assert!(gradient.sample(0.5).l < gradient.sample(1.).l);
+        // 越界夹到两端，不会采出渐变之外的颜色。
+        assert_eq!(gradient.sample(-1.), gradient.sample(0.));
+        assert_eq!(gradient.sample(2.), gradient.sample(1.));
+        // 渐变自带的透明度要能采出来：歌单背景就是「主色 → 透明」，
+        // 涂到浮层上时只能乘上自己的系数，不能把透明度盖掉。
+        let fading = CoverGradient([stops[0], Rgba { a: 0., ..stops[1] }]);
+        assert!((fading.sample(0.).a - 1.).abs() < 1e-6);
+        assert!((fading.sample(0.5).a - 0.5).abs() < 1e-6);
+        assert!(fading.sample(1.).a.abs() < 1e-6);
+    }
 
     #[test]
     fn blend_colors_runs_between_the_two_palettes() {

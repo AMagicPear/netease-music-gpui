@@ -7,7 +7,7 @@ use gpui_kit::base::{
 };
 use gpui_kit::component::slider::{SliderEvent, SliderState};
 
-use super::format_duration;
+use super::{ALBUM_REVEAL_DURATION, format_duration};
 use crate::playback::PlaybackController;
 use crate::ui::cover_color::{Backdrop, CoverGradient, blend_colors, dark_colors, dark_gradient};
 use crate::ui::theme::DOLPHIN_FAMILY;
@@ -189,14 +189,13 @@ impl Render for ProgressBar {
         let expand = transition(
             "player-progress-expand",
             if self.dark { 1_f32 } else { 0. },
-            Transition::new(Duration::from_millis(500)).ease(ease_out_quint()),
+            Transition::new(ALBUM_REVEAL_DURATION).ease(ease_out_quint()),
             window,
             cx,
         );
         let background = self
             .backdrop
-            .get()
-            .map(|(_, gradient)| gradient)
+            .gradient()
             .unwrap_or_else(|| dark_gradient(None));
         let colors = blend_colors(
             theme_colors,
@@ -281,8 +280,7 @@ impl Render for ProgressBar {
                                                     move |bounds, _, window, _| {
                                                         // 绘制时读取同一帧的渐变：填充色从主题主色过渡到渐变进度色。
                                                         let gradient = backdrop
-                                                            .get()
-                                                            .map(|(_, gradient)| gradient)
+                                                            .gradient()
                                                             .unwrap_or_else(|| dark_gradient(None));
                                                         let color =
                                                             theme_colors.primary.interpolate(

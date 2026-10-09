@@ -215,7 +215,7 @@ impl MainContent {
             pages,
             playlist_page,
             library,
-            playlist_backdrop: Rc::new(Cell::new(None)),
+            playlist_backdrop: Backdrop::default(),
             page_scroll: ContentPage::all()
                 .map(|page| (page, ScrollHandle::default()))
                 .collect(),
@@ -578,5 +578,4 @@ mod tests {
             ["https://p1.music.126.net/test-cover.png?param=340y340"]
         );
     }
-
 }

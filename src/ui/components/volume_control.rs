@@ -4,9 +4,8 @@ use gpui_kit::base::{
     ColorTokens, Slider, SliderIndicator, SliderThumb, SliderTrack, Theme, Transition, transition,
 };
 use gpui_kit::component::slider::{SliderEvent, SliderState};
-use std::time::Duration;
 
-use super::{LAYER_VOLUME_BALLOON, icon_hover_color};
+use super::{ALBUM_REVEAL_DURATION, LAYER_VOLUME_BALLOON, icon_hover_color};
 use crate::playback::PlaybackController;
 use crate::ui::cover_color::{blend_colors, dark_colors};
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA};
@@ -292,7 +291,7 @@ impl Render for VolumeControl {
         let expand = transition(
             "player-volume-expand",
             if self.dark { 1_f32 } else { 0. },
-            Transition::new(Duration::from_millis(500)).ease(ease_out_quint()),
+            Transition::new(ALBUM_REVEAL_DURATION).ease(ease_out_quint()),
             window,
             cx,
         );
