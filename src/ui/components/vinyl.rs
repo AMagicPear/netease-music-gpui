@@ -8,7 +8,7 @@ use gpui::{prelude::FluentBuilder, *};
 
 use super::vinyl_stage;
 use crate::playback::PlaybackController;
-use crate::ui::assets::thumbnail_url;
+use crate::ui::assets::{track_cover_image, track_cover_url};
 
 const LARGE_COVER_RATIO: f32 = 0.63;
 
@@ -117,24 +117,20 @@ impl Vinyl {
         let mut clock = self.clock.get();
         clock.sync(self.playing, Instant::now());
         self.clock.set(clock);
-        let cover_url = snapshot
-            .current_song
-            .as_ref()
-            .and_then(|song| song.al.pic_url.as_ref());
-        let cover_changed = self.cover_url.as_ref() != cover_url;
+        let cover_url = snapshot.current_song.as_ref().map(|song| {
+            track_cover_url(
+                song.al.pic_url.as_deref(),
+                if self.disc_path == "images/disc.png" {
+                    480
+                } else {
+                    80
+                },
+            )
+        });
+        let cover_changed = self.cover_url != cover_url;
         if cover_changed {
-            self.cover_url = cover_url.cloned();
-            self.cover = cover_url.map(|url| {
-                thumbnail_url(
-                    url,
-                    if self.disc_path == "images/disc.png" {
-                        480
-                    } else {
-                        80
-                    },
-                )
-                .into()
-            });
+            self.cover_url = cover_url.clone();
+            self.cover = cover_url.map(Into::into);
         }
         playing_changed || cover_changed
     }
@@ -170,7 +166,7 @@ impl Render for Vinyl {
                     )
                     .when_some(cover.clone(), |disc, cover| {
                         disc.child(
-                            img(cover)
+                            img(track_cover_image(cover))
                                 .absolute()
                                 .left(relative((1. - cover_ratio) / 2.))
                                 .top(relative((1. - cover_ratio) / 2.))

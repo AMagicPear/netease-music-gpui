@@ -3,7 +3,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use gpui::{AssetSource, Result, SharedString};
+use gpui::{
+    App, AssetSource, ImageCacheError, ImageSource, ImgResourceLoader, RenderImage, Resource,
+    Result, SharedString, Window,
+};
+use std::sync::Arc;
+
+pub const DEFAULT_TRACK_COVER: &str = "images/trackBlank.png";
 
 pub struct Assets {
     base: PathBuf,
@@ -17,6 +23,73 @@ impl Assets {
             base: resource_directory(&executable, development)?,
         })
     }
+
+    /// 原生媒体控件使用 file://；沿用与应用资源相同的打包路径规则。
+    pub fn file_url(path: &str) -> Result<String> {
+        let file = Self::new()?.base.join(path);
+        gpui::http_client::Url::from_file_path(file)
+            .map(String::from)
+            .map_err(|_| anyhow::anyhow!("无法生成本地资源 URL"))
+    }
+}
+
+pub fn track_cover_url(url: Option<&str>, pixels: u32) -> String {
+    url.map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(|url| thumbnail_url(url, pixels))
+        .unwrap_or_else(|| DEFAULT_TRACK_COVER.to_owned())
+}
+
+pub fn cover_resource(url: &str) -> Resource {
+    if url == DEFAULT_TRACK_COVER {
+        // Path 与原生媒体的 file:// 指向同一个打包资源，也便于无窗口测试加载。
+        if let Ok(assets) = Assets::new() {
+            return assets.base.join(DEFAULT_TRACK_COVER).into();
+        }
+    }
+    match ImageSource::from(url) {
+        ImageSource::Resource(resource) => resource,
+        _ => unreachable!("字符串图片源始终是 Resource"),
+    }
+}
+
+fn load_cover(
+    resource: &Resource,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
+    match window.use_asset::<ImgResourceLoader>(resource, cx) {
+        Some(Err(_)) => {
+            window.use_asset::<ImgResourceLoader>(&cover_resource(DEFAULT_TRACK_COVER), cx)
+        }
+        result => result,
+    }
+}
+
+/// UI 与封面取色共用加载结果；下载失败时换图片数据，圆角、旋转和布局仍由原 img 应用。
+pub fn track_cover_image(source: impl Into<ImageSource>) -> ImageSource {
+    match source.into() {
+        ImageSource::Resource(resource) => {
+            let resource = match resource {
+                Resource::Embedded(ref path) if path.as_ref() == DEFAULT_TRACK_COVER => {
+                    cover_resource(DEFAULT_TRACK_COVER)
+                }
+                resource => resource,
+            };
+            ImageSource::from(move |window: &mut Window, cx: &mut App| {
+                load_cover(&resource, window, cx)
+            })
+        }
+        source => source,
+    }
+}
+
+pub fn load_track_cover(
+    url: &str,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
+    load_cover(&cover_resource(url), window, cx)
 }
 
 /// 发布资源相对于可执行文件定位，不受启动时工作目录影响。
@@ -113,7 +186,83 @@ impl AssetSource for Assets {
 
 #[cfg(test)]
 mod tests {
-    use super::{resource_directory, thumbnail_url};
+    use super::{DEFAULT_TRACK_COVER, resource_directory, thumbnail_url, track_cover_url};
+
+    #[test]
+    fn missing_cover_addresses_use_the_bundled_image() {
+        for url in [None, Some(""), Some(" \t ")] {
+            assert_eq!(track_cover_url(url, 480), DEFAULT_TRACK_COVER);
+        }
+        assert_eq!(
+            track_cover_url(Some("http://p1.music.126.net/cover.jpg"), 80),
+            "https://p1.music.126.net/cover.jpg?param=80y80"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn missing_and_failed_remote_covers_load_the_same_local_image(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        use gpui::*;
+        use std::{
+            cell::Cell,
+            rc::Rc,
+            sync::atomic::{AtomicUsize, Ordering},
+        };
+        let requests = Arc::new(AtomicUsize::new(0));
+        let client = gpui::http_client::FakeHttpClient::create({
+            let requests = requests.clone();
+            move |_| {
+                requests.fetch_add(1, Ordering::SeqCst);
+                async {
+                    Ok(gpui::http_client::Response::builder()
+                        .status(404)
+                        .body(gpui::http_client::AsyncBody::from("no image"))
+                        .unwrap())
+                }
+            }
+        });
+        cx.update(|cx| cx.set_http_client(client));
+        struct Host {
+            url: Option<&'static str>,
+            decoded_width: Rc<Cell<i32>>,
+        }
+        impl Render for Host {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let url = track_cover_url(self.url, 480);
+                if let Some(Ok(image)) = load_track_cover(&url, window, cx) {
+                    self.decoded_width.set(image.size(0).width.0);
+                }
+                img(track_cover_image(url)).size(px(100.))
+            }
+        }
+        let width = Rc::new(Cell::new(0));
+        let window = cx.open_window(size(px(100.), px(100.)), |_, _| Host {
+            url: None,
+            decoded_width: width.clone(),
+        });
+        for _ in 0..3 {
+            cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
+                .unwrap();
+            cx.run_until_parked();
+        }
+        assert_eq!(width.get(), 756);
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        window
+            .update(cx, |host, _, cx| {
+                host.url = Some("https://example.com/missing.png");
+                host.decoded_width.set(0);
+                cx.notify();
+            })
+            .unwrap();
+        for _ in 0..3 {
+            cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
+                .unwrap();
+            cx.run_until_parked();
+        }
+        assert_eq!(width.get(), 756);
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn resources_follow_executable_and_only_development_can_fall_back() {

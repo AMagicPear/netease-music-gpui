@@ -17,8 +17,7 @@ impl CoverColor {
     /// 与 img 共用 GPUI 缓存；新图加载中保留上一张封面的颜色。
     pub(super) fn load(&mut self, url: &str, window: &mut Window, cx: &mut App) -> Option<Hsla> {
         if self.cached.as_ref().map(|cached| cached.0.as_str()) != Some(url) {
-            let source = Resource::Uri(url.to_owned().into());
-            if let Some(image) = window.use_asset::<ImgResourceLoader>(&source, cx) {
+            if let Some(image) = crate::ui::assets::load_track_cover(url, window, cx) {
                 let color = image.ok().and_then(|image| {
                     let size = image.size(0);
                     cover_color(

@@ -117,11 +117,7 @@ impl SongDisplay {
         }
         let end = title.len();
         Self {
-            cover: song
-                .al
-                .pic_url
-                .as_ref()
-                .map(|url| thumbnail_url(url, 72).into()),
+            cover: Some(crate::ui::assets::track_cover_url(song.al.pic_url.as_deref(), 72).into()),
             title: title.into(),
             subtitle: start..end,
             album: song
@@ -839,7 +835,7 @@ impl PlaylistPage {
                         .when_some(display.cover.clone(), |cover, source| {
                             // GPUI 的 overflow_hidden 按矩形裁剪，圆角需要直接设置在图片上。
                             cover.child(
-                                img(source)
+                                img(crate::ui::assets::track_cover_image(source))
                                     .size_full()
                                     .rounded(px(4.))
                                     .object_fit(ObjectFit::Cover),

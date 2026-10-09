@@ -1,5 +1,6 @@
 mod audio_cache;
 mod controller;
+mod cover_art;
 mod engine;
 mod stream;
 mod system_media;

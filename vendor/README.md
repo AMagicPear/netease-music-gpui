@@ -1,5 +1,7 @@
 # GPUI 图片 GPU 旋转补丁
 
+以下为 GPUI 补丁的准备及维护说明。
+
 这里只跟踪 `patches/gpui-image-transform-0.3.8.patch`，不提交完整依赖源码。
 补丁从原 stash 的 GPUI 0.3.7 实验移植到当前使用的 **0.3.8**。
 

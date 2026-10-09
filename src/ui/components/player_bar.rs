@@ -14,7 +14,7 @@ use crate::api::MusicApi;
 use crate::models::AudioQualityLevel;
 use crate::playback::PlaybackController;
 use crate::state::library::MusicLibrary;
-use crate::ui::assets::thumbnail_url;
+use crate::ui::assets::track_cover_url;
 use crate::ui::cover_color::{Backdrop, CoverGradient, blend_color, blend_colors, dark_colors};
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
 
@@ -177,15 +177,8 @@ impl PlayerBar {
     }
 
     pub(crate) fn album_cover_url(&self, cx: &App) -> Option<String> {
-        self.playback
-            .read(cx)
-            .snapshot()
-            .current_song
-            .as_ref()?
-            .al
-            .pic_url
-            .as_ref()
-            .map(|url| thumbnail_url(url, 480))
+        let song = self.playback.read(cx).snapshot().current_song.as_ref()?;
+        Some(track_cover_url(song.al.pic_url.as_deref(), 480))
     }
 
     fn load_counts(&mut self, cx: &mut Context<Self>) {

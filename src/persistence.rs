@@ -124,6 +124,11 @@ impl Persistence {
         self.cache_directory.join("audio-v1")
     }
 
+    /// 系统媒体控件的封面缓存；内容可重建，被系统清掉只会回落默认图。
+    pub fn cover_cache_directory(&self) -> PathBuf {
+        self.cache_directory.join("cover-v1")
+    }
+
     pub fn load_playback(&self) -> Option<PlaybackState> {
         let bytes = fs::read(self.directory.join("playback.json")).ok()?;
         serde_json::from_slice(&bytes).ok()

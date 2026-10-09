@@ -1,6 +1,7 @@
 use super::{
     PlaybackSnapshot,
     audio_cache::{AudioCacheStore, DEFAULT_CAPACITY, DEFAULT_MAX_FILE_BYTES},
+    cover_art::CoverArtCache,
     engine::PlayerEngine,
     stream::{BufferedSource, StreamingAudio},
     system_media::SystemMedia,
@@ -10,7 +11,7 @@ use crate::{
     models::{AudioQualityLevel, PlayMode, Song},
     persistence::{Persistence, PlaybackState},
 };
-use gpui::{App, Context, ImgResourceLoader, ReadGlobal, Resource, Window};
+use gpui::{App, Context, ImgResourceLoader, ReadGlobal, Window};
 use rand::seq::SliceRandom;
 use souvlaki::{MediaControlEvent, SeekDirection};
 use std::{sync::Arc, time::Duration};
@@ -74,7 +75,8 @@ impl PlaybackController {
                 this.load_song(song, cache.position, false, cx);
             }
         }
-        match SystemMedia::new(window) {
+        let covers = Arc::new(CoverArtCache::new(this.persistence.cover_cache_directory()));
+        match SystemMedia::new(window, covers) {
             Ok((media, mut events)) => {
                 this.system_media = Some(media);
                 // 原生回调只发送命令，Entity 的修改始终回到 GPUI 线程。
@@ -89,12 +91,13 @@ impl PlaybackController {
                     }
                 })
                 .detach();
-                cx.observe_self(|this, _| {
+                cx.observe_self(|this, cx| {
                     if let Some(media) = &mut this.system_media {
                         if let Err(error) = media.sync(&this.state, this.engine.has_source()) {
                             eprintln!("同步系统媒体控件失败：{error}");
                         }
                     }
+                    this.sync_media_cover(cx);
                 })
                 .detach();
             }
@@ -285,24 +288,26 @@ impl PlaybackController {
 
     fn sync_preloaded_covers(&mut self, next: Option<&Song>, cx: &mut Context<Self>) {
         let urls = |song: &Song| {
-            song.al
-                .pic_url
-                .as_deref()
-                .map(|url| [80, 480].map(|pixels| crate::ui::assets::thumbnail_url(url, pixels)))
+            [80, 480].map(|pixels| {
+                crate::ui::assets::track_cover_url(song.al.pic_url.as_deref(), pixels)
+            })
         };
-        let current = self.state.current_song.as_ref().and_then(urls);
-        let next = next.and_then(urls);
+        let current = self.state.current_song.as_ref().map(urls);
+        let next = next.map(urls);
+        let _ = cx.fetch_asset::<ImgResourceLoader>(&crate::ui::assets::cover_resource(
+            crate::ui::assets::DEFAULT_TRACK_COVER,
+        ));
         // 只保留本控制器预取的当前/下一首封面，避免沿队列一直积累解码图片。
         self.preloaded_covers.retain(|url| {
             let keep = current.as_ref().is_some_and(|urls| urls.contains(url))
                 || next.as_ref().is_some_and(|urls| urls.contains(url));
-            if !keep {
-                cx.remove_asset::<ImgResourceLoader>(&Resource::Uri(url.clone().into()));
+            if !keep && url != crate::ui::assets::DEFAULT_TRACK_COVER {
+                cx.remove_asset::<ImgResourceLoader>(&crate::ui::assets::cover_resource(url));
             }
             keep
         });
         for url in next.into_iter().flatten() {
-            let resource = Resource::Uri(url.clone().into());
+            let resource = crate::ui::assets::cover_resource(&url);
             if let Some(Err(_)) = cx.fetch_asset::<ImgResourceLoader>(&resource) {
                 cx.remove_asset::<ImgResourceLoader>(&resource);
                 let _ = cx.fetch_asset::<ImgResourceLoader>(&resource);
@@ -311,6 +316,31 @@ impl PlaybackController {
                 self.preloaded_covers.push(url);
             }
         }
+    }
+
+    /// 系统媒体控件的封面必须是本地文件：先下载，落盘后再通知一次让元数据带上它。
+    fn sync_media_cover(&mut self, cx: &mut Context<Self>) {
+        let Some(request) = self
+            .system_media
+            .as_ref()
+            .and_then(|media| media.cover_request(&self.state))
+        else {
+            return;
+        };
+        let api = MusicApi::global(cx);
+        let http = api.audio_http();
+        let download = api
+            .runtime
+            .spawn(async move { request.cache.download(request.url, &http).await });
+        cx.spawn(async move |this, cx| {
+            let downloaded = download.await.is_ok_and(|path| path.is_some());
+            let _ = this.update(cx, |_, cx| {
+                if downloaded {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn maybe_preload(&mut self, cx: &mut Context<Self>) {
@@ -959,7 +989,7 @@ mod tests {
     fn preloaded_covers_reuse_exact_ui_sizes_and_retire_old_candidates(
         cx: &mut gpui::TestAppContext,
     ) {
-        use gpui::AppContext;
+        use gpui::{AppContext, Resource};
         use std::sync::Mutex;
         let requests = Arc::new(Mutex::new(Vec::new()));
         let client = gpui::http_client::FakeHttpClient::create({

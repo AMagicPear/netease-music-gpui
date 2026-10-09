@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::Window;
@@ -7,20 +8,38 @@ use souvlaki::{
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use super::PlaybackSnapshot;
+use super::cover_art::CoverArtCache;
+use crate::models::Song;
+
+/// 系统媒体控件的封面只做展示，不必下载原图。
+const COVER_PIXELS: u32 = 512;
 
 /// 仅桥接系统媒体会话，音频和队列仍由 PlaybackController 管理。
 pub(super) struct SystemMedia {
     controls: MediaControls,
     metadata_key: Option<(u64, Duration)>,
+    /// 最近一次写进原生控件的封面，含兜底的本地默认图。
+    published_cover: Option<String>,
     playback: Option<MediaPlayback>,
+    covers: Arc<CoverArtCache>,
+    fallback_cover_url: String,
     #[cfg(target_os = "linux")]
     volume: Option<f32>,
+}
+
+/// 需要后台下载的远程封面；由控制器发起下载，完成后再刷新一次元数据。
+pub(super) struct CoverRequest {
+    pub cache: Arc<CoverArtCache>,
+    pub url: String,
 }
 
 impl SystemMedia {
     pub fn new(
         _window: &Window,
+        covers: Arc<CoverArtCache>,
     ) -> Result<(Self, UnboundedReceiver<MediaControlEvent>), Box<dyn std::error::Error>> {
+        let fallback_cover_url =
+            crate::ui::assets::Assets::file_url(crate::ui::assets::DEFAULT_TRACK_COVER)?;
         #[cfg(target_os = "windows")]
         let hwnd = {
             use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -48,7 +67,10 @@ impl SystemMedia {
             Self {
                 controls,
                 metadata_key: None,
+                published_cover: None,
                 playback: None,
+                covers,
+                fallback_cover_url,
                 #[cfg(target_os = "linux")]
                 volume: None,
             },
@@ -64,27 +86,26 @@ impl SystemMedia {
         // 没有歌曲时不发布空会话；进度通知不会反复加载封面。
         if let Some(song) = &state.current_song {
             let key = (song.id, state.duration);
-            if self.metadata_key != Some(key) {
+            // 封面可能还在下载：先用打包的默认图发布，落盘后再刷新一次。
+            let cover_url = self.local_cover(song);
+            if self.metadata_key != Some(key)
+                || self.published_cover.as_deref() != Some(cover_url.as_str())
+            {
                 let artist = song
                     .ar
                     .iter()
                     .filter_map(|artist| artist.name.as_deref())
                     .collect::<Vec<_>>()
                     .join(" / ");
-                // 复用封面 URL 归一化：网易 CDN 升级到 HTTPS，并避免下载原图。
-                let cover_url = song
-                    .al
-                    .pic_url
-                    .as_deref()
-                    .map(|url| crate::ui::assets::thumbnail_url(url, 512));
                 self.controls.set_metadata(MediaMetadata {
                     title: Some(&song.name),
                     artist: Some(&artist),
                     album: song.al.name.as_deref(),
-                    cover_url: cover_url.as_deref(),
+                    cover_url: Some(&cover_url),
                     duration: Some(state.duration),
                 })?;
                 self.metadata_key = Some(key);
+                self.published_cover = Some(cover_url);
                 // metadata 可能重置原生时间轴，即使位置没变也要重新同步。
                 self.playback = None;
             }
@@ -101,6 +122,32 @@ impl SystemMedia {
         }
         Ok(())
     }
+
+    /// 原生控件只读本地文件：远程封面没落盘时回落到打包的默认图。
+    fn local_cover(&self, song: &Song) -> String {
+        remote_cover_url(Some(song))
+            .and_then(|url| self.covers.local_path(&url))
+            .and_then(|path| gpui::http_client::Url::from_file_path(path).ok())
+            .map(String::from)
+            .unwrap_or_else(|| self.fallback_cover_url.clone())
+    }
+
+    /// 当前歌曲还没落盘的远程封面；`CoverArtCache` 负责去重。
+    pub(super) fn cover_request(&self, state: &PlaybackSnapshot) -> Option<CoverRequest> {
+        let url = remote_cover_url(state.current_song.as_ref())?;
+        self.covers.claim(&url).then_some(CoverRequest {
+            cache: self.covers.clone(),
+            url,
+        })
+    }
+}
+
+/// 复用封面 URL 归一化：网易 CDN 升级到 HTTPS，并避免下载原图。
+pub(super) fn remote_cover_url(song: Option<&Song>) -> Option<String> {
+    song.and_then(|song| song.al.pic_url.as_deref())
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(|url| crate::ui::assets::thumbnail_url(url, COVER_PIXELS))
 }
 
 fn playback_status(state: &PlaybackSnapshot, has_source: bool) -> MediaPlayback {
