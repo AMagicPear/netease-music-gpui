@@ -3,7 +3,7 @@ use gpui::*;
 use gpui_kit::base::{ColorTokens, Slider, SliderIndicator, SliderThumb, SliderTrack, Theme};
 use gpui_kit::component::slider::{SliderEvent, SliderState};
 
-use super::LAYER_VOLUME_BALLOON;
+use super::{LAYER_VOLUME_BALLOON, icon_hover_color};
 use crate::playback::PlaybackController;
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA};
 
@@ -40,6 +40,7 @@ pub struct VolumeControl {
     /// 鼠标按在气泡里（多半是在拖音量）：此时即使指针跑出气泡也不能收起。
     pressed: bool,
     open: bool,
+    dark: bool,
     _playback_subscription: Subscription,
     _slider_subscription: Subscription,
 }
@@ -84,9 +85,15 @@ impl VolumeControl {
             balloon_hovered: false,
             pressed: false,
             open: false,
+            dark: false,
             _playback_subscription: playback_subscription,
             _slider_subscription: slider_subscription,
         }
+    }
+
+    pub(super) fn set_dark(&mut self, dark: bool, cx: &mut Context<Self>) {
+        self.dark = dark;
+        cx.notify();
     }
 
     /// 只有图标能让它出现；图标、气泡、以及两者之间那块"桥"都能让它留着。
@@ -277,10 +284,15 @@ impl VolumeControl {
 impl Render for VolumeControl {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = Theme::global(cx).tokens.colors;
+        let colors = if self.dark {
+            crate::ui::cover_color::dark_colors(colors, hsla(0., 0., 0.12, 1.))
+        } else {
+            colors
+        };
         let percent = self.slider.read(cx).percentage().end;
         // 指针还在图标上就已经算"展开"了，所以图标高亮直接看 open。
         let icon_color = if self.open {
-            colors.foreground
+            icon_hover_color(colors.muted_foreground, colors)
         } else {
             colors.muted_foreground
         };

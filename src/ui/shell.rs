@@ -3,10 +3,12 @@ use std::{cell::Cell, collections::HashMap, rc::Rc};
 use gpui::prelude::{FluentBuilder, StatefulInteractiveElement};
 use gpui::*;
 
-use super::album_lyrics::AlbumLyrics;
 use super::assets::thumbnail_url;
-use super::components::{OpenAlbumLyrics, PlayerBar, ResizeDragPreview, window_drag_area};
-use super::pages::{ContentPage, playlist::PlaylistPage};
+use super::components::{
+    OpenAlbumLyrics, PlayerBar, ResizeDragPreview, icon_hover_color, window_drag_area,
+};
+use super::cover_color::{Backdrop, CoverColor, CoverGradient, gradient_layer};
+use super::pages::{ContentPage, album_lyrics::AlbumLyrics, playlist::PlaylistPage};
 use super::sidebar::{SidebarChanged, SidebarPage};
 use super::theme::{IconSize, PRESSED_ICON_ALPHA};
 use crate::playback::PlaybackController;
@@ -32,6 +34,8 @@ pub struct MainWindow {
     album_lyrics: Entity<AlbumLyrics>,
     _album_subscription: Subscription,
     _lyrics_subscription: Subscription,
+    _background_subscriptions: Vec<Subscription>,
+    cover_tint: CoverColor,
 }
 
 impl MainWindow {
@@ -50,19 +54,66 @@ impl MainWindow {
                 player.set_album_expanded(expanded, cx);
             });
         });
+        let playlist_page = main_content.read(cx).playlist_page.clone();
+        let background_subscriptions = vec![
+            cx.observe(&main_content, |_, _, cx| cx.notify()),
+            cx.observe(&playlist_page, |_, _, cx| cx.notify()),
+        ];
         Self {
             main_content,
             player_bar,
             album_lyrics,
             _album_subscription: album_subscription,
             _lyrics_subscription: lyrics_subscription,
+            _background_subscriptions: background_subscriptions,
+            cover_tint: CoverColor::default(),
         }
+    }
+
+    fn playlist_tint(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<Hsla> {
+        let content = self.main_content.read(cx);
+        if !matches!(
+            content.active_page,
+            ContentPage::FavoriteMusic | ContentPage::Playlist(_)
+        ) {
+            return None;
+        }
+        let url = content.playlist_page.read(cx).cover_url(cx)?;
+        let hue = self
+            .cover_tint
+            .load(&url, window, cx)
+            .filter(|color| color.s >= 0.08)?
+            .h;
+        let dark = Theme::global(cx).tokens.colors.background.l < 0.5;
+        // HSV(h, 1, 1, .1) / HSV(h, .55, 1, .4)，换成 GPUI 原生 HSL。
+        Some(hsla(
+            hue,
+            1.,
+            if dark { 0.725 } else { 0.5 },
+            if dark { 0.4 } else { 0.1 },
+        ))
     }
 }
 
+fn playlist_background(tint: Option<Hsla>, backdrop: Backdrop) -> impl IntoElement {
+    let tint = tint.unwrap_or_else(transparent_black);
+    let target = CoverGradient([
+        tint.into(),
+        hsla(tint.h, 1., if tint.l > 0.5 { 0.825 } else { 0.5 }, 0.).into(),
+    ]);
+    // 始终保留同一层，进入、切换和离开歌单页都能连续过渡。
+    gradient_layer("playlist-background-color", target, backdrop)
+        .absolute()
+        .top_0()
+        .left_0()
+        .w_full()
+        .h(px(480.))
+}
+
 impl Render for MainWindow {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = Theme::global(cx).tokens.colors;
+        let tint = self.playlist_tint(window, cx);
         div()
             .size_full()
             .flex()
@@ -77,6 +128,10 @@ impl Render for MainWindow {
                     .overflow_hidden()
                     .flex()
                     .flex_col()
+                    .child(playlist_background(
+                        tint,
+                        self.main_content.read(cx).playlist_backdrop.clone(),
+                    ))
                     .child(
                         TitleBar::new()
                             .on_close_window(|_, window, cx| {
@@ -85,7 +140,7 @@ impl Render for MainWindow {
                             .h(px(WINDOW_HEADER_HEIGHT))
                             .pl(px(0.))
                             .border_b_0()
-                            .bg(colors.background)
+                            .bg(gpui::transparent_black())
                             .child(
                                 div()
                                     .w(self.main_content.read(cx).sidebar_width)
@@ -112,6 +167,7 @@ pub struct MainContent {
     playlist_page: Entity<PlaylistPage>,
     library: Entity<MusicLibrary>,
     page_scroll: HashMap<ContentPage, ScrollHandle>,
+    playlist_backdrop: Backdrop,
     _sidebar_subscription: Subscription,
     _user_profile_subscription: Subscription,
     _library_subscription: Subscription,
@@ -159,6 +215,7 @@ impl MainContent {
             pages,
             playlist_page,
             library,
+            playlist_backdrop: Rc::new(Cell::new(None)),
             page_scroll: ContentPage::all()
                 .map(|page| (page, ScrollHandle::default()))
                 .collect(),
@@ -243,7 +300,9 @@ pub(super) fn hover_icon(
                 .size(IconSize::Small.pixels())
                 .flex_none()
                 .text_color(colors.foreground.alpha(0.6))
-                .hover(|style| style.text_color(colors.foreground))
+                .hover(|style| {
+                    style.text_color(icon_hover_color(colors.foreground.alpha(0.6), colors))
+                })
                 .id((id, 0usize))
                 .active(|style| style.text_color(colors.foreground.alpha(PRESSED_ICON_ALPHA))),
         )
@@ -260,7 +319,6 @@ fn page_header(
         .h(px(PAGE_HEADER_HEIGHT))
         .flex_none()
         .w_full()
-        .bg(colors.background)
         .px(px(40.))
         .flex()
         .items_center()
@@ -431,10 +489,9 @@ impl Render for MainContent {
                                 |container| {
                                     container
                                         .child(self.playlist_page.read(cx).playing_overlay())
-                                        .child(
-                                            self.playlist_page
-                                                .update(cx, |page, cx| page.floating_header(cx)),
-                                        )
+                                        .child(self.playlist_page.update(cx, |page, cx| {
+                                            page.floating_header(self.playlist_backdrop.clone(), cx)
+                                        }))
                                 },
                             )
                             // 滚动条放在外层，避免它的边界被计入滚动内容高度。
@@ -466,5 +523,112 @@ impl Render for MainContent {
                         },
                     )),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn cover_display_and_tint_share_one_download(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        use std::sync::{Arc, Mutex};
+
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let client = gpui::http_client::FakeHttpClient::create({
+            let requests = requests.clone();
+            move |request| {
+                requests.lock().unwrap().push(request.uri().to_string());
+                async {
+                    Ok(gpui::http_client::Response::builder()
+                        .status(200)
+                        .body(gpui::http_client::AsyncBody::from(
+                            include_bytes!("../../assets/images/miniVinyl.png").as_slice(),
+                        ))
+                        .unwrap())
+                }
+            }
+        });
+        cx.update(|cx| cx.set_http_client(client));
+        struct Host;
+        impl Render for Host {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let resource = Resource::Uri(
+                    thumbnail_url("https://p1.music.126.net/test-cover.png", 340).into(),
+                );
+                let _ = window.use_asset::<ImgResourceLoader>(&resource, cx);
+                img(thumbnail_url("http://p1.music.126.net/test-cover.png", 340)).size(px(170.))
+            }
+        }
+        let window = cx.open_window(size(px(200.), px(200.)), |_, _| Host);
+        for _ in 0..3 {
+            cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
+                .unwrap();
+            cx.run_until_parked();
+        }
+        let source =
+            Resource::Uri(thumbnail_url("https://p1.music.126.net/test-cover.png", 340).into());
+        assert!(cx.update(|cx| {
+            cx.fetch_asset::<ImgResourceLoader>(&source)
+                .unwrap()
+                .is_ok()
+        }));
+        assert_eq!(
+            requests.lock().unwrap().as_slice(),
+            ["https://p1.music.126.net/test-cover.png?param=340y340"]
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn background_transitions_and_retargets_without_jumping(cx: &mut gpui::TestAppContext) {
+        use super::*;
+
+        struct Host(Option<Hsla>);
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .size_full()
+                    .relative()
+                    .child(playlist_background(self.0, Rc::new(Cell::new(None))))
+            }
+        }
+        let window = cx.open_window(size(px(100.), px(500.)), |_, _| Host(None));
+        let draw = |cx: &mut TestAppContext| {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.draw(cx).clear(cx);
+                let quads = window.painted_quads();
+                let Some(quad) = quads.last() else {
+                    return Rgba::from(transparent_black());
+                };
+                let background = serde_json::to_value(quad.background).unwrap();
+                serde_json::from_value::<Rgba>(background["colors"][0]["color"].clone()).unwrap()
+            })
+            .unwrap()
+        };
+        assert_eq!(draw(cx).a, 0.);
+        window
+            .update(cx, |host, _, _| host.0 = Some(hsla(0., 1., 0.5, 0.1)))
+            .unwrap();
+        assert_eq!(draw(cx).a, 0., "entering starts transparent");
+        cx.executor().advance_clock(Duration::from_millis(300));
+        let halfway = draw(cx);
+        assert!(halfway.a > 0. && halfway.a < 0.1);
+        cx.executor().advance_clock(Duration::from_millis(300));
+        let red = draw(cx);
+        assert!((red.a - 0.1).abs() < 1. / 255.);
+        window
+            .update(cx, |host, _, _| host.0 = Some(hsla(2. / 3., 1., 0.5, 0.1)))
+            .unwrap();
+        assert_eq!(draw(cx), red, "switching starts at the displayed color");
+        cx.executor().advance_clock(Duration::from_millis(300));
+        let mixed = draw(cx);
+        assert!(mixed.r > 0. && mixed.r < 1. && mixed.b > 0. && mixed.b < 1.);
+        window.update(cx, |host, _, _| host.0 = None).unwrap();
+        assert_eq!(draw(cx), mixed, "leaving mid-transition must not jump");
+        cx.executor().advance_clock(Duration::from_millis(600));
+        assert_eq!(draw(cx).a, 0.);
     }
 }

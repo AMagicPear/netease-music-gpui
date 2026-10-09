@@ -141,6 +141,10 @@ impl PlaybackController {
         &self.state
     }
 
+    pub(crate) fn playlist_id(&self) -> Option<u64> {
+        self.playlist_id
+    }
+
     pub fn play_from_queue(
         &mut self,
         playlist_id: u64,

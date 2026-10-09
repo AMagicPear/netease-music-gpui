@@ -1,11 +1,17 @@
-use std::{collections::HashMap, io, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    io,
+    sync::Arc,
+    time::Duration,
+};
 
 use gpui::Global;
 use ncm_api_rs::{ApiClient, ApiResponse, NcmError, Query, create_client};
 use tokio::runtime::Runtime;
 
 use crate::models::{
-    AudioQualityLevel, AudioSourceInfo, Playlist, Privilege, Song, TrackId, UserProfile, VipInfo,
+    AudioQualityLevel, AudioSourceInfo, LyricLine, Playlist, Privilege, Song, SongComment,
+    SongComments, TrackId, UserProfile, VipInfo,
 };
 
 /// GPUI 负责界面，Tokio 负责 SDK 的网络请求。客户端和运行时在应用内复用。
@@ -109,6 +115,30 @@ impl MusicApi {
         ]
     }
 
+    pub async fn song_lyrics(client: ApiClient, song_id: u64) -> Result<Vec<LyricLine>, String> {
+        let response =
+            Self::request(client.lyric(&Query::new().param("id", &song_id.to_string()))).await?;
+        Ok(song_lyric_lines(&response.body))
+    }
+
+    pub async fn song_comments(
+        client: ApiClient,
+        song_id: u64,
+        offset: usize,
+    ) -> Result<SongComments, String> {
+        let response = Self::request(
+            client.comment_music(
+                &Query::new()
+                    .param("id", &song_id.to_string())
+                    .param("limit", "20")
+                    .param("offset", &offset.to_string()),
+            ),
+        )
+        .await?;
+        // offset 是普通评论的分页位置，不能按合并热评后的条数推进。
+        song_comment_page(response.body, offset)
+    }
+
     pub async fn song_source(
         client: ApiClient,
         song_id: u64,
@@ -190,6 +220,128 @@ impl MusicApi {
     }
 }
 
+fn song_lyric_lines(body: &serde_json::Value) -> Vec<LyricLine> {
+    if body["nolyric"].as_bool() == Some(true) {
+        return Vec::new();
+    }
+    let translations: HashMap<_, _> =
+        parse_lrc(body["tlyric"]["lyric"].as_str().unwrap_or_default())
+            .into_iter()
+            .filter(|(_, text)| !text.is_empty())
+            .collect();
+    parse_lrc(body["lrc"]["lyric"].as_str().unwrap_or_default())
+        .into_iter()
+        .map(|(time, text)| LyricLine {
+            time,
+            text,
+            translation: translations.get(&time).cloned(),
+        })
+        .collect()
+}
+
+fn parse_lrc(lrc: &str) -> Vec<(Duration, String)> {
+    let mut lines = Vec::new();
+    for line in lrc.lines() {
+        let mut text = line.trim().trim_start_matches('\u{feff}');
+        let mut times = Vec::new();
+        while let Some(tagged) = text.strip_prefix('[') {
+            let Some((tag, rest)) = tagged.split_once(']') else {
+                break;
+            };
+            if let Some(time) = lrc_time(tag) {
+                times.push(time);
+            }
+            text = rest;
+        }
+        // metadata 没有时间标签；空白时间行保留，用于清空当前歌词。
+        for time in times {
+            lines.push((time, text.trim().to_string()));
+        }
+    }
+    lines.sort_by_key(|(time, _)| *time);
+    lines
+}
+
+fn lrc_time(tag: &str) -> Option<Duration> {
+    let (minutes, seconds) = tag.split_once(':')?;
+    let (seconds, fraction) = seconds.split_once('.').unwrap_or((seconds, ""));
+    if minutes.is_empty()
+        || seconds.is_empty()
+        || !minutes.bytes().all(|byte| byte.is_ascii_digit())
+        || !seconds.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.len() > 9
+    {
+        return None;
+    }
+    let minutes: u64 = minutes.parse().ok()?;
+    let seconds: u64 = seconds.parse().ok()?;
+    if seconds >= 60 {
+        return None;
+    }
+    let nanos = if fraction.is_empty() {
+        0
+    } else {
+        fraction.parse::<u32>().ok()? * 10u32.pow(9 - fraction.len() as u32)
+    };
+    Some(Duration::new(
+        minutes.checked_mul(60)?.checked_add(seconds)?,
+        nanos,
+    ))
+}
+
+fn song_comment_page(body: serde_json::Value, offset: usize) -> Result<SongComments, String> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Comment {
+        comment_id: u64,
+        user: CommentUser,
+        content: String,
+        time: i64,
+        liked_count: u64,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CommentUser {
+        nickname: String,
+        avatar_url: String,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Page {
+        total: u64,
+        comments: Vec<Comment>,
+        hot_comments: Option<Vec<Comment>>,
+        more: bool,
+    }
+    let page: Page =
+        serde_json::from_value(body).map_err(|error| format!("歌曲评论格式无效：{error}"))?;
+    let mut seen = HashSet::new();
+    let hot = if offset == 0 {
+        page.hot_comments.unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let comments = hot
+        .into_iter()
+        .chain(page.comments)
+        .filter(|comment| seen.insert(comment.comment_id))
+        .map(|comment| SongComment {
+            id: comment.comment_id,
+            nickname: comment.user.nickname,
+            avatar_url: comment.user.avatar_url,
+            content: comment.content,
+            time: comment.time,
+            liked_count: comment.liked_count,
+        })
+        .collect();
+    Ok(SongComments {
+        total: page.total,
+        comments,
+        more: page.more,
+    })
+}
+
 fn song_source_info(body: &serde_json::Value, song_id: u64) -> Result<AudioSourceInfo, String> {
     let track = body["data"]
         .as_array()
@@ -245,6 +397,81 @@ mod tests {
     use super::*;
     use futures::AsyncReadExt;
     use gpui::http_client::HttpClient;
+
+    #[test]
+    fn lyrics_expand_tags_sort_and_match_translation_by_time() {
+        let body = serde_json::json!({
+            "lrc": {"lyric": "\u{feff}[ar:歌手]\n[ti:歌曲]\n[offset:100]\n[00:02.50][00:01.5] 原文 \n[00:03]末行\n[00:04.000]\n[99:99]无效\n[18446744073709551615:01]溢出"},
+            "tlyric": {"lyric": "[00:01.500][00:02.500] 译文 \n[00:03.0] \n[00:09]无对应原文"}
+        });
+        let lines = song_lyric_lines(&body);
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0].time, Duration::from_millis(1500));
+        assert_eq!(lines[1].time, Duration::from_millis(2500));
+        assert_eq!(lines[0].text, "原文");
+        assert_eq!(lines[0].translation.as_deref(), Some("译文"));
+        assert_eq!(lines[1].translation.as_deref(), Some("译文"));
+        assert_eq!(lines[2].translation, None);
+        assert_eq!(lines[3].text, "");
+        assert_eq!(lrc_time("01:02.123"), Some(Duration::from_millis(62123)));
+    }
+
+    #[test]
+    fn missing_and_instrumental_lyrics_are_empty() {
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({"lrc": {"lyric": ""}}),
+            serde_json::json!({"lrc": {"lyric": "[ti:歌曲]\n无时间文本"}}),
+            serde_json::json!({"nolyric": true, "lrc": {"lyric": "[00:00]纯音乐"}}),
+        ] {
+            assert!(song_lyric_lines(&body).is_empty());
+        }
+    }
+
+    #[test]
+    fn comments_prioritize_hot_only_on_first_page_and_deduplicate() {
+        let comment = |id, content| {
+            serde_json::json!({
+                "commentId": id, "user": {"nickname": "听众", "avatarUrl": "https://example.com/avatar"},
+                "content": content, "time": 123456789, "likedCount": 42
+            })
+        };
+        let body = serde_json::json!({
+            "total": 100, "more": true,
+            "hotComments": [comment(2, "热评"), comment(1, "另一条热评")],
+            "comments": [comment(2, "重复"), comment(3, "普通评论"), comment(3, "重复")]
+        });
+        let first = song_comment_page(body.clone(), 0).unwrap();
+        assert_eq!(first.total, 100);
+        assert!(first.more);
+        assert_eq!(
+            first
+                .comments
+                .iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+            [2, 1, 3]
+        );
+        assert_eq!(first.comments[0].content, "热评");
+        assert_eq!(first.comments[0].nickname, "听众");
+        assert_eq!(first.comments[0].avatar_url, "https://example.com/avatar");
+        assert_eq!(first.comments[0].time, 123456789);
+        assert_eq!(first.comments[0].liked_count, 42);
+        let next = song_comment_page(body, 20).unwrap();
+        assert_eq!(
+            next.comments.iter().map(|item| item.id).collect::<Vec<_>>(),
+            [2, 3]
+        );
+        assert_eq!(next.comments[0].content, "重复");
+        let empty = song_comment_page(
+            serde_json::json!({"total": 0, "comments": [], "more": false}),
+            0,
+        )
+        .unwrap();
+        assert!(empty.comments.is_empty());
+        assert!(!empty.more);
+        assert!(song_comment_page(serde_json::json!({"comments": []}), 0).is_err());
+    }
 
     #[test]
     fn playback_url_requires_matching_song_and_http_address() {

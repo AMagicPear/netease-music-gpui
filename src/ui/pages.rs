@@ -1,3 +1,4 @@
+pub(super) mod album_lyrics;
 mod featured;
 mod following;
 mod my_collection;

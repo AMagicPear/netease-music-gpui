@@ -53,6 +53,7 @@ use crate::ui::components::{
     TabItem, TableColumn, artist_label, format_duration, like_icon_path, quality_badge_path,
     virtual_table,
 };
+use crate::ui::cover_color::{Backdrop, paint_backdrop};
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
 
 // 「更多」菜单里的三个命令。
@@ -425,6 +426,17 @@ impl PlaylistPage {
         self.playing_indicator.clone().into_any_element()
     }
 
+    pub fn cover_url(&self, cx: &App) -> Option<String> {
+        self.detail
+            .read(cx)
+            .playlist
+            .as_ref()?
+            .cover_img_url
+            .as_ref()
+            .filter(|url| !url.is_empty())
+            .map(|url| thumbnail_url(url, 340))
+    }
+
     pub fn open(&mut self, id: Option<u64>, cx: &mut Context<Self>) {
         let summary = self
             .library
@@ -518,7 +530,7 @@ impl PlaylistPage {
     }
 
     /// 在滚动容器外预绘制，透明度和位移共用进度；渐隐结束后才移除。
-    pub fn floating_header(&self, cx: &Context<Self>) -> AnyElement {
+    pub fn floating_header(&self, backdrop: Backdrop, cx: &Context<Self>) -> AnyElement {
         let hidden = self.table_header_hidden.clone();
         let view = cx.entity();
         canvas(
@@ -545,10 +557,31 @@ impl PlaylistPage {
                         .flex_col()
                         .justify_between()
                         .bg(colors.background)
+                        .relative()
                         .opacity(progress)
                         .occlude()
+                        .child(
+                            canvas(move |bounds, _, _| bounds, {
+                                let backdrop = backdrop.clone();
+                                move |bounds, _, window, _| {
+                                    paint_backdrop(bounds, &backdrop, window)
+                                }
+                            })
+                            .absolute()
+                            .inset_0(),
+                        )
                         .child(this.playlist_title(cx).line_clamp(1))
                         .child(this.action_buttons(true, cx))
+                        // 与侧栏分隔条同色，左右对齐页面内容的 40px 留白。
+                        .child(
+                            div()
+                                .absolute()
+                                .bottom_0()
+                                .left(px(40.))
+                                .right(px(40.))
+                                .h(px(1.))
+                                .bg(colors.border),
+                        )
                         .into_any_element()
                 });
                 header.layout_as_root(
@@ -1089,7 +1122,7 @@ impl Render for PlaylistPage {
         let library = self.library.read(cx);
         let detail = self.detail.read(cx);
         let playlist = detail.playlist.as_ref();
-        let cover_url = playlist.and_then(|playlist| playlist.cover_img_url.clone());
+        let cover_url = self.cover_url(cx);
         let play_count = playlist.map(|playlist| playlist.play_count);
         let created_date = playlist.and_then(|playlist| {
             time::OffsetDateTime::from_unix_timestamp(playlist.create_time / 1000)
@@ -1270,7 +1303,7 @@ impl Render for PlaylistPage {
             .when_some(cover_url, |cover, url| {
                 cover
                     .child(
-                        img(thumbnail_url(&url, 340))
+                        img(url)
                             .size_full()
                             .object_fit(ObjectFit::Cover)
                             .rounded(px(8.)),

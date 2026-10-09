@@ -6,12 +6,13 @@ use gpui_kit::base::{Button, ColorTokens, Theme, Transition, transition};
 
 use super::progress_bar::ProgressBar;
 use super::volume_control::VolumeControl;
-use super::{LAYER_PROGRESS_BAR, Popover, artist_label, like_icon_path};
+use super::{LAYER_PROGRESS_BAR, Popover, artist_label, icon_hover_color, like_icon_path};
 use crate::api::MusicApi;
 use crate::models::AudioQualityLevel;
 use crate::playback::PlaybackController;
 use crate::state::library::MusicLibrary;
 use crate::ui::assets::thumbnail_url;
+use crate::ui::cover_color::{Backdrop, dark_colors};
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
 
 pub struct PlayerBar {
@@ -31,6 +32,7 @@ pub struct PlayerBar {
     cover_rotation_elapsed: Duration,
     cover_rotation_started: Option<Instant>,
     album_expanded: bool,
+    album_backdrop: Backdrop,
     _playback_subscription: Subscription,
     _progress_subscription: Subscription,
     _library_subscription: Subscription,
@@ -47,7 +49,9 @@ impl PlayerBar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let progress_bar = cx.new(|cx| ProgressBar::new(playback.clone(), window, cx));
+        let album_backdrop = Backdrop::default();
+        let progress_bar =
+            cx.new(|cx| ProgressBar::new(playback.clone(), album_backdrop.clone(), window, cx));
         let volume = cx.new(|cx| VolumeControl::new(playback.clone(), window, cx));
         let playback_subscription = cx.observe(&playback, |this, _, cx| {
             this.sync_cover_rotation(Instant::now(), cx);
@@ -70,6 +74,7 @@ impl PlayerBar {
             cover_rotation_elapsed: Duration::ZERO,
             cover_rotation_started: None,
             album_expanded: false,
+            album_backdrop,
             _playback_subscription: playback_subscription,
             _progress_subscription: progress_subscription,
             _library_subscription: library_subscription,
@@ -82,8 +87,42 @@ impl PlayerBar {
     pub(crate) fn set_album_expanded(&mut self, expanded: bool, cx: &mut Context<Self>) {
         if self.album_expanded != expanded {
             self.album_expanded = expanded;
+            self.progress_bar
+                .update(cx, |bar, cx| bar.set_dark(expanded, cx));
+            self.volume
+                .update(cx, |volume, cx| volume.set_dark(expanded, cx));
             cx.notify();
         }
+    }
+
+    pub(crate) fn playback(&self) -> Entity<PlaybackController> {
+        self.playback.clone()
+    }
+
+    pub(in crate::ui) fn album_backdrop(&self) -> Backdrop {
+        self.album_backdrop.clone()
+    }
+
+    pub(crate) fn source_name(&self, cx: &App) -> Option<String> {
+        let id = self.playback.read(cx).playlist_id()?;
+        self.library
+            .read(cx)
+            .playlists
+            .iter()
+            .find(|playlist| playlist.id == id)
+            .map(|playlist| playlist.name.clone())
+    }
+
+    pub(crate) fn album_cover_url(&self, cx: &App) -> Option<String> {
+        self.playback
+            .read(cx)
+            .snapshot()
+            .current_song
+            .as_ref()?
+            .al
+            .pic_url
+            .as_ref()
+            .map(|url| thumbnail_url(url, 480))
     }
 
     fn sync_cover_rotation(&mut self, now: Instant, cx: &App) {
@@ -131,7 +170,7 @@ impl PlayerBar {
             )
             .when_some(cover_url, |vinyl, url| {
                 vinyl.child(
-                    img(thumbnail_url(&url, (cover_side * 2.).ceil() as u32))
+                    img(thumbnail_url(&url, if side > 100. { 480 } else { 80 }))
                         .with_transformation(Transformation::rotate(radians(angle)))
                         .absolute()
                         .left(px(inset))
@@ -222,6 +261,7 @@ impl PlayerBar {
         count: Option<u64>,
         color: Hsla,
         hover_color: Hsla,
+        pressed_color: Hsla,
         colors: ColorTokens,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -250,7 +290,7 @@ impl PlayerBar {
                         .text_color(shown_color)
                         .id((id, INTERACTION_ICON))
                         .active(move |style| {
-                            style.text_color(hover_color.alpha(PRESSED_ICON_ALPHA))
+                            style.text_color(pressed_color.alpha(PRESSED_ICON_ALPHA))
                         }),
                 ),
             )
@@ -313,7 +353,7 @@ fn hover_icon(
                 .size(size)
                 .flex_none()
                 .text_color(color)
-                .hover(move |style| style.text_color(colors.foreground))
+                .hover(move |style| style.text_color(icon_hover_color(color, colors)))
                 .id((id, 0usize))
                 .active(move |style| style.text_color(colors.foreground.alpha(PRESSED_ICON_ALPHA))),
         )
@@ -321,11 +361,26 @@ fn hover_icon(
 
 impl Render for PlayerBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = Theme::global(cx).tokens.colors;
+        let theme_colors = Theme::global(cx).tokens.colors;
+        let colors = if self.album_expanded {
+            dark_colors(
+                theme_colors,
+                self.album_backdrop
+                    .get()
+                    .map(|(_, gradient)| Hsla::from(gradient.0[1]))
+                    .unwrap_or(hsla(0., 0., 0.12, 1.)),
+            )
+        } else {
+            theme_colors
+        };
         let expanded = self.progress_bar.read(cx).expanded();
         let shadow_opacity = transition(
             "player-bar-shadow",
-            if expanded { 1. } else { 0. },
+            if expanded && !self.album_expanded {
+                1.
+            } else {
+                0.
+            },
             Transition::new(Duration::from_millis(130)).ease(ease_out_quint()),
             window,
             cx,
@@ -391,8 +446,8 @@ impl Render for PlayerBar {
             .flex_none()
             .flex()
             .flex_col()
-            // GPUI 先绘制阴影，再绘制不透明背景；背景自然遮住下方阴影。
-            .shadow(vec![
+            // 普通页面保留进度条悬停阴影；展开页不绘制。
+            .when(!self.album_expanded, |bar| bar.shadow(vec![
                 BoxShadow::new(
                     px(0.),
                     px(-12.),
@@ -400,11 +455,18 @@ impl Render for PlayerBar {
                 )
                 .blur_radius(px(24.))
                 .spread_radius(px(12.)),
-            ])
+            ]))
             .bg(colors.surface)
             .border_t_1()
             .border_color(colors.border)
             .relative()
+            .when(self.album_expanded, |bar| {
+                let backdrop = self.album_backdrop.clone();
+                bar.child(canvas(|_, _, _| {}, move |bounds, _, window, _| {
+                    let bottom = backdrop.get().map(|(_, gradient)| gradient.0[1]).unwrap_or_else(|| hsla(0., 0., 0.12, 1.).into());
+                    window.paint_quad(fill(bounds, bottom));
+                }).absolute().inset_0())
+            })
             // 进度条覆盖渲染
             .child(deferred(self.progress_bar.clone()).with_priority(LAYER_PROGRESS_BAR))
             // 主控件栏
@@ -458,18 +520,23 @@ impl Render for PlayerBar {
                                             .child(artist),
                                     ),
                             )
-                            // 已喜欢：实心红心，hover 淡一档的红；未喜欢：描线灰心，hover 变前景色。
+                            // 已喜欢 hover 淡一档的红；未喜欢和评论按背景亮度轻微提亮。
                             .child(self.interaction_count(
                                 "player-like-button",
                                 like_icon_path(liked),
                                 self.counts[0],
                                 if liked {
-                                    colors.primary
+                                    theme_colors.primary
                                 } else {
                                     colors.muted_foreground
                                 },
                                 if liked {
-                                    colors.primary.alpha(0.88)
+                                    theme_colors.primary.alpha(theme_colors.primary.a * 0.88)
+                                } else {
+                                    icon_hover_color(colors.muted_foreground, colors)
+                                },
+                                if liked {
+                                    theme_colors.primary.alpha(theme_colors.primary.a * 0.88)
                                 } else {
                                     colors.foreground
                                 },
@@ -481,6 +548,7 @@ impl Render for PlayerBar {
                                 "icons/comment.svg",
                                 self.counts[1],
                                 colors.muted_foreground,
+                                icon_hover_color(colors.muted_foreground, colors),
                                 colors.foreground,
                                 colors,
                                 cx,
@@ -568,9 +636,8 @@ impl Render for PlayerBar {
                                             .rounded_full()
                                             .bg(colors.primary)
                                             .text_color(colors.primary_foreground)
-                                            // hover 的反馈交给外层区域的放大（40 → 42），
-                                            // 这里不动透明度；按下统一降整体透明度
-                                            .hover(|style| style.bg(colors.primary.alpha(0.88)))
+                                            // 在原透明度上轻微变淡，避免把深色页的 12% 白色直接改成 88%。
+                                            .hover(|style| style.bg(colors.primary.alpha(colors.primary.a * 0.88)))
                                             .active(|style| style.opacity(PRESSED_OPACITY))
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 this.playback.update(cx, |playback, cx| {
@@ -630,14 +697,16 @@ impl Render for PlayerBar {
                                             .text_size(px(10.))
                                             .text_color(colors.muted_foreground)
                                             .hover(|style| {
+                                                let hover = icon_hover_color(colors.muted_foreground, colors);
                                                 style
-                                                    .text_color(colors.foreground)
-                                                    .border_color(colors.foreground)
+                                                    .text_color(hover)
+                                                    .border_color(hover)
                                             })
                                             .child(quality_label),
                                     )
-                                    .text_color(colors.secondary_foreground)
-                                    .child(
+                                    .text_color(theme_colors.secondary_foreground)
+                                    .child({
+                                        let colors = theme_colors;
                                         div()
                                             .w(px(380.))
                                             .h(px(480.))
@@ -872,8 +941,8 @@ impl Render for PlayerBar {
                                                                 )
                                                             })
                                                     })),
-                                            ),
-                                    ),
+                                            )
+                                    }),
                             )
                             .child(hover_icon(
                                 "player-collect-button",

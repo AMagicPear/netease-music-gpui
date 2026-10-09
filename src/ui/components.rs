@@ -1,6 +1,6 @@
 use crate::models::AudioQualityLevel;
-use gpui::{InteractiveElement, MouseButton, div};
-use gpui_kit::base::InteractiveElementExt;
+use gpui::{Hsla, InteractiveElement, MouseButton, div};
+use gpui_kit::base::{ColorTokens, InteractiveElementExt};
 use std::{cell::Cell, rc::Rc};
 
 mod drag_preview;
@@ -26,6 +26,19 @@ pub use virtual_table::{
 pub(super) const LAYER_PROGRESS_BAR: usize = 1;
 pub(super) const LAYER_POPOVER: usize = 2;
 pub(super) const LAYER_VOLUME_BALLOON: usize = 3;
+
+/// 暗背景图标只稍微提亮，浅背景仍使用主题前景色。
+pub(super) fn icon_hover_color(mut base: Hsla, colors: ColorTokens) -> Hsla {
+    if colors.background.l >= 0.5 {
+        return colors.foreground;
+    }
+    if base.a < 1. {
+        base.a = (base.a + 0.08).min(1.);
+    } else {
+        base.l = (base.l + 0.03).min(1.);
+    }
+    base
+}
 
 /// 普通内容区的窗口拖拽，不创建 TitleBar 或窗口控制按钮。
 pub(super) fn window_drag_area(id: &'static str) -> gpui::Stateful<gpui::Div> {
@@ -123,4 +136,38 @@ pub(super) fn artist_label(
         }
     }
     gpui::StyledText::new(text).with_highlights(highlights)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::hsla;
+
+    #[test]
+    fn icon_hover_respects_background_and_caps_brightness() {
+        let colors = ColorTokens {
+            background: hsla(0., 0., 0.12, 1.),
+            ..ColorTokens::default()
+        };
+        for (lightness, alpha, expected_lightness, expected_alpha) in [
+            (1., 0.5, 1., 0.58),
+            (1., 0.75, 1., 0.83),
+            (1., 0.98, 1., 1.),
+            (0.6, 1., 0.63, 1.),
+            (0.99, 1., 1., 1.),
+        ] {
+            let hovered = icon_hover_color(hsla(0.2, 0.3, lightness, alpha), colors);
+            assert!((hovered.l - expected_lightness).abs() < 1e-6);
+            assert!((hovered.a - expected_alpha).abs() < 1e-6);
+            assert_eq!((hovered.h, hovered.s), (0.2, 0.3));
+        }
+        let light_colors = ColorTokens {
+            background: hsla(0., 0., 0.5, 1.),
+            ..colors
+        };
+        assert_eq!(
+            icon_hover_color(hsla(0., 0., 1., 0.5), light_colors),
+            light_colors.foreground,
+        );
+    }
 }
