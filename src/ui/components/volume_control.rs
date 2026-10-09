@@ -69,8 +69,8 @@ impl VolumeControl {
                 if (this.slider.read(cx).value().end() - volume).abs() > 0.5 {
                     this.slider
                         .update(cx, |slider, cx| slider.set_value(volume, window, cx));
+                    cx.notify();
                 }
-                cx.notify();
             });
         // 拖动实时生效：Change 是拖动中，Release 是松手，两者都提交。
         let slider_subscription = cx.subscribe_in(&slider, window, |this, _, event, _, cx| {

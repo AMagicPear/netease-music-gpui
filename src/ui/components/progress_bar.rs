@@ -3,13 +3,15 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_kit::base::{
-    Interpolate, Slider, SliderIndicator, SliderThumb, SliderTrack, Theme, Transition, transition,
+    Slider, SliderIndicator, SliderThumb, SliderTrack, Theme, Transition, transition,
 };
 use gpui_kit::component::slider::{SliderEvent, SliderState};
 
 use super::{ALBUM_REVEAL_DURATION, format_duration};
 use crate::playback::PlaybackController;
-use crate::ui::cover_color::{Backdrop, CoverGradient, blend_colors, dark_colors, dark_gradient};
+use crate::ui::cover_color::{
+    Backdrop, CoverGradient, blend_color, blend_colors, dark_colors, dark_gradient,
+};
 use crate::ui::theme::DOLPHIN_FAMILY;
 
 /// 轨道静止 / 悬浮时的高度
@@ -282,11 +284,11 @@ impl Render for ProgressBar {
                                                         let gradient = backdrop
                                                             .gradient()
                                                             .unwrap_or_else(|| dark_gradient(None));
-                                                        let color =
-                                                            theme_colors.primary.interpolate(
-                                                                &progress_color(gradient),
-                                                                expand,
-                                                            );
+                                                        let color = blend_color(
+                                                            theme_colors.primary,
+                                                            progress_color(gradient),
+                                                            expand,
+                                                        );
                                                         window.paint_quad(fill(bounds, color));
                                                     },
                                                 )

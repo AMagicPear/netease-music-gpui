@@ -10,6 +10,7 @@ mod popover;
 mod progress_bar;
 mod spinner;
 mod tab_bar;
+mod vinyl;
 mod vinyl_stage;
 mod virtual_table;
 mod volume_control;
@@ -20,6 +21,7 @@ pub use player_bar::{ALBUM_REVEAL_DURATION, OpenAlbumLyrics, PLAYER_BAR_HEIGHT, 
 pub use popover::Popover;
 pub use spinner::spinner;
 pub use tab_bar::{TabBar, TabChanged, TabItem};
+pub(in crate::ui) use vinyl::{RotationClock, Vinyl};
 pub use vinyl_stage::{Tonearm, vinyl_stage};
 pub use virtual_table::{
     CELL_PADDING, COLUMN_GAP, HEADER_HEIGHT, ROW_TEXT_SIZE, TableColumn, virtual_table,

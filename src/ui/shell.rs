@@ -5,7 +5,8 @@ use gpui::*;
 
 use super::assets::thumbnail_url;
 use super::components::{
-    OpenAlbumLyrics, PlayerBar, ResizeDragPreview, icon_hover_color, window_drag_area,
+    OpenAlbumLyrics, PLAYER_BAR_HEIGHT, PlayerBar, ResizeDragPreview, icon_hover_color,
+    window_drag_area,
 };
 use super::cover_color::{Backdrop, CoverColor, CoverGradient, gradient_layer};
 use super::pages::{ContentPage, album_lyrics::AlbumLyrics, playlist::PlaylistPage};
@@ -149,10 +150,38 @@ impl Render for MainWindow {
                                     .bg(colors.foreground.alpha(0.03)),
                             ),
                     )
-                    .child(self.main_content.clone())
-                    .child(self.album_lyrics.clone()),
+                    .child(
+                        self.main_content.clone().cached(
+                            StyleRefinement::default()
+                                .w_full()
+                                .h((window.viewport_size().height
+                                    - px(WINDOW_HEADER_HEIGHT + PLAYER_BAR_HEIGHT))
+                                .max(px(0.)))
+                                .flex_shrink(0.),
+                        ),
+                    )
+                    .when(!self.album_lyrics.read(cx).is_open(), |content| {
+                        content.children(
+                            self.main_content
+                                .update(cx, |content, cx| content.playlist_overlays(cx)),
+                        )
+                    })
+                    .child(
+                        self.album_lyrics
+                            .clone()
+                            .cached(StyleRefinement::default().absolute().inset_0().size_full()),
+                    ),
             )
-            .child(self.player_bar.clone())
+            .child(
+                self.player_bar.clone().cached(
+                    StyleRefinement::default()
+                        .w_full()
+                        .h(px(PLAYER_BAR_HEIGHT))
+                        .flex_shrink(0.),
+                ),
+            )
+            .child(self.player_bar.read(cx).vinyl_overlay())
+            .children(self.album_lyrics.read(cx).vinyl_overlays())
     }
 }
 
@@ -429,17 +458,17 @@ impl Render for MainContent {
         let drag_offset = Rc::new(Cell::new(px(0.)));
 
         div()
-            .w_full()
-            .flex_1()
+            // cached 会独立布局这棵树，根节点需要占满缓存容器。
+            .size_full()
             .min_h(px(0.))
             .relative()
             .flex()
             .child(
-                div()
-                    .w(self.sidebar_width)
-                    .h_full()
-                    .flex_none()
-                    .child(self.sidebar.clone()),
+                div().w(self.sidebar_width).h_full().flex_none().child(
+                    self.sidebar
+                        .clone()
+                        .cached(StyleRefinement::default().size_full()),
+                ),
             )
             .child(
                 div()
@@ -481,19 +510,6 @@ impl Render for MainContent {
                                     .track_scroll(page_scroll)
                                     .children(page),
                             )
-                            .when(
-                                matches!(
-                                    active_page,
-                                    ContentPage::FavoriteMusic | ContentPage::Playlist(_)
-                                ),
-                                |container| {
-                                    container
-                                        .child(self.playlist_page.read(cx).playing_overlay())
-                                        .child(self.playlist_page.update(cx, |page, cx| {
-                                            page.floating_header(self.playlist_backdrop.clone(), cx)
-                                        }))
-                                },
-                            )
                             // 滚动条放在外层，避免它的边界被计入滚动内容高度。
                             .child(Scrollbar::vertical(page_scroll).mode(ScrollbarMode::Always)),
                     ),
@@ -526,8 +542,126 @@ impl Render for MainContent {
     }
 }
 
+impl MainContent {
+    /// 动画和实时背景与缓存内容同级，避免它们每帧使侧栏和歌单缓存失效。
+    fn playlist_overlays(&self, cx: &mut Context<Self>) -> Option<Div> {
+        matches!(
+            self.active_page,
+            ContentPage::FavoriteMusic | ContentPage::Playlist(_)
+        )
+        .then(|| {
+            div()
+                .absolute()
+                .left(self.sidebar_width)
+                .right_0()
+                .top(px(WINDOW_HEADER_HEIGHT + PAGE_HEADER_HEIGHT))
+                .bottom_0()
+                .overflow_hidden()
+                .child(self.playlist_page.read(cx).playing_overlay())
+                .child(self.playlist_page.update(cx, |page, cx| {
+                    page.floating_header(self.playlist_backdrop.clone(), cx)
+                }))
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn cached_child_reuses_sibling_animation_frames_and_updates(cx: &mut gpui::TestAppContext) {
+        use super::*;
+
+        struct Child {
+            renders: Rc<Cell<usize>>,
+            painted: Rc<Cell<(Size<Pixels>, usize)>>,
+            value: usize,
+        }
+        impl Render for Child {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                self.renders.set(self.renders.get() + 1);
+                let painted = self.painted.clone();
+                let value = self.value;
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, _, _| painted.set((bounds.size, value)),
+                )
+                .size_full()
+            }
+        }
+        struct AnimatedSibling(Rc<Cell<usize>>);
+        impl Render for AnimatedSibling {
+            fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                self.0.set(self.0.get() + 1);
+                if self.0.get() < 4 {
+                    window.request_animation_frame();
+                }
+                div().absolute().size(px(1.))
+            }
+        }
+        struct Host {
+            child: Entity<Child>,
+            sibling: Entity<AnimatedSibling>,
+        }
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .relative()
+                    .size_full()
+                    .child(
+                        self.child
+                            .clone()
+                            .cached(StyleRefinement::default().size_full()),
+                    )
+                    .child(self.sibling.clone())
+            }
+        }
+
+        let renders = Rc::new(Cell::new(0));
+        let frames = Rc::new(Cell::new(0));
+        let painted = Rc::new(Cell::new((Size::default(), 0)));
+        let window = cx.open_window(size(px(200.), px(200.)), |_, cx| Host {
+            child: cx.new(|_| Child {
+                renders: renders.clone(),
+                painted: painted.clone(),
+                value: 0,
+            }),
+            sibling: cx.new(|_| AnimatedSibling(frames.clone())),
+        });
+        cx.run_until_parked();
+        let initial_renders = renders.get();
+        assert!(initial_renders > 0);
+        assert_eq!(painted.get(), (size(px(200.), px(200.)), 0));
+        for _ in 0..3 {
+            assert!(
+                window
+                    .update(cx, |_, window, cx| window.simulate_next_frame(cx))
+                    .unwrap()
+                    > 0
+            );
+            cx.run_until_parked();
+            assert_eq!(renders.get(), initial_renders);
+        }
+        assert_eq!(frames.get(), 4);
+
+        window
+            .update(cx, |host, _, cx| {
+                host.child.update(cx, |child, cx| {
+                    child.value = 1;
+                    cx.notify();
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(renders.get(), initial_renders + 1);
+        assert_eq!(painted.get(), (size(px(200.), px(200.)), 1));
+
+        cx.simulate_window_resize(window.into(), size(px(300.), px(240.)));
+        cx.run_until_parked();
+        assert!(renders.get() > initial_renders + 1);
+        assert_eq!(painted.get(), (size(px(300.), px(240.)), 1));
+    }
+
     #[cfg(target_os = "macos")]
     #[gpui::test]
     fn cover_display_and_tint_share_one_download(cx: &mut gpui::TestAppContext) {

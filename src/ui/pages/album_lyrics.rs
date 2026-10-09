@@ -20,8 +20,8 @@ use crate::api::MusicApi;
 use crate::models::{LyricLine, SongComment};
 use crate::playback::PlaybackController;
 use crate::ui::components::{
-    ALBUM_REVEAL_DURATION, PLAYER_BAR_HEIGHT, PlayerBar, Tonearm, comment_row, format_duration,
-    spinner, vinyl_stage, window_drag_area,
+    ALBUM_REVEAL_DURATION, PLAYER_BAR_HEIGHT, PlayerBar, Tonearm, Vinyl, comment_row,
+    format_duration, spinner, window_drag_area,
 };
 use crate::ui::cover_color::{
     Backdrop, CoverColor, CoverGradient, dark_colors, dark_gradient, gradient_layer,
@@ -51,8 +51,7 @@ const SCROLL_DURATION: Duration = Duration::from_millis(450);
 /// 歌词底部渐隐带的高度。
 const LYRIC_FADE_HEIGHT: f32 = 96.;
 /// 当前歌词行在歌词区里的竖直锚点：`0.` 是顶端，`0.5` 是正中。
-/// 正中看起来会偏下，往上提到 40%。
-const LYRIC_ANCHOR_RATIO: f32 = 0.4;
+const LYRIC_ANCHOR_RATIO: f32 = 0.33;
 /// 歌词行距（每行底边留白）。
 const LYRIC_LINE_GAP: f32 = 20.;
 /// 歌词字号：正在播放的行大一号，其余收小。
@@ -77,6 +76,9 @@ enum SongTab {
 pub(in crate::ui) struct AlbumLyrics {
     player_bar: Entity<PlayerBar>,
     _player_subscription: Subscription,
+    _playback_subscription: Subscription,
+    vinyl: Entity<Vinyl>,
+    summary_vinyl: Entity<Vinyl>,
     opened: bool,
     scroll: ScrollHandle,
     comment_scroll: ScrollHandle,
@@ -156,20 +158,27 @@ impl ScrollTween {
 
     /// 推进补间并把偏移写回；返回是否还在动画中。
     fn step(&mut self, handle: &ScrollHandle, window: &mut Window) -> bool {
+        let playing = self.advance(handle, Instant::now());
+        if playing {
+            window.request_animation_frame();
+        }
+        playing
+    }
+
+    fn advance(&mut self, handle: &ScrollHandle, now: Instant) -> bool {
         let (Some((from, started)), Some(to)) = (self.playing, self.target) else {
             self.playing = None;
             return false;
         };
-        let progress = (started.elapsed().as_secs_f32() / SCROLL_DURATION.as_secs_f32()).min(1.);
+        let progress =
+            (now.duration_since(started).as_secs_f32() / SCROLL_DURATION.as_secs_f32()).min(1.);
         let y = from + (f32::from(to) - from) * ease_out_quint()(progress);
         handle.set_offset(point(px(0.), px(y)));
         if progress < 1. {
-            window.request_animation_frame();
             return true;
         }
-        // 跑完清掉目标，下一次 `aim` 才会重新起一段。
+        // 保留目标：同一句歌词期间的手动滚动不会被重新拉回。
         self.playing = None;
-        self.target = None;
         false
     }
 }
@@ -180,12 +189,44 @@ impl ScrollTween {
 
 impl AlbumLyrics {
     pub(in crate::ui) fn new(player_bar: Entity<PlayerBar>, cx: &mut Context<Self>) -> Self {
-        let player_subscription = cx.observe(&player_bar, |_, _, cx| cx.notify());
+        let mut source = player_bar.read(cx).source_name(cx);
+        let player_subscription = cx.observe(&player_bar, move |this, player, cx| {
+            let next = player.read(cx).source_name(cx);
+            if next != source {
+                source = next;
+                if this.opened {
+                    cx.notify();
+                }
+            }
+        });
         let playback = player_bar.read(cx).playback();
         let backdrop = player_bar.read(cx).album_backdrop();
+        let clock = player_bar.read(cx).rotation_clock();
+        let vinyl = cx.new(|cx| Vinyl::new(playback.clone(), clock.clone(), "images/disc.png", cx));
+        let summary_vinyl =
+            cx.new(|cx| Vinyl::new(playback.clone(), clock, "images/miniVinyl.png", cx));
+        let mut playback_state = {
+            let state = playback.read(cx).snapshot();
+            (state.revision, state.is_playing)
+        };
+        let playback_subscription = cx.observe(&playback, move |this, playback, cx| {
+            let state = playback.read(cx).snapshot();
+            let next = (state.revision, state.is_playing);
+            let active = this
+                .lyrics
+                .partition_point(|line| line.time <= state.position)
+                .checked_sub(1);
+            if this.opened && (next != playback_state || active != this.active_lyric) {
+                cx.notify();
+            }
+            playback_state = next;
+        });
         Self {
             player_bar,
             _player_subscription: player_subscription,
+            _playback_subscription: playback_subscription,
+            vinyl,
+            summary_vinyl,
             opened: false,
             scroll: ScrollHandle::default(),
             comment_scroll: ScrollHandle::default(),
@@ -343,6 +384,10 @@ impl AlbumLyrics {
         self.opened
     }
 
+    pub(in crate::ui) fn vinyl_overlays(&self) -> [Entity<Vinyl>; 2] {
+        [self.vinyl.clone(), self.summary_vinyl.clone()]
+    }
+
     pub(in crate::ui) fn open(&mut self, cx: &mut Context<Self>) {
         if !self.opened {
             self.song_scroll = ScrollTween::default();
@@ -474,6 +519,7 @@ impl AlbumLyrics {
                 // 回顶部：先把评论列表收起来（只留「全部评论」和计数），再平滑滑上去，
                 // 免得镜头一路扫过整个评论区。收起标记在补间结束时清掉。
                 this.comments_collapsed = true;
+                this.song_scroll.aim(&this.scroll, None);
                 this.song_scroll.aim(&this.scroll, Some(px(0.)));
                 cx.notify();
             }))
@@ -572,7 +618,10 @@ impl AlbumLyrics {
                     .size_full()
                     .overflow_y_scroll()
                     .track_scroll(&self.lyric_scroll)
-                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                    .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                        this.lyric_scroll_anim.playing = None;
+                        cx.stop_propagation();
+                    }))
                     .pt(px(72.))
                     .pb(px(160.))
                     .children(self.lyrics.iter().enumerate().map(|(index, line)| {
@@ -911,9 +960,23 @@ impl Render for AlbumLyrics {
             self.sync_song(cx);
         }
         let layout = self.layout(window, cx);
+        self.vinyl.read(cx).clear();
+        self.summary_vinyl.read(cx).clear();
+        if !self.opened && layout.reveal <= 0. {
+            self.lyric_scroll_anim.aim(&self.lyric_scroll, None);
+            self.song_scroll.aim(&self.scroll, None);
+            self.tonearm = Tonearm::default();
+            return div().into_any_element();
+        }
 
         // 滑到评论区底部附近就自动续拉下一页，不再放「加载更多」按钮。
-        if layout.show_comments && self.comments_more && !self.comments_loading {
+        if can_load_more_comments(
+            self.opened,
+            layout.show_comments,
+            self.comments_more,
+            self.comments_loading,
+            self.comments_error.is_some(),
+        ) {
             let remaining = self.comment_scroll.max_offset().y + self.comment_scroll.offset().y;
             if remaining < px(120.) {
                 self.load_comments(cx);
@@ -929,7 +992,11 @@ impl Render for AlbumLyrics {
         if active != self.active_lyric {
             self.active_lyric = active;
         }
-        self.sync_lyric_scroll(active, window);
+        if self.tab == SongTab::Lyrics && !layout.show_comments {
+            self.sync_lyric_scroll(active, window);
+        } else {
+            self.lyric_scroll_anim.aim(&self.lyric_scroll, None);
+        }
 
         // 两张唱片要用当前封面纹理，唱臂要推进动画，都先算好再交给分区。
         let arm_angle = {
@@ -938,17 +1005,17 @@ impl Render for AlbumLyrics {
                 .angle(playback.is_playing, playback.revision, window, cx)
         };
         let vinyl = (layout.reveal > 0. && layout.summary_top > 0.).then(|| {
-            self.player_bar.update(cx, |player, cx| {
-                player
-                    .vinyl(layout.side, "images/disc.png", window, cx)
-                    .debug_selector(|| "album-vinyl-image".into())
-            })
+            self.vinyl
+                .read(cx)
+                .placeholder(layout.side, 1., Some(arm_angle))
+                .debug_selector(|| "album-vinyl-image".into())
         });
-        let summary_vinyl = self.player_bar.update(cx, |player, cx| {
-            player
-                .vinyl(45., "images/miniVinyl.png", window, cx)
-                .debug_selector(|| "album-summary-vinyl".into())
-        });
+        let summary_vinyl = if layout.summary_top < layout.page_height {
+            self.summary_vinyl.read(cx).placeholder(45., 1., None)
+        } else {
+            div().size(px(45.)).flex_none()
+        }
+        .debug_selector(|| "album-summary-vinyl".into());
 
         // 先构建两块内容区，再自底向上拼装。
         let lyric_content = self.render_lyrics(&layout, cx);
@@ -956,94 +1023,111 @@ impl Render for AlbumLyrics {
         let song_info = self.render_song_info(&layout, tab_content, cx);
         let comments = self.render_comments(&layout, cx);
         let summary = self.render_summary(&layout, summary_vinyl, cx);
-        let song_page = build_song_page(&layout, song_info, vinyl, arm_angle);
+        let song_page = build_song_page(&layout, song_info, vinyl);
 
         // 全屏页外壳：背景渐变 + 外层滚动（唱片页叠评论页）+ 两层顶栏。
+        // 缓存视图作为独立布局根；滑动层放在其子节点，百分比 top 才有参照。
         div()
-            .absolute()
-            .left_0()
-            .top(relative(1. - layout.reveal))
             .size_full()
-            .flex()
-            .flex_col()
-            .bg(layout.colors.background)
-            .occlude()
-            .child(
-                gradient_layer(
-                    "album-background-color",
-                    layout.gradient,
-                    self.backdrop.clone(),
-                )
-                .absolute()
-                .inset_0(),
-            )
+            .relative()
             .child(
                 div()
                     .absolute()
-                    .inset_0()
-                    .overflow_hidden()
+                    .left_0()
+                    .top(relative(1. - layout.reveal))
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .bg(layout.colors.background)
+                    .occlude()
+                    .child(
+                        gradient_layer(
+                            "album-background-color",
+                            layout.gradient,
+                            self.backdrop.clone(),
+                        )
+                        .absolute()
+                        .inset_0(),
+                    )
                     .child(
                         div()
-                            .id("album-lyrics-scroll")
-                            .size_full()
-                            .pt(px(WINDOW_HEADER_HEIGHT + PAGE_HEADER_HEIGHT))
-                            .overflow_y_scroll()
-                            .track_scroll(&self.scroll)
-                            .child(song_page)
+                            .absolute()
+                            .inset_0()
+                            .overflow_hidden()
                             .child(
                                 div()
-                                    .id("album-comments-page")
-                                    .debug_selector(|| "album-comments-page".into())
-                                    .w_full()
-                                    .h(px(layout.page_height))
-                                    .pt(px(WINDOW_HEADER_HEIGHT))
-                                    .flex()
-                                    .flex_col()
-                                    .overflow_hidden()
+                                    .id("album-lyrics-scroll")
+                                    .size_full()
+                                    .pt(px(WINDOW_HEADER_HEIGHT + PAGE_HEADER_HEIGHT))
+                                    .overflow_y_scroll()
+                                    .track_scroll(&self.scroll)
+                                    .child(song_page)
                                     .child(
                                         div()
+                                            .id("album-comments-page")
+                                            .debug_selector(|| "album-comments-page".into())
                                             .w_full()
-                                            .h(px(SUMMARY_HEIGHT))
-                                            .flex_none()
-                                            .px(px(40.))
+                                            .h(px(layout.page_height))
+                                            .pt(px(WINDOW_HEADER_HEIGHT))
                                             .flex()
-                                            .justify_center()
-                                            .child(summary),
-                                    )
-                                    .child(comments),
-                            ),
+                                            .flex_col()
+                                            .overflow_hidden()
+                                            .child(
+                                                div()
+                                                    .w_full()
+                                                    .h(px(SUMMARY_HEIGHT))
+                                                    .flex_none()
+                                                    .px(px(40.))
+                                                    .flex()
+                                                    .justify_center()
+                                                    .child(summary),
+                                            )
+                                            .child(comments),
+                                    ),
+                            )
+                            .when(layout.show_comments, |content| {
+                                content.child(
+                                    div()
+                                        .absolute()
+                                        .bottom(px(16.))
+                                        .left(relative(0.5))
+                                        .ml(px(-76.))
+                                        .child(
+                                            Button::new("publish-song-comment")
+                                                .disabled(true)
+                                                .w(px(152.))
+                                                .h(px(40.))
+                                                .rounded_full()
+                                                .bg(hsla(0., 0., 0.35, 0.55))
+                                                .border_1()
+                                                .border_color(white().alpha(0.08))
+                                                .text_color(white())
+                                                .child("发布评论"),
+                                        ),
+                                )
+                            }),
                     )
-                    .when(layout.show_comments, |content| {
-                        content.child(
-                            div()
-                                .absolute()
-                                .bottom(px(16.))
-                                .left(relative(0.5))
-                                .ml(px(-76.))
-                                .child(
-                                    Button::new("publish-song-comment")
-                                        .disabled(true)
-                                        .w(px(152.))
-                                        .h(px(40.))
-                                        .rounded_full()
-                                        .bg(hsla(0., 0., 0.35, 0.55))
-                                        .border_1()
-                                        .border_color(white().alpha(0.08))
-                                        .text_color(white())
-                                        .child("发布评论"),
-                                ),
-                        )
-                    }),
+                    // 唱片能从透明顶栏下方透出；评论滚动区的边界位于胶囊下方，无需额外遮罩。
+                    .child(self.render_window_header(&layout, cx))
+                    .child(page_header(&layout)),
             )
-            // 唱片能从透明顶栏下方透出；评论滚动区的边界位于胶囊下方，无需额外遮罩。
-            .child(self.render_window_header(&layout, cx))
-            .child(page_header(&layout))
+            .into_any_element()
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
 // 独立视图
 // ─────────────────────────────────────────────────────────────────────────
+
+fn can_load_more_comments(
+    opened: bool,
+    visible: bool,
+    more: bool,
+    loading: bool,
+    failed: bool,
+) -> bool {
+    opened && visible && more && !loading && !failed
+}
 
 /// 让某行中心对齐视口高度的 [`LYRIC_ANCHOR_RATIO`] 处所需的竖直偏移，
 /// 再夹进可滚动范围 `[-max, 0]`。靠前的行没有负的滚动空间，居不了中就只能顶到开头。
@@ -1069,12 +1153,7 @@ fn lyrics_fade(backdrop: Backdrop) -> impl IntoElement {
 }
 
 /// 唱片区：居中内容区，左唱片右信息，整体受内容宽/唱片边长约束。
-fn build_song_page(
-    layout: &Layout,
-    song_info: AnyElement,
-    vinyl: Option<Div>,
-    arm_angle: f32,
-) -> AnyElement {
+fn build_song_page(layout: &Layout, song_info: AnyElement, vinyl: Option<Div>) -> AnyElement {
     div()
         .h(px(layout.height))
         .w_full()
@@ -1088,7 +1167,7 @@ fn build_song_page(
                 .w(px(layout.content_width))
                 .h_full()
                 .flex()
-                .child(artwork(layout.side, vinyl, arm_angle))
+                .child(artwork(vinyl))
                 .child(song_info),
         )
         .into_any_element()
@@ -1125,7 +1204,7 @@ fn page_header(layout: &Layout) -> AnyElement {
 }
 
 /// 左半栏：唱片舞台（见 [`vinyl_stage`]）。
-fn artwork(side: f32, disc: Option<Div>, arm_angle: f32) -> impl IntoElement {
+fn artwork(disc: Option<Div>) -> impl IntoElement {
     div()
         .id("album-artwork-region")
         .debug_selector(|| "album-artwork-region".into())
@@ -1135,7 +1214,7 @@ fn artwork(side: f32, disc: Option<Div>, arm_angle: f32) -> impl IntoElement {
         .flex()
         .items_center()
         .justify_start()
-        .child(vinyl_stage(side, disc, arm_angle))
+        .children(disc)
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1144,6 +1223,44 @@ fn artwork(side: f32, disc: Option<Div>, arm_angle: f32) -> impl IntoElement {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn failed_comment_page_waits_for_manual_retry() {
+        use super::can_load_more_comments;
+        assert!(can_load_more_comments(true, true, true, false, false));
+        assert!(!can_load_more_comments(true, true, true, false, true));
+        assert!(!can_load_more_comments(false, true, true, false, false));
+        assert!(!can_load_more_comments(true, false, true, false, false));
+        assert!(!can_load_more_comments(true, true, true, true, false));
+        assert!(!can_load_more_comments(true, true, false, false, false));
+    }
+
+    #[test]
+    fn completed_lyric_scroll_leaves_manual_offset_until_target_changes() {
+        use super::{SCROLL_DURATION, ScrollTween};
+        use gpui::{ScrollHandle, point, px};
+        use std::time::Instant;
+        let handle = ScrollHandle::default();
+        let mut tween = ScrollTween::default();
+        tween.aim(&handle, Some(px(-300.)));
+        assert!(!tween.advance(&handle, tween.playing.unwrap().1 + SCROLL_DURATION));
+        assert_eq!(handle.offset().y, px(-300.));
+        handle.set_offset(point(px(0.), px(-380.)));
+        tween.aim(&handle, Some(px(-300.)));
+        assert!(!tween.advance(&handle, Instant::now()));
+        assert_eq!(handle.offset().y, px(-380.));
+        tween.aim(&handle, Some(px(-450.)));
+        assert!(tween.advance(&handle, Instant::now()));
+        tween.playing = None; // 手动滚轮中止正在运行的补间。
+        handle.set_offset(point(px(0.), px(-500.)));
+        tween.aim(&handle, Some(px(-450.)));
+        assert!(!tween.advance(&handle, Instant::now()));
+        assert_eq!(handle.offset().y, px(-500.));
+        // 回顶部按钮显式重新发起，即使上一次目标也是零。
+        tween.aim(&handle, None);
+        tween.aim(&handle, Some(px(0.)));
+        assert!(tween.advance(&handle, Instant::now()));
+    }
+
     #[test]
     fn lyric_anchor_offset_hits_the_anchor_and_clamps_to_scroll_range() {
         use gpui::{Bounds, point, px, size};

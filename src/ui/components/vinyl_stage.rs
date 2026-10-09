@@ -1,4 +1,4 @@
-//! 唱片舞台：正方形圆环 + 唱片 + 唱臂。唱片本体由 [`PlayerBar`](super::PlayerBar) 生成后传入。
+//! 唱片舞台：正方形圆环 + 唱片 + 唱臂。唱片本体由独立的 Vinyl 动画视图传入。
 //! 唱臂角度由 [`Tonearm`] 状态机按播放状态与切歌事件推进。
 
 use std::time::Duration;

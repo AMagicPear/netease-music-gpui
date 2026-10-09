@@ -150,7 +150,12 @@ pub(super) fn gradient_layer(
                 window,
                 cx,
             );
+            let changed = backdrop.gradient() != Some(gradient);
             backdrop.set(bounds, gradient);
+            if changed {
+                // 共享底色在 prepaint 才写入；再通知一次，让缓存控件也采到最终颜色。
+                window.request_animation_frame();
+            }
             gradient
         },
         |bounds, gradient, window, _| window.paint_quad(fill(bounds, gradient.background())),
@@ -218,12 +223,23 @@ pub(super) fn dark_colors(mut colors: ColorTokens, background: Hsla) -> ColorTok
     colors
 }
 
-/// 在两套色板之间按进度逐通道插值。展开/收起黑胶页时，播放栏用同一个进度
+/// 按 RGB 通道过渡；灰色的 HSL 色相没有意义，直接插值会绕过绿色等无关颜色。
+pub(super) fn blend_color(from: Hsla, to: Hsla, t: f32) -> Hsla {
+    if t <= 0. {
+        return from;
+    }
+    if t >= 1. {
+        return to;
+    }
+    CoverGradient([from.into(), to.into()]).sample(t)
+}
+
+/// 在两套色板之间按进度对 RGB 通道插值。展开/收起黑胶页时，播放栏用同一个进度
 /// 从普通主题色过渡到暗色主题色，而不是整条栏瞬间跳变。
 pub(super) fn blend_colors(from: ColorTokens, to: ColorTokens, t: f32) -> ColorTokens {
     macro_rules! blend {
         ($($field:ident),+ $(,)?) => {
-            ColorTokens { $($field: from.$field.interpolate(&to.$field, t),)+ }
+            ColorTokens { $($field: blend_color(from.$field, to.$field, t),)+ }
         };
     }
     blend!(
@@ -250,7 +266,9 @@ pub(super) fn blend_colors(from: ColorTokens, to: ColorTokens, t: f32) -> ColorT
 
 #[cfg(test)]
 mod tests {
-    use super::{CoverGradient, blend_colors, cover_color, dark_colors, dark_gradient};
+    use super::{
+        CoverGradient, blend_color, blend_colors, cover_color, dark_colors, dark_gradient,
+    };
     use gpui::{Hsla, Rgba, hsla};
 
     #[test]
@@ -294,6 +312,43 @@ mod tests {
         let mid = blend_colors(light, dark, 0.5);
         assert_ne!(mid.background, light.background);
         assert_ne!(mid.background, dark.background);
+    }
+
+    #[test]
+    fn neutral_to_blue_palette_never_flashes_green_in_either_direction() {
+        let light = dark_colors(Default::default(), hsla(0., 0., 0.95, 1.));
+        let blue = dark_colors(Default::default(), hsla(2. / 3., 0.85, 0.12, 1.));
+        for (from, to) in [(light, blue), (blue, light)] {
+            let start = Rgba::from(from.surface);
+            let end = Rgba::from(to.surface);
+            for step in 0..=100 {
+                let colors = blend_colors(from, to, step as f32 / 100.);
+                for color in [colors.background, colors.surface] {
+                    let rgb = Rgba::from(color);
+                    assert!(rgb.b + 1e-6 >= rgb.g, "蓝色过渡不应经过绿色：{rgb:?}");
+                    for (value, from, to) in [
+                        (rgb.r, start.r, end.r),
+                        (rgb.g, start.g, end.g),
+                        (rgb.b, start.b, end.b),
+                    ] {
+                        assert!(value >= from.min(to) - 1e-6 && value <= from.max(to) + 1e-6);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn color_blend_preserves_endpoints_alpha_and_rgb_midpoint() {
+        let red = hsla(0., 1., 0.5, 1.);
+        let blue = hsla(2. / 3., 1., 0.5, 0.2);
+        assert_eq!(blend_color(red, blue, 0.), red);
+        assert_eq!(blend_color(red, blue, 1.), blue);
+        let mid = Rgba::from(blend_color(red, blue, 0.5));
+        assert!((mid.r - 0.5).abs() < 1e-6);
+        assert!(mid.g.abs() < 1e-6);
+        assert!((mid.b - 0.5).abs() < 1e-6);
+        assert!((mid.a - 0.6).abs() < 1e-6);
     }
 
     #[test]

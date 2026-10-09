@@ -1,18 +1,21 @@
-use std::time::{Duration, Instant};
+use std::{cell::Cell, rc::Rc, time::Duration};
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_kit::base::{Button, ColorTokens, Interpolate, Theme, Transition, transition};
+use gpui_kit::base::{Button, ColorTokens, Theme, Transition, transition};
 
 use super::progress_bar::ProgressBar;
 use super::volume_control::VolumeControl;
-use super::{LAYER_PROGRESS_BAR, Popover, artist_label, icon_hover_color, like_icon_path};
+use super::{
+    LAYER_PROGRESS_BAR, Popover, RotationClock, Vinyl, artist_label, icon_hover_color,
+    like_icon_path,
+};
 use crate::api::MusicApi;
 use crate::models::AudioQualityLevel;
 use crate::playback::PlaybackController;
 use crate::state::library::MusicLibrary;
 use crate::ui::assets::thumbnail_url;
-use crate::ui::cover_color::{Backdrop, blend_colors, dark_colors};
+use crate::ui::cover_color::{Backdrop, CoverGradient, blend_color, blend_colors, dark_colors};
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
 
 /// 播放栏固定高度；专辑歌词页据此估算可视区域高度。
@@ -36,10 +39,11 @@ pub struct PlayerBar {
     /// 哪块互动区正被悬停，`(互动区 id, 命中部件)`。
     /// 图标和计数是两个独立 hitbox（计数还可能伸出格子），靠这份状态让两者同步变色。
     hovered_interaction: Option<(&'static str, usize)>,
-    cover_rotation_elapsed: Duration,
-    cover_rotation_started: Option<Instant>,
+    rotation_clock: Rc<Cell<RotationClock>>,
+    mini_vinyl: Entity<Vinyl>,
     album_expanded: bool,
     album_backdrop: Backdrop,
+    backdrop_gradient: Option<CoverGradient>,
     _playback_subscription: Subscription,
     _progress_subscription: Subscription,
     _library_subscription: Subscription,
@@ -60,12 +64,48 @@ impl PlayerBar {
         let progress_bar =
             cx.new(|cx| ProgressBar::new(playback.clone(), album_backdrop.clone(), window, cx));
         let volume = cx.new(|cx| VolumeControl::new(playback.clone(), window, cx));
-        let playback_subscription = cx.observe(&playback, |this, _, cx| {
-            this.sync_cover_rotation(Instant::now(), cx);
-            this.load_counts(cx);
-            cx.notify();
+        let rotation_clock: Rc<Cell<RotationClock>> = Rc::default();
+        let mini_vinyl = cx.new(|cx| {
+            Vinyl::new(
+                playback.clone(),
+                rotation_clock.clone(),
+                "images/miniVinyl.png",
+                cx,
+            )
         });
-        let progress_subscription = cx.observe(&progress_bar, |_, _, cx| cx.notify());
+        let mut playback_state = {
+            let controller = playback.read(cx);
+            let state = controller.snapshot();
+            (
+                state.revision,
+                controller.is_play_requested(),
+                state.quality,
+                state.actual_quality,
+            )
+        };
+        let playback_subscription = cx.observe(&playback, move |this, playback, cx| {
+            let controller = playback.read(cx);
+            let state = controller.snapshot();
+            let next = (
+                state.revision,
+                controller.is_play_requested(),
+                state.quality,
+                state.actual_quality,
+            );
+            if next != playback_state {
+                playback_state = next;
+                this.load_counts(cx);
+                cx.notify();
+            }
+        });
+        let mut progress_expanded = progress_bar.read(cx).expanded();
+        let progress_subscription = cx.observe(&progress_bar, move |_, progress, cx| {
+            let expanded = progress.read(cx).expanded();
+            if expanded != progress_expanded {
+                progress_expanded = expanded;
+                cx.notify();
+            }
+        });
         // 喜欢状态由音乐库维护：歌单页点亮红心后，播放栏也要跟着重绘。
         let library_subscription = cx.observe(&library, |_, _, cx| cx.notify());
         let mut this = Self {
@@ -78,26 +118,32 @@ impl PlayerBar {
             song_id: None,
             counts: [None; 2],
             hovered_interaction: None,
-            cover_rotation_elapsed: Duration::ZERO,
-            cover_rotation_started: None,
+            rotation_clock,
+            mini_vinyl,
             album_expanded: false,
             album_backdrop,
+            backdrop_gradient: None,
             _playback_subscription: playback_subscription,
             _progress_subscription: progress_subscription,
             _library_subscription: library_subscription,
         };
         this.load_counts(cx);
-        this.sync_cover_rotation(Instant::now(), cx);
         this
     }
 
     pub(crate) fn set_album_expanded(&mut self, expanded: bool, cx: &mut Context<Self>) {
-        if self.album_expanded != expanded {
+        let changed = self.album_expanded != expanded;
+        let gradient = self.album_backdrop.gradient();
+        let color_changed = expanded && self.backdrop_gradient != gradient;
+        self.backdrop_gradient = gradient;
+        if changed {
             self.album_expanded = expanded;
             self.progress_bar
                 .update(cx, |bar, cx| bar.set_dark(expanded, cx));
             self.volume
                 .update(cx, |volume, cx| volume.set_dark(expanded, cx));
+        }
+        if changed || color_changed {
             cx.notify();
         }
     }
@@ -108,6 +154,14 @@ impl PlayerBar {
 
     pub(in crate::ui) fn album_backdrop(&self) -> Backdrop {
         self.album_backdrop.clone()
+    }
+
+    pub(in crate::ui) fn rotation_clock(&self) -> Rc<Cell<RotationClock>> {
+        self.rotation_clock.clone()
+    }
+
+    pub(in crate::ui) fn vinyl_overlay(&self) -> AnyElement {
+        self.mini_vinyl.clone().into_any_element()
     }
 
     pub(crate) fn source_name(&self, cx: &App) -> Option<String> {
@@ -130,63 +184,6 @@ impl PlayerBar {
             .pic_url
             .as_ref()
             .map(|url| thumbnail_url(url, 480))
-    }
-
-    fn sync_cover_rotation(&mut self, now: Instant, cx: &App) {
-        if self.playback.read(cx).snapshot().is_playing {
-            self.cover_rotation_started.get_or_insert(now);
-        } else if let Some(started) = self.cover_rotation_started.take() {
-            self.cover_rotation_elapsed += now.duration_since(started);
-        }
-    }
-
-    /// 大小唱片共用播放时钟，图片纹理复用 GPUI 缓存，只在 GPU 上旋转。
-    pub(crate) fn vinyl(
-        &mut self,
-        side: f32,
-        disc_path: &'static str,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Div {
-        let elapsed = self.cover_rotation_elapsed
-            + self
-                .cover_rotation_started
-                .map_or(Duration::ZERO, |started| started.elapsed());
-        // 40 秒一圈；按实际时间取角度，不受帧率影响。
-        let angle = (elapsed.as_secs_f64() % 40.) as f32 / 40. * std::f32::consts::TAU;
-        if self.cover_rotation_started.is_some() {
-            window.request_animation_frame();
-        }
-        let cover_url = self
-            .playback
-            .read(cx)
-            .snapshot()
-            .current_song
-            .as_ref()
-            .and_then(|song| song.al.pic_url.clone());
-        let cover_side = side * 2. / 3.;
-        let inset = (side - cover_side) / 2.;
-        div()
-            .size(px(side))
-            .flex_none()
-            .relative()
-            .child(
-                img(disc_path)
-                    .with_transformation(Transformation::rotate(radians(angle)))
-                    .size_full(),
-            )
-            .when_some(cover_url, |vinyl, url| {
-                vinyl.child(
-                    img(thumbnail_url(&url, if side > 100. { 480 } else { 80 }))
-                        .with_transformation(Transformation::rotate(radians(angle)))
-                        .absolute()
-                        .left(px(inset))
-                        .top(px(inset))
-                        .size(px(cover_side))
-                        .rounded_full()
-                        .object_fit(ObjectFit::Cover),
-                )
-            })
     }
 
     fn load_counts(&mut self, cx: &mut Context<Self>) {
@@ -377,6 +374,7 @@ impl Render for PlayerBar {
             window,
             cx,
         );
+        self.mini_vinyl.read(cx).clear();
         let backdrop_color = self
             .album_backdrop
             .gradient()
@@ -480,7 +478,7 @@ impl Render for PlayerBar {
                 bar.child(canvas(|_, _, _| {}, move |bounds, _, window, _| {
                     // 绘制时读取同一帧的渐变底端，再按展开进度从普通底色过渡过去。
                     let bottom = backdrop.gradient().map(|gradient| Hsla::from(gradient.0[1])).unwrap_or_else(|| hsla(0., 0., 0.12, 1.));
-                    window.paint_quad(fill(bounds, surface.interpolate(&Hsla::from(bottom), expand)));
+                    window.paint_quad(fill(bounds, blend_color(surface, bottom, expand)));
                 }).absolute().inset_0())
             })
             // 进度条覆盖渲染
@@ -514,7 +512,7 @@ impl Render for PlayerBar {
                                     .flex_none()
                                     .ml(px(-70. * expand))
                                     .opacity(1. - expand)
-                                    .child(self.vinyl(60., "images/miniVinyl.png", window, cx)),
+                                    .when(expand < 1., |cover| cover.child(self.mini_vinyl.read(cx).placeholder(60., 1. - expand, None))),
                             )
                             .child(
                                 div()
