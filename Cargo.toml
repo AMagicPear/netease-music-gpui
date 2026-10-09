@@ -23,6 +23,8 @@ tray-icon = { version = "0.26.1", default-features = false, features = ["ksni"] 
 anyhow = "1"
 # 用于随机播放；gpui 依赖同一版本
 rand = "0.9"
+sha2 = "0.10"
+tempfile = "3"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 raw-window-handle = "0.6"

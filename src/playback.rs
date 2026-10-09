@@ -1,3 +1,4 @@
+mod audio_cache;
 mod controller;
 mod engine;
 mod stream;

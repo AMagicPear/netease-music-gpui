@@ -1,15 +1,9 @@
 use super::{
-    download::{
-        BLOCK_BYTES, CACHE_BLOCKS, CacheData, CacheReader, Demand, DownloadError, content_range,
-    },
+    download::{BLOCK_BYTES, CacheReader, DownloadError, content_range},
     output::Chunk,
     *,
 };
-use std::{
-    collections::BTreeMap,
-    io::Read,
-    sync::{Condvar, Mutex},
-};
+use std::io::Read;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn wav(seconds: u32) -> Vec<u8> {
@@ -28,7 +22,7 @@ fn wav(seconds: u32) -> Vec<u8> {
     bytes.extend_from_slice(&data_len.to_le_bytes());
     for second in 0..seconds {
         for _ in 0..48000 {
-            bytes.extend_from_slice(&((second + 1) as i16 * 1000).to_le_bytes());
+            bytes.extend_from_slice(&((second % 32 + 1) as i16 * 1000).to_le_bytes());
         }
     }
     bytes
@@ -40,6 +34,12 @@ struct Server {
     task: tokio::task::JoinHandle<()>,
 }
 
+#[derive(Clone, Copy)]
+enum ServerFailure {
+    WrongRange(u64),
+    TruncatedRange,
+}
+
 impl Drop for Server {
     fn drop(&mut self) {
         self.task.abort();
@@ -49,7 +49,7 @@ impl Drop for Server {
 async fn serve(
     bytes: Vec<u8>,
     range: bool,
-    broken: Option<u64>,
+    broken: Option<ServerFailure>,
     stalled: Option<(u64, Arc<tokio::sync::Notify>)>,
 ) -> Server {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -81,14 +81,25 @@ async fn serve(
                     notify.notified().await;
                 }
                 let (header, body) = if range {
-                    let reported = if broken == Some(start) { start + 1 } else { start };
+                    let reported = if matches!(broken, Some(ServerFailure::WrongRange(offset)) if offset >= start && offset <= end as u64) { start + 1 } else { start };
                     (format!("HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {reported}-{end}/{}\r\nConnection: close\r\n\r\n", end + 1 - start as usize, bytes.len()), &bytes[start as usize..=end])
                 } else {
                     (format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()), bytes.as_slice())
                 };
                 if socket.write_all(header.as_bytes()).await.is_ok() {
-                    if let Some((0, notify)) = &stalled && start == 0 {
-                        let count = body.len().min(65536);
+                    if matches!(broken, Some(ServerFailure::TruncatedRange)) {
+                        // 让读者逐块追上这一请求，再模拟声明长度尚未到达就断线。
+                        let count = body.len().min(2 * BLOCK_BYTES as usize);
+                        for part in body[..count].chunks(BLOCK_BYTES as usize) {
+                            if socket.write_all(part).await.is_err() { return; }
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                        }
+                        return;
+                    }
+                    if let Some((offset, notify)) = &stalled
+                        && (*offset == 0 && start == 0 || *offset > start && *offset <= end as u64)
+                    {
+                        let count = if *offset == 0 { body.len().min(65536) } else { (*offset - start) as usize };
                         if socket.write_all(&body[..count]).await.is_err() { return; }
                         notify.notified().await;
                         let _ = socket.write_all(&body[count..]).await;
@@ -122,6 +133,7 @@ async fn open_with_duration(
             reqwest::Client::new(),
             AudioSourceInfo {
                 url: server.url.clone(),
+                cache_id: None,
                 byte_len: None,
                 duration,
                 quality: None,
@@ -178,48 +190,20 @@ fn source(pcm: Arc<Pcm>) -> BufferedSource {
         sample_rate: 1000,
         chunk: None,
         sample_index: 0,
+        playback_gain: 1.,
     }
 }
 
 #[tokio::test]
 async fn cache_is_bounded_and_seek_cannot_hide_terminal_download_errors() {
-    let pcm = Arc::new(Pcm::default());
-    let control = pcm.control.clone();
-    let (demand, _receiver) = tokio::sync::watch::channel(Demand {
-        offset: Some(0),
-        generation: 0,
-    });
-    let cache = Arc::new(Cache {
-        data: Mutex::new(CacheData {
-            blocks: BTreeMap::new(),
-            byte_len: Some(1024 * BLOCK_BYTES),
-            range: true,
-            error: None,
-        }),
-        changed: Condvar::new(),
-        demand,
-        control: control.clone(),
-    });
-    for block in 0..=CACHE_BLOCKS {
-        cache.insert(block as u64 * BLOCK_BYTES, vec![1]);
-    }
-    {
-        let data = cache.data.lock().unwrap();
-        assert_eq!(data.blocks.len(), CACHE_BLOCKS);
-        assert!(data.blocks.contains_key(&0));
-        assert!(
-            data.blocks
-                .contains_key(&(CACHE_BLOCKS as u64 * BLOCK_BYTES))
-        );
-    }
-    let task = tokio::spawn(async {});
-    let audio = StreamingAudio {
-        cache: cache.clone(),
-        pcm,
-        download: task.abort_handle(),
-        duration: None,
-        quality: None,
-    };
+    let server = serve(wav(12), true, None, None).await;
+    let (audio, _output) = open(&server).await;
+    let cache = audio.cache.clone();
+    assert!(
+        cache
+            .insert(super::super::audio_cache::DEFAULT_MAX_FILE_BYTES, vec![1])
+            .is_err()
+    );
     cache.fail(0, "旧跳转下载失败".into());
     audio.seek(Duration::from_secs(1));
     cache.fail(0, "晚到的旧错误".into());
@@ -260,7 +244,7 @@ async fn playback_and_seek_do_not_wait_for_the_first_range_to_finish() {
     .await;
     let (audio, mut output) = open(&server).await;
     assert_eq!(server.requests.recv().await, Some(0));
-    assert!(audio.cache.data.lock().unwrap().blocks[&0].len() < BLOCK_BYTES as usize);
+    assert!(audio.cache.data.lock().unwrap().blocks[&0] < BLOCK_BYTES as usize);
     assert_eq!(next_audible(&mut output).await, 1000. / 32768.);
     audio.seek(Duration::from_secs(10));
     tokio::time::timeout(Duration::from_secs(3), async {
@@ -298,11 +282,11 @@ async fn seek_fetches_target_range_and_cached_return_interrupts_stalled_download
             .wait_timeout_while(data, Duration::from_secs(3), |data| {
                 data.blocks
                     .get(&0)
-                    .is_none_or(|bytes| bytes.len() < BLOCK_BYTES as usize)
+                    .is_none_or(|length| *length < BLOCK_BYTES as usize)
             })
             .unwrap();
         assert!(!timeout.timed_out());
-        assert_eq!(data.blocks[&0].len(), BLOCK_BYTES as usize);
+        assert_eq!(data.blocks[&0], BLOCK_BYTES as usize);
     })
     .await
     .unwrap();
@@ -312,18 +296,17 @@ async fn seek_fetches_target_range_and_cached_return_interrupts_stalled_download
         read_frame(&mut source),
         Some(vec![0.; source.channels as usize])
     );
-    // 直接访问目标区间，不读取位于中间的第 1、2 块。
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(3), server.requests.recv())
-            .await
-            .unwrap(),
-        Some(3 * BLOCK_BYTES)
-    );
+    // 第 1、2 块可能已经被预取；跳转不等待它们，仍能打断第 3 块的挂起请求。
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while server.requests.recv().await.unwrap() != 3 * BLOCK_BYTES {}
+    })
+    .await
+    .unwrap();
     audio.seek(Duration::from_secs(1));
     wait_pcm(&audio.pcm).await;
     assert_eq!(next_audible(&mut source).await, 2000. / 32768.);
     assert!(audio.position() >= Duration::from_secs(1));
-    assert!(server.requests.try_recv().is_err(), "回退应复用文件头缓存");
+    assert!(audio.cache.data.lock().unwrap().blocks.contains_key(&0));
     assert!(audio.error().is_none());
     drop(audio);
     assert_eq!(read_frame(&mut source), None);
@@ -332,10 +315,10 @@ async fn seek_fetches_target_range_and_cached_return_interrupts_stalled_download
 #[tokio::test]
 async fn dropping_audio_wakes_a_reader_waiting_for_a_stalled_range() {
     let mut server = serve(
-        wav(12),
+        wav(60),
         true,
         None,
-        Some((3 * BLOCK_BYTES, Arc::new(tokio::sync::Notify::new()))),
+        Some((18 * BLOCK_BYTES, Arc::new(tokio::sync::Notify::new()))),
     )
     .await;
     let (audio, mut output) = open(&server).await;
@@ -343,14 +326,14 @@ async fn dropping_audio_wakes_a_reader_waiting_for_a_stalled_range() {
     let reader = tokio::task::spawn_blocking(move || {
         let mut reader = CacheReader {
             cache,
-            position: 3 * BLOCK_BYTES,
+            position: 18 * BLOCK_BYTES,
             generation: 0,
             eof: Arc::new(AtomicBool::new(false)),
         };
         reader.read(&mut [0; 1])
     });
     tokio::time::timeout(Duration::from_secs(3), async {
-        while server.requests.recv().await.unwrap() != 3 * BLOCK_BYTES {}
+        while server.requests.recv().await.unwrap() < 16 * BLOCK_BYTES {}
     })
     .await
     .unwrap();
@@ -367,9 +350,15 @@ async fn dropping_audio_wakes_a_reader_waiting_for_a_stalled_range() {
 
 #[tokio::test]
 async fn failed_seek_keeps_worker_alive_and_new_seek_recovers() {
-    let server = serve(wav(12), true, Some(3 * BLOCK_BYTES), None).await;
+    let server = serve(
+        wav(60),
+        true,
+        Some(ServerFailure::WrongRange(18 * BLOCK_BYTES)),
+        None,
+    )
+    .await;
     let (audio, mut source) = open(&server).await;
-    audio.seek(Duration::from_secs(10));
+    audio.seek(Duration::from_secs(50));
     let pcm = audio.pcm.clone();
     tokio::task::spawn_blocking(move || {
         let data = pcm.data.lock().unwrap();
@@ -392,7 +381,6 @@ async fn failed_seek_keeps_worker_alive_and_new_seek_recovers() {
 async fn ignored_range_falls_back_and_eof_source_remains_seekable() {
     let server = serve(wav(1), false, None, None).await;
     let (audio, source) = open(&server).await;
-    assert!(!audio.cache.data.lock().unwrap().range);
     let (audio, mut source) = tokio::task::spawn_blocking(move || {
         let mut source = source;
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
@@ -552,6 +540,7 @@ async fn corrupt_flac_reports_decoder_error() {
             reqwest::Client::new(),
             AudioSourceInfo {
                 url: server.url.clone(),
+                cache_id: None,
                 byte_len: None,
                 duration: None,
                 quality: None,
@@ -686,5 +675,214 @@ fn buffered_output_preserves_channels_rates_volume_and_seek() {
         let mut frame = [0_f32; 2];
         output.write(&mut frame, 1.);
         assert_eq!(frame, [-0.5, -0.5], "seek must discard old PCM");
+    }
+}
+
+#[tokio::test]
+async fn full_song_download_continues_without_consuming_pcm_and_seek_reuses_disk() {
+    let bytes = wav(40);
+    let blocks = (bytes.len() as u64).div_ceil(BLOCK_BYTES);
+    let mut server = serve(bytes, true, None, None).await;
+    let (audio, _output) = open(&server).await;
+    assert!(audio.pcm.data.lock().unwrap().queued_samples >= 48000 / 2);
+    // 没有消费 PCM，解码器会停在第一块内，下载仍应主动完成整首。
+    assert_eq!(server.requests.recv().await, Some(0));
+    let cache = audio.cache.clone();
+    tokio::task::spawn_blocking(move || {
+        let data = cache.data.lock().unwrap();
+        let (data, timeout) = cache
+            .changed
+            .wait_timeout_while(data, Duration::from_secs(3), |data| !data.complete)
+            .unwrap();
+        assert!(!timeout.timed_out());
+        assert_eq!(data.blocks.len(), blocks as usize);
+    })
+    .await
+    .unwrap();
+    assert!(audio.download_complete());
+    assert!(server.requests.try_recv().is_err());
+    let mut reader = CacheReader {
+        cache: audio.cache.clone(),
+        position: 8 * BLOCK_BYTES,
+        generation: 0,
+        eof: Arc::new(AtomicBool::new(false)),
+    };
+    assert_eq!(reader.read(&mut [0; 1]).unwrap(), 1);
+    assert!(
+        server.requests.try_recv().is_err(),
+        "读磁盘缓存无需再次请求"
+    );
+}
+
+#[tokio::test]
+async fn completed_disk_cache_plays_without_contacting_a_renewed_url() {
+    let store = super::super::audio_cache::AudioCacheStore::temporary().unwrap();
+    let mut first = serve(wav(2), true, None, None).await;
+    let info = |url: String| AudioSourceInfo {
+        url,
+        cache_id: Some("stable-content-id".into()),
+        byte_len: Some(wav(2).len() as u64),
+        duration: Some(Duration::from_secs(2)),
+        quality: Some(AudioQualityLevel::Lossless),
+    };
+    let (audio, output) = StreamingAudio::open_cached(
+        reqwest::Client::new(),
+        info(first.url.clone()),
+        store.clone(),
+        42,
+    )
+    .await
+    .unwrap();
+    let cache = audio.cache.clone();
+    tokio::task::spawn_blocking(move || {
+        let data = cache.data.lock().unwrap();
+        let (data, timeout) = cache
+            .changed
+            .wait_timeout_while(data, Duration::from_secs(3), |data| {
+                !data.complete && data.error.is_none()
+            })
+            .unwrap();
+        assert!(!timeout.timed_out());
+        assert!(data.complete);
+    })
+    .await
+    .unwrap();
+    assert_eq!(first.requests.recv().await, Some(0));
+    drop(output);
+    drop(audio);
+    drop(first);
+    // 完整缓存无需 GET，所以不存在的地址也不影响解码（权限仍由控制器先请求 API）。
+    let (audio, mut output) = StreamingAudio::open_cached(
+        reqwest::Client::new(),
+        info("http://127.0.0.1:1/renewed.wav?signature=new".into()),
+        store,
+        42,
+    )
+    .await
+    .unwrap();
+    assert!(audio.download_complete());
+    assert_eq!(next_audible(&mut output).await, 1000. / 32768.);
+    audio.seek(Duration::from_secs(1));
+    wait_pcm(&audio.pcm).await;
+    assert_eq!(next_audible(&mut output).await, 2000. / 32768.);
+}
+
+#[tokio::test]
+async fn truncated_large_range_reports_error_when_reader_is_waiting_in_its_middle() {
+    let mut server = serve(wav(60), true, Some(ServerFailure::TruncatedRange), None).await;
+    let (audio, mut output) = open(&server).await;
+    let mut buffer = [0.; 4800];
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while audio.error().is_none() {
+            output.write(&mut buffer, 1.);
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("大 Range 中途失败必须唤醒等待中的解码器，不能永久 buffering");
+    assert!(!audio.finished());
+    let mut requests = Vec::new();
+    while let Ok(offset) = server.requests.try_recv() {
+        requests.push(offset);
+    }
+    assert_eq!(
+        requests,
+        [0, 0, 0],
+        "应在同一个大区间重试，而读者已经推进到区间中部"
+    );
+}
+
+#[tokio::test]
+async fn short_song_starts_at_eof_below_buffer_threshold() {
+    let mut bytes = wav(1);
+    let data_len = 4800_u32 * 2;
+    bytes.truncate(44 + data_len as usize);
+    bytes[4..8].copy_from_slice(&(36 + data_len).to_le_bytes());
+    bytes[40..44].copy_from_slice(&data_len.to_le_bytes());
+    let server = serve(bytes, true, None, None).await;
+    let (audio, mut output) = open(&server).await;
+    assert_eq!(audio.duration, Some(Duration::from_millis(100)));
+    assert_eq!(next_audible(&mut output).await, 1000. / 32768.);
+}
+
+#[test]
+fn underrun_waits_for_buffer_and_eof_releases_remaining_samples() {
+    let pcm = Arc::new(Pcm::default());
+    let mut output = source(pcm.clone());
+    assert_eq!(read_frame(&mut output), Some(vec![0.; 2]));
+    assert!(pcm.buffering.load(Ordering::Acquire));
+    let mut data = pcm.data.lock().unwrap();
+    data.queued_samples = 998; // 499 ms 不足恢复门槛。
+    data.chunks.push_back(Chunk {
+        samples: vec![0.5; 998],
+        position: Duration::ZERO,
+        generation: 0,
+    });
+    drop(data);
+    assert_eq!(read_frame(&mut output), Some(vec![0.; 2]));
+    assert_eq!(pcm.position_us.load(Ordering::Acquire), 0);
+    let mut data = pcm.data.lock().unwrap();
+    data.queued_samples += 2;
+    data.chunks.push_back(Chunk {
+        samples: vec![0.75; 2],
+        position: Duration::from_millis(499),
+        generation: 0,
+    });
+    drop(data);
+    assert_eq!(read_frame(&mut output), Some(vec![0.5; 2]));
+    assert!(!pcm.buffering.load(Ordering::Acquire));
+    for _ in 1..500 {
+        read_frame(&mut output);
+    }
+    assert_eq!(read_frame(&mut output), Some(vec![0.; 2]));
+    let mut data = pcm.data.lock().unwrap();
+    data.queued_samples = 2;
+    data.chunks.push_back(Chunk {
+        samples: vec![1.; 2],
+        position: Duration::from_millis(500),
+        generation: 0,
+    });
+    data.decode_finished = true;
+    drop(data);
+    assert_eq!(read_frame(&mut output), Some(vec![1.; 2]));
+    assert_eq!(read_frame(&mut output), Some(vec![0.; 2]));
+    assert!(pcm.output_drained.load(Ordering::Acquire));
+}
+
+#[test]
+fn playback_fades_per_frame_and_pause_stops_consumption() {
+    for rate in [1000, 44100, 48000, 96000] {
+        let pcm = Arc::new(Pcm::default());
+        let mut output = source(pcm.clone());
+        output.sample_rate = rate;
+        output.chunk = Some(Chunk {
+            samples: vec![1.; rate as usize * 2],
+            position: Duration::ZERO,
+            generation: 0,
+        });
+        output.playback_gain = 0.;
+        let mut first = [0.; 2];
+        output.write_playback(&mut first, 0.5, true);
+        assert!(first[0] > 0. && first[0] < 0.01);
+        assert_eq!(first[0], first[1]);
+        let mut fade = vec![0.; ((rate as f32 * 0.08).ceil() as usize + 1) * 2];
+        output.write_playback(&mut fade, 0.5, true);
+        assert!(fade.chunks_exact(2).all(|frame| frame[0] == frame[1]));
+        assert!(fade.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert!((fade.last().unwrap() - 0.5).abs() < 0.001);
+        output.write_playback(&mut fade, 0.5, false);
+        assert!(fade.windows(2).all(|pair| pair[0] >= pair[1]));
+        assert_eq!(*fade.last().unwrap(), 0.);
+        let paused_position = pcm.position_us.load(Ordering::Acquire);
+        output.write_playback(&mut fade, 0.5, false);
+        assert!(fade.iter().all(|sample| *sample == 0.));
+        assert_eq!(pcm.position_us.load(Ordering::Acquire), paused_position);
+        // 暂停淡出途中重新播放，从当前增益反向渐入。
+        output.write_playback(&mut first, 1., true);
+        let gain = output.playback_gain;
+        output.write_playback(&mut first, 1., true);
+        assert!(output.playback_gain > gain);
+        output.write_playback(&mut first, 1., false);
+        assert!((output.playback_gain - gain).abs() < 0.00001);
     }
 }

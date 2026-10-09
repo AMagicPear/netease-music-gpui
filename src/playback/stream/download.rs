@@ -1,8 +1,10 @@
 use super::StreamControl;
 use crate::models::AudioSourceInfo;
+use crate::playback::audio_cache::CachedFile;
 use std::{
     collections::BTreeMap,
-    io::{self, Read, Seek, SeekFrom},
+    fs::File,
+    io::{self, Read, Seek, SeekFrom, Write},
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -12,8 +14,7 @@ use std::{
 use symphonia::core::io::MediaSource;
 
 pub(super) const BLOCK_BYTES: u64 = 256 * 1024;
-pub(super) const CACHE_BLOCKS: usize = 128; // Range 缓存最多 32 MiB。
-const MAX_SEQUENTIAL_BYTES: u64 = 256 * 1024 * 1024;
+const RANGE_BYTES: u64 = 4 * 1024 * 1024;
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -38,19 +39,22 @@ impl DownloadError {
 }
 
 pub(super) struct CacheData {
-    pub blocks: BTreeMap<u64, Vec<u8>>,
+    // 只保存各块已经落盘的连续字节数，音频数据不常驻应用内存。
+    pub blocks: BTreeMap<u64, usize>,
     pub byte_len: Option<u64>,
-    pub range: bool,
     pub error: Option<DownloadError>,
+    pub complete: bool,
 }
 
-/// 当前播放音源的临时字节缓存；Range/顺序读取都不保存歌曲文件。
-/// 不依赖 PCM 队列、音频输出或未来独立的歌曲下载模块。
+/// 下载与解码共享的磁盘文件；只发布写入成功的区间，缺失区间优先于后台整曲下载。
 pub(super) struct Cache {
     pub data: Mutex<CacheData>,
     pub changed: Condvar,
     pub demand: tokio::sync::watch::Sender<Demand>,
     pub control: Arc<StreamControl>,
+    // 字段按声明顺序释放，文件句柄先关闭，再释放磁盘租约（Windows 也能清理）。
+    file: Mutex<File>,
+    disk: Arc<CachedFile>,
 }
 
 impl Cache {
@@ -58,7 +62,35 @@ impl Cache {
         http: reqwest::Client,
         source: &AudioSourceInfo,
         control: Arc<StreamControl>,
+        disk: Arc<CachedFile>,
     ) -> Result<(Arc<Self>, tokio::task::AbortHandle), String> {
+        let reader = disk.clone();
+        let (file, completed_size) = tokio::task::spawn_blocking(move || reader.open_reader())
+            .await
+            .map_err(|error| format!("无法打开音频缓存：{error}"))??;
+        if let Some(total) = completed_size {
+            let (demand, _) = tokio::sync::watch::channel(Demand {
+                offset: Some(0),
+                generation: 0,
+            });
+            let cache = Arc::new(Self {
+                data: Mutex::new(CacheData {
+                    blocks: (0..total)
+                        .step_by(BLOCK_BYTES as usize)
+                        .map(|offset| (offset, (total - offset).min(BLOCK_BYTES) as usize))
+                        .collect(),
+                    byte_len: Some(total),
+                    error: None,
+                    complete: true,
+                }),
+                changed: Condvar::new(),
+                demand,
+                control,
+                file: Mutex::new(file),
+                disk,
+            });
+            return Ok((cache, tokio::spawn(async {}).abort_handle()));
+        }
         let response = request_range(&http, &source.url, 0, None).await?;
         if !response.status().is_success() {
             return Err(format!("音频服务器返回错误：{}", response.status()));
@@ -69,6 +101,14 @@ impl Cache {
         } else {
             response.content_length().or(source.byte_len)
         };
+        if byte_len.is_some_and(|total| total > disk.limit()) {
+            return Err("音频文件超过单曲缓存容量上限".into());
+        }
+        if let (Some(actual), Some(expected)) = (byte_len, source.byte_len)
+            && actual > expected
+        {
+            return Err("音频文件长度超过播放接口声明的大小".into());
+        }
         let validator = response
             .headers()
             .get(reqwest::header::ETAG)
@@ -84,12 +124,14 @@ impl Cache {
             data: Mutex::new(CacheData {
                 blocks: BTreeMap::new(),
                 byte_len,
-                range,
                 error: None,
+                complete: false,
             }),
             changed: Condvar::new(),
             demand,
             control,
+            file: Mutex::new(file),
+            disk,
         });
         let download_cache = cache.clone();
         let url = source.url.clone();
@@ -105,7 +147,7 @@ impl Cache {
                     receiver,
                 )
                 .await;
-            } else if let Err(error) = download_cache.sequential(response).await {
+            } else if let Err(error) = download_cache.clone().sequential(response).await {
                 let mut data = download_cache.data.lock().unwrap();
                 data.error = Some(DownloadError::Sequential(error));
                 download_cache.changed.notify_all();
@@ -114,21 +156,62 @@ impl Cache {
         Ok((cache, task.abort_handle()))
     }
 
-    pub fn insert(&self, offset: u64, bytes: Vec<u8>) {
+    pub fn insert(&self, offset: u64, bytes: Vec<u8>) -> Result<(), String> {
+        if offset.saturating_add(bytes.len() as u64) > self.disk.limit() {
+            return Err("音频文件超过单曲缓存容量上限".into());
+        }
+        {
+            let mut file = self.file.lock().unwrap();
+            file.seek(SeekFrom::Start(offset))
+                .and_then(|_| file.write_all(&bytes))
+                .map_err(|error| format!("写入音频缓存失败：{error}"))?;
+        }
         let mut data = self.data.lock().unwrap();
-        data.blocks.insert(offset, bytes);
-        if data.range && data.blocks.len() > CACHE_BLOCKS {
-            // ponytail: 保留文件头，其余按字节顺序淘汰；反复跨区拖动变多再改 LRU。
-            if let Some(key) = data
-                .blocks
-                .keys()
-                .copied()
-                .find(|key| *key != 0 && *key != offset)
-            {
-                data.blocks.remove(&key);
+        let mut position = offset;
+        let end = offset + bytes.len() as u64;
+        while position < end {
+            let block = position / BLOCK_BYTES * BLOCK_BYTES;
+            let count = (end - position).min(BLOCK_BYTES - position % BLOCK_BYTES);
+            let available = data.blocks.entry(block).or_default();
+            if position - block > *available as u64 {
+                return Err("音频缓存区间不连续".into());
             }
+            *available = (*available).max((position - block + count) as usize);
+            position += count;
         }
         self.changed.notify_all();
+        Ok(())
+    }
+
+    async fn publish(self: &Arc<Self>, offset: u64, bytes: Vec<u8>) -> Result<(), String> {
+        let cache = self.clone();
+        tokio::task::spawn_blocking(move || cache.insert(offset, bytes))
+            .await
+            .map_err(|error| format!("音频缓存写入任务失败：{error}"))?
+    }
+
+    async fn finish(self: &Arc<Self>, total: u64) {
+        let cache = self.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            cache
+                .file
+                .lock()
+                .unwrap()
+                .sync_all()
+                .map_err(|error| error.to_string())?;
+            cache.disk.commit(total)
+        })
+        .await;
+        if let Err(error) = result.unwrap_or_else(|error| Err(error.to_string())) {
+            // 数据已经可播放；索引写入失败只影响下一次复用。
+            eprintln!("提交音频缓存失败：{error}");
+        }
+        self.data.lock().unwrap().complete = true;
+        self.changed.notify_all();
+    }
+
+    pub fn invalidate(&self) {
+        self.disk.invalidate();
     }
 
     pub fn fail(&self, generation: u64, message: String) {
@@ -161,42 +244,30 @@ impl Cache {
             .and_then(|data| data.error.as_ref().map(|error| error.message().to_owned()))
     }
 
-    async fn sequential(&self, mut response: reqwest::Response) -> Result<(), String> {
+    async fn sequential(self: Arc<Self>, mut response: reqwest::Response) -> Result<(), String> {
         let mut offset = 0;
         loop {
             let chunk = tokio::time::timeout(NETWORK_TIMEOUT, response.chunk())
                 .await
                 .map_err(|_| "音频下载超时".to_string())?
                 .map_err(|error| format!("音频下载中断：{error}"))?;
-            let mut data = self.data.lock().unwrap();
             if self.control.cancelled.load(Ordering::Acquire) {
                 return Ok(());
             }
             let Some(chunk) = chunk else {
-                if offset == 0 || data.byte_len.is_some_and(|length| length != offset) {
-                    return Err("音频文件不完整，请重试".into());
+                {
+                    let mut data = self.data.lock().unwrap();
+                    if offset == 0 || data.byte_len.is_some_and(|length| length != offset) {
+                        return Err("音频文件不完整，请重试".into());
+                    }
+                    data.byte_len = Some(offset);
                 }
-                data.byte_len = Some(offset);
                 self.changed.notify_all();
+                self.finish(offset).await;
                 return Ok(());
             };
-            if offset + chunk.len() as u64 > MAX_SEQUENTIAL_BYTES {
-                return Err("服务器不支持分段下载，顺序缓存超过 256 MiB".into());
-            }
-            let mut remaining = chunk.as_ref();
-            while !remaining.is_empty() {
-                let block_offset = offset / BLOCK_BYTES * BLOCK_BYTES;
-                let count = remaining
-                    .len()
-                    .min((BLOCK_BYTES - offset % BLOCK_BYTES) as usize);
-                data.blocks
-                    .entry(block_offset)
-                    .or_default()
-                    .extend_from_slice(&remaining[..count]);
-                remaining = &remaining[count..];
-                offset += count as u64;
-            }
-            self.changed.notify_all();
+            self.publish(offset, chunk.to_vec()).await?;
+            offset += chunk.len() as u64;
         }
     }
 }
@@ -221,7 +292,7 @@ pub(super) fn content_range(
         || start != offset
         || end < start
         || end >= total
-        || end != offset.saturating_add(BLOCK_BYTES - 1).min(total - 1)
+        || end != offset.saturating_add(RANGE_BYTES - 1).min(total - 1)
     {
         return Err("音频分段范围与请求不一致".into());
     }
@@ -239,7 +310,7 @@ async fn request_range(
         .header(reqwest::header::ACCEPT_ENCODING, "identity")
         .header(
             reqwest::header::RANGE,
-            format!("bytes={offset}-{}", offset.saturating_add(BLOCK_BYTES - 1)),
+            format!("bytes={offset}-{}", offset.saturating_add(RANGE_BYTES - 1)),
         );
     if let Some(validator) = validator {
         request = request.header(reqwest::header::IF_RANGE, validator);
@@ -254,8 +325,8 @@ async fn range_bytes(
     mut response: reqwest::Response,
     offset: u64,
     total: u64,
-    cache: &Cache,
-) -> Result<Vec<u8>, String> {
+    cache: &Arc<Cache>,
+) -> Result<(), String> {
     if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
         return Err(format!(
             "音频分段下载失败（{}），请重新播放",
@@ -266,23 +337,23 @@ async fn range_bytes(
     if actual_total != total {
         return Err("播放资源在下载期间发生变化，请重新播放".into());
     }
-    let mut bytes = Vec::with_capacity(length as usize);
-    while let Some(chunk) = response
-        .chunk()
+    let mut received = 0;
+    while let Some(chunk) = tokio::time::timeout(NETWORK_TIMEOUT, response.chunk())
         .await
+        .map_err(|_| "音频下载超时".to_string())?
         .map_err(|error| format!("音频下载中断：{error}"))?
     {
-        if bytes.len() + chunk.len() > length as usize {
+        if received + chunk.len() as u64 > length {
             return Err("音频分段数据超过声明长度".into());
         }
-        bytes.extend_from_slice(&chunk);
-        // 块尚未下载完也可解码，避免低速网络必须先攒满 256 KiB 才出声。
-        cache.insert(offset, bytes.clone());
+        // 每批字节只复制一次、落盘一次；不用复制整个累计块，也不用等满块才解码。
+        cache.publish(offset + received, chunk.to_vec()).await?;
+        received += chunk.len() as u64;
     }
-    if bytes.len() as u64 != length {
+    if received != length {
         return Err("音频分段数据不完整，请重试".into());
     }
-    Ok(bytes)
+    Ok(())
 }
 
 async fn download_ranges(
@@ -295,42 +366,106 @@ async fn download_ranges(
     mut demand: tokio::sync::watch::Receiver<Demand>,
 ) {
     let mut initial = Some(initial);
-    loop {
+    'download: loop {
         let requested = *demand.borrow_and_update();
-        if let Some(offset) = requested.offset {
-            let cached = cache
-                .data
-                .lock()
-                .unwrap()
-                .blocks
-                .get(&offset)
-                .is_some_and(|bytes| {
-                    bytes.len() as u64 == BLOCK_BYTES.min(total.saturating_sub(offset))
-                });
-            if !cached && offset < total {
+        {
+            let start = requested.offset.unwrap_or(0);
+            let offset = {
+                let data = cache.data.lock().unwrap();
+                // 先完成读取位置之后的区间，再补齐 seek 留下的洞，一路缓存整首。
+                (start..total)
+                    .step_by(BLOCK_BYTES as usize)
+                    .chain((0..start.min(total)).step_by(BLOCK_BYTES as usize))
+                    .find(|offset| {
+                        data.blocks
+                            .get(offset)
+                            .is_none_or(|length| *length as u64 != BLOCK_BYTES.min(total - offset))
+                    })
+            };
+            if let Some(offset) = offset {
                 let fetch = async {
-                    let response = if offset == 0
-                        && let Some(response) = initial.take()
-                    {
-                        response
-                    } else {
-                        request_range(&http, &url, offset, validator.as_deref()).await?
-                    };
-                    range_bytes(response, offset, total, &cache).await
-                };
-                let result = tokio::select! {
-                    biased;
-                    changed = demand.changed() => {
-                        if changed.is_err() { return; }
-                        continue;
+                    let mut last_error = String::new();
+                    for attempt in 0..3 {
+                        let response = if offset == 0
+                            && let Some(response) = initial.take()
+                        {
+                            Ok(response)
+                        } else {
+                            request_range(&http, &url, offset, validator.as_deref()).await
+                        };
+                        let result = match response {
+                            Ok(response) => range_bytes(response, offset, total, &cache).await,
+                            Err(error) => Err(error),
+                        };
+                        match result {
+                            Ok(()) => return Ok(()),
+                            Err(error) => last_error = error,
+                        }
+                        if attempt < 2 {
+                            tokio::time::sleep(Duration::from_millis(250 << attempt)).await;
+                        }
                     }
-                    result = tokio::time::timeout(NETWORK_TIMEOUT, fetch) =>
-                        result.unwrap_or_else(|_| Err("音频下载超时".into())),
+                    Err(last_error)
+                };
+                tokio::pin!(fetch);
+                // seek 后的 None 指令和文件头读取可能被 watch 合并；以实际请求起点
+                // 为基准，仍能识别随后直接跳到目标区间的读取。
+                let mut active_demand = Demand {
+                    offset: Some(offset),
+                    generation: requested.generation,
+                };
+                let result = loop {
+                    tokio::select! {
+                        biased;
+                        changed = demand.changed() => {
+                            if changed.is_err() { return; }
+                            let next = *demand.borrow_and_update();
+                            let jumped = match (active_demand.offset, next.offset) {
+                                (Some(previous), Some(next)) => next < previous || next > previous.saturating_add(BLOCK_BYTES),
+                                _ => false,
+                            };
+                            active_demand = next;
+                            // 读取已下载的数据不影响后台整曲下载；缺失的当前块优先。
+                            let missing = next.offset.is_some_and(|start| {
+                                let data = cache.data.lock().unwrap();
+                                data.blocks.get(&start).is_none_or(|length| {
+                                    *length as u64 != BLOCK_BYTES.min(total.saturating_sub(start))
+                                })
+                            });
+                            if next.generation != requested.generation
+                                || missing && next.offset.is_some_and(|start| {
+                                    start < offset || start >= offset.saturating_add(RANGE_BYTES)
+                                        || jumped && start != offset
+                                })
+                            {
+                                continue 'download;
+                            }
+                        }
+                        result = &mut fetch => break result,
+                    }
                 };
                 match result {
-                    Ok(bytes) => cache.insert(offset, bytes),
-                    Err(error) => cache.fail(requested.generation, error),
+                    Ok(()) => continue,
+                    Err(error) => {
+                        // 一个请求覆盖多个块：读者可能已推进到本请求后半段。
+                        // 若它正等该请求内的缺失数据，必须唤醒报错，不能双方都干等。
+                        let reader = *demand.borrow();
+                        let needed = reader.offset.is_some_and(|start| {
+                            let data = cache.data.lock().unwrap();
+                            start >= offset
+                                && start < offset.saturating_add(RANGE_BYTES)
+                                && data.blocks.get(&start).is_none_or(|length| {
+                                    (*length as u64) < BLOCK_BYTES.min(total.saturating_sub(start))
+                                })
+                        });
+                        if needed {
+                            cache.fail(requested.generation, error);
+                        }
+                    }
                 }
+            } else {
+                cache.finish(total).await;
+                return;
             }
         }
         if demand.changed().await.is_err() {
@@ -385,18 +520,11 @@ impl Read for CacheReader {
             }
             let offset = self.position / BLOCK_BYTES * BLOCK_BYTES;
             let start = (self.position - offset) as usize;
-            if let Some(bytes) = data.blocks.get(&offset)
-                && start < bytes.len()
-            {
-                let count = buffer.len().min(bytes.len() - start);
-                buffer[..count].copy_from_slice(&bytes[start..start + count]);
-                self.position += count as u64;
-                return Ok(count);
-            }
             let requested = Demand {
                 offset: Some(offset),
                 generation: self.generation,
             };
+            // 命中缓存也推进预取窗口，不能等块耗尽才通知下载线程。
             self.cache.demand.send_if_modified(|current| {
                 if *current == requested {
                     false
@@ -405,6 +533,18 @@ impl Read for CacheReader {
                     true
                 }
             });
+            if let Some(length) = data.blocks.get(&offset)
+                && start < *length
+            {
+                let count = buffer.len().min(*length - start);
+                // 文件 I/O 只在解码线程进行；设备回调始终只访问 PCM。
+                drop(data);
+                let mut file = self.cache.file.lock().unwrap();
+                file.seek(SeekFrom::Start(self.position))?;
+                file.read_exact(&mut buffer[..count])?;
+                self.position += count as u64;
+                return Ok(count);
+            }
             data = self.cache.changed.wait(data).unwrap();
         }
     }

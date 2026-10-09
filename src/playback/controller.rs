@@ -1,5 +1,6 @@
 use super::{
     PlaybackSnapshot,
+    audio_cache::{AudioCacheStore, DEFAULT_CAPACITY, DEFAULT_MAX_FILE_BYTES},
     engine::PlayerEngine,
     stream::{BufferedSource, StreamingAudio},
     system_media::SystemMedia,
@@ -9,10 +10,26 @@ use crate::{
     models::{AudioQualityLevel, PlayMode, Song},
     persistence::{Persistence, PlaybackState},
 };
-use gpui::{Context, ReadGlobal, Window};
+use gpui::{App, Context, ImgResourceLoader, ReadGlobal, Resource, Window};
 use rand::seq::SliceRandom;
 use souvlaki::{MediaControlEvent, SeekDirection};
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
+
+type AudioRequest = tokio::task::JoinHandle<Result<(StreamingAudio, BufferedSource), String>>;
+
+struct CancelAudioOnDrop(AudioRequest);
+
+impl Drop for CancelAudioOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+struct Preload {
+    song_id: u64,
+    quality: AudioQualityLevel,
+    request: AudioRequest,
+}
 
 /// 共享 GPUI Entity：统一接收 UI 命令，管理播放列表、异步请求和状态通知。
 #[derive(Default)]
@@ -31,12 +48,16 @@ pub struct PlaybackController {
     pending_position: Duration,
     system_media: Option<SystemMedia>,
     persistence: Persistence,
-    /// tick 每 1 秒运行一次；攒够若干次才写一次缓存，关键事件仍立即写。
+    audio_cache: Arc<tokio::sync::OnceCell<Arc<AudioCacheStore>>>,
+    preload: Option<Preload>,
+    preloaded_covers: Vec<String>,
+    /// tick 每 100 ms 运行一次；攒够 5 秒才写一次状态，关键事件仍立即写。
     ticks_since_save: u32,
 }
 
 /// 播放中周期性落盘的间隔（tick 数）。暂停时 tick 不再写盘。
-const SAVE_INTERVAL_TICKS: u32 = 5;
+const SAVE_INTERVAL_TICKS: u32 = 50;
+const PRELOAD_REMAINING: Duration = Duration::from_secs(60);
 
 impl PlaybackController {
     pub fn new(window: &Window, persistence: Persistence, cx: &mut Context<Self>) -> Self {
@@ -82,7 +103,7 @@ impl PlaybackController {
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
-                    .timer(Duration::from_millis(1000))
+                    .timer(Duration::from_millis(100))
                     .await;
                 if this.update(cx, |this, cx| this.tick(cx)).is_err() {
                     break;
@@ -102,6 +123,7 @@ impl PlaybackController {
             MediaControlEvent::Next => self.next(cx),
             MediaControlEvent::Stop => {
                 self.stop();
+                self.sync_preloaded_covers(None, cx);
                 cx.notify();
             }
             MediaControlEvent::SetPosition(position) => self.seek_to(position.0, cx),
@@ -132,6 +154,7 @@ impl PlaybackController {
     }
 
     fn stop(&mut self) {
+        self.cancel_preload();
         // 使停止之前的加载结果失效，防止异步完成后重新开始播放。
         self.state.revision = self.state.revision.wrapping_add(1);
         if let Some(request) = self.request.take() {
@@ -170,6 +193,7 @@ impl PlaybackController {
         };
         // 新列表也要服从当前的播放方式：随机模式下当场洗一遍。
         self.apply_mode_to_list(self.state.mode);
+        self.sync_preloaded_covers(None, cx);
         if self
             .state
             .current_song
@@ -190,6 +214,7 @@ impl PlaybackController {
         songs: Vec<Song>,
         song_id: Option<u64>,
     ) -> Option<Song> {
+        self.cancel_preload();
         self.queue_source = source;
         self.queue = songs;
         self.queue_cursor =
@@ -201,6 +226,127 @@ impl PlaybackController {
     fn current_list_song(&self) -> Option<Song> {
         let cursor = self.queue_cursor?;
         self.queue.get(cursor).cloned()
+    }
+
+    /// 与自动续播使用同一游标规则；单曲循环复用当前音源，不另加载一份。
+    fn next_song(&self) -> Option<Song> {
+        if self.state.mode.repeats_current() {
+            return None;
+        }
+        let next = self.queue_cursor? + 1;
+        self.queue
+            .get(next)
+            .or_else(|| {
+                self.state
+                    .mode
+                    .wraps()
+                    .then(|| self.queue.first())
+                    .flatten()
+            })
+            .cloned()
+    }
+
+    fn cancel_preload(&mut self) {
+        if let Some(preload) = self.preload.take() {
+            preload.request.abort();
+        }
+    }
+
+    fn audio_request(&self, song_id: u64, pending: Option<AudioRequest>, cx: &App) -> AudioRequest {
+        let api = MusicApi::global(cx);
+        let client = api.client.clone();
+        let http = api.audio_http();
+        let quality = self.state.quality;
+        let cache = self.audio_cache.clone();
+        let directory = self.persistence.audio_cache_directory();
+        let pending = pending.map(CancelAudioOnDrop);
+        api.runtime.spawn(async move {
+            if let Some(mut pending) = pending
+                && let Ok(Ok(audio)) = (&mut pending.0).await
+            {
+                return Ok(audio);
+            }
+            // 预加载失败只丢弃预加载结果；正式切到这首时按正常流程重试一次。
+            // 每次新加载先获取当前权限/试听信息；不保存或复用会过期的播放 URL。
+            let source = MusicApi::song_source(client, song_id, quality).await?;
+            let store = cache
+                .get_or_try_init(|| async move {
+                    tokio::task::spawn_blocking(move || {
+                        AudioCacheStore::new(directory, DEFAULT_CAPACITY, DEFAULT_MAX_FILE_BYTES)
+                    })
+                    .await
+                    .map_err(|error| error.to_string())?
+                })
+                .await?
+                .clone();
+            StreamingAudio::open_cached(http, source, store, song_id).await
+        })
+    }
+
+    fn sync_preloaded_covers(&mut self, next: Option<&Song>, cx: &mut Context<Self>) {
+        let urls = |song: &Song| {
+            song.al
+                .pic_url
+                .as_deref()
+                .map(|url| [80, 480].map(|pixels| crate::ui::assets::thumbnail_url(url, pixels)))
+        };
+        let current = self.state.current_song.as_ref().and_then(urls);
+        let next = next.and_then(urls);
+        // 只保留本控制器预取的当前/下一首封面，避免沿队列一直积累解码图片。
+        self.preloaded_covers.retain(|url| {
+            let keep = current.as_ref().is_some_and(|urls| urls.contains(url))
+                || next.as_ref().is_some_and(|urls| urls.contains(url));
+            if !keep {
+                cx.remove_asset::<ImgResourceLoader>(&Resource::Uri(url.clone().into()));
+            }
+            keep
+        });
+        for url in next.into_iter().flatten() {
+            let resource = Resource::Uri(url.clone().into());
+            if let Some(Err(_)) = cx.fetch_asset::<ImgResourceLoader>(&resource) {
+                cx.remove_asset::<ImgResourceLoader>(&resource);
+                let _ = cx.fetch_asset::<ImgResourceLoader>(&resource);
+            }
+            if !self.preloaded_covers.contains(&url) {
+                self.preloaded_covers.push(url);
+            }
+        }
+    }
+
+    fn maybe_preload(&mut self, cx: &mut Context<Self>) {
+        let next = self.next_song();
+        if self.preload.as_ref().is_some_and(|preload| {
+            next.as_ref().is_none_or(|song| song.id != preload.song_id)
+                || preload.quality != self.state.quality
+        }) {
+            self.cancel_preload();
+            self.sync_preloaded_covers(None, cx);
+        }
+        // 当前歌曲先下载完，避免下一首抢占当前播放的网络带宽。
+        if self.preload.is_some()
+            || !self.engine.download_complete()
+            || self.state.duration.is_zero()
+            || self.state.duration.saturating_sub(self.state.position) > PRELOAD_REMAINING
+        {
+            return;
+        }
+        let Some(next) = next else {
+            return;
+        };
+        if self
+            .state
+            .current_song
+            .as_ref()
+            .is_some_and(|song| song.id == next.id)
+        {
+            return;
+        }
+        self.sync_preloaded_covers(Some(&next), cx);
+        self.preload = Some(Preload {
+            song_id: next.id,
+            quality: self.state.quality,
+            request: self.audio_request(next.id, None, cx),
+        });
     }
 
     /// 手动切歌：`direction` 只取符号，`mode.wraps()` 决定能否越过两端。
@@ -262,6 +408,8 @@ impl PlaybackController {
     /// 下一首插入：插到当前歌曲之后。「播完这首就听它」和心动模式穿插推荐都走这里。
     #[allow(dead_code, reason = "下一首插入与心动模式尚未接入 UI")]
     pub fn insert_next(&mut self, song: Song, cx: &mut Context<Self>) {
+        self.cancel_preload();
+        self.sync_preloaded_covers(None, cx);
         match self.queue_cursor {
             Some(cursor) => {
                 self.queue.insert(cursor + 1, song);
@@ -286,6 +434,7 @@ impl PlaybackController {
         self.engine.stop();
         self.state.duration = song.duration();
         self.state.current_song = Some(song.clone());
+        self.sync_preloaded_covers(Some(&song), cx);
         self.state.position = position.min(self.state.duration);
         self.state.is_playing = false;
         self.state.loading = false;
@@ -294,14 +443,16 @@ impl PlaybackController {
         self.state.error = None;
         self.play_when_ready = play;
         self.state.loading = true;
-        let api = MusicApi::global(cx);
-        let client = api.client.clone();
-        let http = api.audio_http();
-        let quality = self.state.quality;
-        let request = api.runtime.spawn(async move {
-            let source = MusicApi::song_source(client, song.id, quality).await?;
-            StreamingAudio::open(http, source).await
-        });
+        let request = if let Some(preload) = self.preload.take() {
+            if preload.song_id == song.id && preload.quality == self.state.quality {
+                self.audio_request(song.id, Some(preload.request), cx)
+            } else {
+                preload.request.abort();
+                self.audio_request(song.id, None, cx)
+            }
+        } else {
+            self.audio_request(song.id, None, cx)
+        };
         self.request = Some(request.abort_handle());
         // 切歌/切歌单立即落盘一次，避免等下一个 tick 才记录新的歌曲。
         self.save_cache();
@@ -343,7 +494,7 @@ impl PlaybackController {
                             self.engine.seek_to(position);
                         }
                         self.state.position = position;
-                        self.state.is_playing = self.play_when_ready && self.engine.resume();
+                        self.state.is_playing = self.play_when_ready && self.engine.start();
                         self.state.buffering = self.state.is_playing && self.engine.buffering();
                     }
                     Err(error) => self.fail(error),
@@ -455,7 +606,7 @@ impl PlaybackController {
 
     /// 回到开头重播当前歌曲：音源还在，回绕即可，不用再向接口要一次播放地址。
     fn replay(&mut self, cx: &mut Context<Self>) {
-        if self.engine.seek_to(Duration::ZERO) && self.engine.resume() {
+        if self.engine.seek_to(Duration::ZERO) && self.engine.start() {
             self.state.position = Duration::ZERO;
             self.state.is_playing = true;
             self.state.buffering = self.engine.buffering();
@@ -478,6 +629,8 @@ impl PlaybackController {
             return;
         }
         self.state.mode = mode;
+        self.cancel_preload();
+        self.sync_preloaded_covers(None, cx);
         // 只在进入随机模式的那一刻洗牌；离开随机不再还原，洗好的顺序就是列表顺序。
         self.apply_mode_to_list(mode);
         self.save_cache();
@@ -515,6 +668,15 @@ impl PlaybackController {
             return;
         }
         if !self.state.is_playing {
+            // 暂停淡出还会消费约 80 ms，完成后补记真实位置，只更新一次。
+            if self.engine.has_source() {
+                let position = self.engine.position().min(self.state.duration);
+                if position != self.state.position {
+                    self.state.position = position;
+                    self.save_cache();
+                    cx.notify();
+                }
+            }
             // 暂停时状态没有变化，不写盘也不重绘。
             return;
         }
@@ -527,6 +689,7 @@ impl PlaybackController {
         } else {
             // 从真实 PCM 消费量取进度，等待数据的静音不计入歌曲时间。
             self.state.position = self.engine.position().min(self.state.duration);
+            self.maybe_preload(cx);
         }
         self.ticks_since_save += 1;
         if self.ticks_since_save >= SAVE_INTERVAL_TICKS {
@@ -554,6 +717,7 @@ impl PlaybackController {
     }
 
     fn fail(&mut self, error: String) {
+        self.cancel_preload();
         if self.engine.has_source() {
             self.state.position = self.engine.position().min(self.state.duration);
         }
@@ -568,6 +732,7 @@ impl PlaybackController {
 
 impl Drop for PlaybackController {
     fn drop(&mut self) {
+        self.cancel_preload();
         // 退出时等最后一次缓存真正落盘，确保下次启动能恢复到最后的位置。
         self.save_cache();
         self.persistence.flush();
@@ -720,6 +885,153 @@ mod tests {
         assert_eq!(loaded.position, Duration::from_secs(7));
         assert_eq!(loaded.mode, PlayMode::RepeatAll);
         assert_eq!(loaded.quality, AudioQualityLevel::Lossless);
+        drop(controller);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn preload_candidate_matches_automatic_queue_advance_without_moving_cursor() {
+        for mode in [
+            PlayMode::Sequential,
+            PlayMode::RepeatOne,
+            PlayMode::RepeatAll,
+            PlayMode::Shuffle,
+        ] {
+            let mut controller = controller_with(&[1, 2, 3], 1, mode);
+            assert_eq!(
+                controller.next_song().map(|song| song.id),
+                if mode.repeats_current() {
+                    None
+                } else {
+                    Some(2)
+                }
+            );
+            assert_eq!(controller.queue_cursor, Some(0));
+            controller.queue_cursor = Some(2);
+            assert_eq!(
+                controller.next_song().map(|song| song.id),
+                if !mode.repeats_current() && mode.wraps() {
+                    Some(1)
+                } else {
+                    None
+                }
+            );
+            assert_eq!(controller.queue_cursor, Some(2));
+        }
+    }
+
+    #[tokio::test]
+    async fn replacing_queue_and_stopping_cancel_speculative_audio() {
+        let mut controller = controller_with(&[1, 2], 1, PlayMode::Sequential);
+        let request = tokio::spawn(std::future::pending());
+        let aborted = request.abort_handle();
+        controller.preload = Some(Preload {
+            song_id: 2,
+            quality: AudioQualityLevel::Standard,
+            request,
+        });
+        controller.set_list(
+            None,
+            vec![Song {
+                id: 3,
+                ..Default::default()
+            }],
+            Some(3),
+        );
+        assert!(controller.preload.is_none());
+        tokio::task::yield_now().await;
+        assert!(aborted.is_finished());
+        let request = tokio::spawn(std::future::pending());
+        let aborted = request.abort_handle();
+        controller.preload = Some(Preload {
+            song_id: 4,
+            quality: AudioQualityLevel::Standard,
+            request,
+        });
+        controller.stop();
+        assert!(controller.preload.is_none());
+        tokio::task::yield_now().await;
+        assert!(aborted.is_finished());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn preloaded_covers_reuse_exact_ui_sizes_and_retire_old_candidates(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::AppContext;
+        use std::sync::Mutex;
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let client = gpui::http_client::FakeHttpClient::create({
+            let requests = requests.clone();
+            move |request| {
+                requests.lock().unwrap().push(request.uri().to_string());
+                async {
+                    Ok(gpui::http_client::Response::builder()
+                        .status(200)
+                        .body(gpui::http_client::AsyncBody::from(
+                            include_bytes!("../../assets/images/miniVinyl.png").as_slice(),
+                        ))
+                        .unwrap())
+                }
+            }
+        });
+        let controller = cx.update(|cx| {
+            cx.set_http_client(client);
+            cx.new(|_| PlaybackController::default())
+        });
+        let mut next = Song {
+            id: 2,
+            ..Default::default()
+        };
+        next.al.pic_url = Some("http://p1.music.126.net/next.png".into());
+        cx.update(|cx| {
+            controller.update(cx, |this, cx| this.sync_preloaded_covers(Some(&next), cx))
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            for size in [80, 480] {
+                let source = Resource::Uri(
+                    crate::ui::assets::thumbnail_url(next.al.pic_url.as_deref().unwrap(), size)
+                        .into(),
+                );
+                assert!(
+                    cx.fetch_asset::<ImgResourceLoader>(&source)
+                        .unwrap()
+                        .is_ok()
+                );
+            }
+            controller.update(cx, |this, cx| this.sync_preloaded_covers(Some(&next), cx));
+        });
+        cx.run_until_parked();
+        let fetched = requests.lock().unwrap().clone();
+        assert_eq!(fetched.len(), 2);
+        for pixels in [80, 480] {
+            assert!(fetched.contains(&format!(
+                "https://p1.music.126.net/next.png?param={pixels}y{pixels}"
+            )));
+        }
+        for id in [3, 4] {
+            let previous = next.clone();
+            next.id = id;
+            next.al.pic_url = Some(format!("https://p1.music.126.net/{id}.png"));
+            cx.update(|cx| {
+                controller.update(cx, |this, cx| {
+                    this.state.current_song = Some(previous);
+                    this.sync_preloaded_covers(Some(&next), cx);
+                    assert!(this.preloaded_covers.len() <= 4);
+                })
+            });
+            cx.run_until_parked();
+        }
+        cx.update(|cx| {
+            assert!(
+                controller
+                    .read(cx)
+                    .preloaded_covers
+                    .iter()
+                    .all(|url| !url.contains("next.png"))
+            );
+        });
     }
 }

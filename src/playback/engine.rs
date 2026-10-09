@@ -35,9 +35,14 @@ pub(super) struct PlayerEngine {
 }
 
 impl PlayerEngine {
-    pub fn load(&mut self, audio: StreamingAudio, source: BufferedSource) -> Result<(), String> {
+    pub fn load(
+        &mut self,
+        audio: StreamingAudio,
+        mut source: BufferedSource,
+    ) -> Result<(), String> {
         self.stop();
         self.ensure_device(source.sample_rate, source.channels)?;
+        source.playback_gain = 0.;
         *self.control.source.lock().unwrap() = Some(source);
         self.audio = Some(audio);
         Ok(())
@@ -73,7 +78,7 @@ impl PlayerEngine {
                 None,
             )
             .map_err(|error| format!("无法创建音频输出流：{error}"))?;
-        // 保持流运行，暂停时回调只写静音，不消费 PCM，也不推进位置。
+        // 保持流运行，暂停淡出结束后只写静音，不消费 PCM。
         stream
             .play()
             .map_err(|error| format!("无法启动音频输出：{error}"))?;
@@ -105,6 +110,12 @@ impl PlayerEngine {
         self.audio.as_ref().is_some_and(StreamingAudio::buffering)
     }
 
+    pub fn download_complete(&self) -> bool {
+        self.audio
+            .as_ref()
+            .is_some_and(StreamingAudio::download_complete)
+    }
+
     pub fn pause(&self) {
         self.control.playing.store(false, Ordering::Release);
     }
@@ -113,6 +124,16 @@ impl PlayerEngine {
         let playing = self.has_source() && !self.finished() && self.error().is_none();
         self.control.playing.store(playing, Ordering::Release);
         playing
+    }
+
+    /// 新音源和自动重播直接起播；只有用户播放/暂停操作使用渐变。
+    pub fn start(&self) -> bool {
+        if let Some(source) = self.control.source.lock().unwrap().as_mut() {
+            source.playback_gain = 1.;
+            // 与回调共用音源锁，不能在设置增益后先执行一次暂停淡出。
+            return self.resume();
+        }
+        false
     }
 
     pub fn position(&self) -> Duration {
@@ -154,15 +175,15 @@ impl PlayerEngine {
     }
 }
 
-/// 回调只尝试获取当前音源；切歌持锁或暂停时写静音，不阻塞设备线程。
+/// 回调只尝试获取当前音源；切歌持锁或暂停淡出完成后写静音，不阻塞设备线程。
 fn write_output(buffer: &mut [f32], control: &OutputControl) {
-    if control.playing.load(Ordering::Acquire)
-        && let Ok(mut source) = control.source.try_lock()
+    if let Ok(mut source) = control.source.try_lock()
         && let Some(source) = source.as_mut()
     {
-        source.write(
+        source.write_playback(
             buffer,
             f32::from_bits(control.volume.load(Ordering::Acquire)),
+            control.playing.load(Ordering::Acquire),
         );
     } else {
         buffer.fill(0.);

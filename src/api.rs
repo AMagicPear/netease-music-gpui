@@ -361,6 +361,10 @@ fn song_source_info(body: &serde_json::Value, song_id: u64) -> Result<AudioSourc
     }
     Ok(AudioSourceInfo {
         url: url.to_string(),
+        cache_id: track["md5"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned),
         byte_len: track["size"].as_u64().filter(|size| *size > 0),
         duration: track["time"]
             .as_u64()
@@ -493,12 +497,13 @@ mod tests {
     fn playback_quality_uses_actual_response_and_preserves_trial_duration() {
         let body = serde_json::json!({"data": [{
             "id": 1, "url": "https://example.com/song.flac", "size": 123456,
-            "level": "lossless", "time": 30000
+            "level": "lossless", "time": 30000, "md5": "content-version"
         }]});
         let source = song_source_info(&body, 1).unwrap();
         assert_eq!(source.quality, Some(AudioQualityLevel::Lossless));
         assert_eq!(source.duration, Some(Duration::from_secs(30)));
         assert_eq!(source.byte_len, Some(123456));
+        assert_eq!(source.cache_id.as_deref(), Some("content-version"));
         for quality in AudioQualityLevel::ALL {
             assert_eq!(
                 AudioQualityLevel::from_api_level(quality.api_level()),

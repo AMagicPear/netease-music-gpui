@@ -8,6 +8,9 @@ use std::{
     time::Duration,
 };
 
+pub(super) const BUFFER_SECONDS: f64 = 0.5;
+const FADE_SECONDS: f32 = 0.08;
+
 pub(super) struct Chunk {
     pub samples: Vec<f32>,
     pub position: Duration,
@@ -43,6 +46,7 @@ pub struct BufferedSource {
     pub(crate) sample_rate: u32,
     pub(super) chunk: Option<Chunk>,
     pub(super) sample_index: usize,
+    pub(crate) playback_gain: f32,
 }
 
 impl BufferedSource {
@@ -64,6 +68,15 @@ impl BufferedSource {
         if self.chunk.is_none()
             && let Ok(mut data) = self.pcm.data.try_lock()
         {
+            let minimum =
+                (self.sample_rate as f64 * self.channels as f64 * BUFFER_SECONDS) as usize;
+            if self.pcm.buffering.load(Ordering::Acquire)
+                && data.queued_samples < minimum
+                && !data.decode_finished
+                && data.error.is_none()
+            {
+                return true;
+            }
             self.chunk = data.chunks.pop_front();
             if let Some(chunk) = &self.chunk {
                 data.queued_samples -= chunk.samples.len();
@@ -104,6 +117,23 @@ impl BufferedSource {
             for sample in frame {
                 *sample = (*sample * volume).clamp(-1., 1.);
             }
+        }
+    }
+
+    /// 渐变按声道帧推进，暂停淡出结束后停止消费 PCM；快速反向操作接续当前增益。
+    pub(crate) fn write_playback(&mut self, output: &mut [f32], volume: f32, playing: bool) {
+        let step = 1. / (self.sample_rate as f32 * FADE_SECONDS);
+        for frame in output.chunks_mut(self.channels as usize) {
+            if !playing && self.playback_gain == 0. {
+                frame.fill(0.);
+                continue;
+            }
+            self.playback_gain = if playing {
+                (self.playback_gain + step).min(1.)
+            } else {
+                (self.playback_gain - step).max(0.)
+            };
+            self.write(frame, volume * self.playback_gain);
         }
     }
 }

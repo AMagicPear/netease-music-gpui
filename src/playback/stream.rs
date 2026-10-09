@@ -6,6 +6,7 @@ mod tests;
 
 pub use output::BufferedSource;
 
+use super::audio_cache::AudioCacheStore;
 use crate::models::{AudioQualityLevel, AudioSourceInfo};
 use download::Cache;
 use output::Pcm;
@@ -42,12 +43,29 @@ pub struct StreamingAudio {
 }
 
 impl StreamingAudio {
+    #[cfg(test)]
     pub async fn open(
         http: reqwest::Client,
         source: AudioSourceInfo,
     ) -> Result<(Self, BufferedSource), String> {
+        let store = tokio::task::spawn_blocking(AudioCacheStore::temporary)
+            .await
+            .map_err(|error| error.to_string())??;
+        Self::open_cached(http, source, store, 0).await
+    }
+
+    pub async fn open_cached(
+        http: reqwest::Client,
+        source: AudioSourceInfo,
+        store: Arc<AudioCacheStore>,
+        song_id: u64,
+    ) -> Result<(Self, BufferedSource), String> {
+        let cache_source = source.clone();
+        let disk = tokio::task::spawn_blocking(move || store.acquire(song_id, &cache_source))
+            .await
+            .map_err(|error| format!("音频缓存准备失败：{error}"))??;
         let control = Arc::new(StreamControl::default());
-        let (cache, download) = Cache::open(http, &source, control.clone()).await?;
+        let (cache, download) = Cache::open(http, &source, control.clone(), disk).await?;
         let pcm = Arc::new(Pcm {
             control,
             ..Default::default()
@@ -102,6 +120,10 @@ impl StreamingAudio {
 
     pub fn buffering(&self) -> bool {
         self.pcm.buffering.load(Ordering::Acquire)
+    }
+
+    pub fn download_complete(&self) -> bool {
+        self.cache.data.try_lock().is_ok_and(|data| data.complete)
     }
 
     pub fn error(&self) -> Option<String> {

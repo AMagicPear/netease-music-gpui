@@ -81,8 +81,11 @@ impl AudioQualityLevel {
 }
 
 /// 平台返回的播放资源信息；不持有 HTTP 响应、音频设备或界面状态。
+#[derive(Clone)]
 pub struct AudioSourceInfo {
     pub url: String,
+    /// 接口提供的内容标识（通常为 MD5）；同一资源换签名 URL 后仍可命中磁盘缓存。
+    pub cache_id: Option<String>,
     pub byte_len: Option<u64>,
     pub duration: Option<Duration>,
     pub quality: Option<AudioQualityLevel>,

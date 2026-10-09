@@ -1,6 +1,6 @@
 use super::{
     download::{Cache, CacheReader},
-    output::{BufferedSource, Chunk, Pcm},
+    output::{BUFFER_SECONDS, BufferedSource, Chunk, Pcm},
 };
 use std::{
     io,
@@ -20,8 +20,31 @@ use symphonia::core::{
     units::{Time, TimeBase},
 };
 
-const PCM_CHUNKS: usize = 8;
+const PCM_CHUNKS: usize = 20;
 pub(super) type Ready = tokio::sync::oneshot::Sender<(BufferedSource, Option<Duration>)>;
+
+fn send_ready(
+    ready: &mut Option<Ready>,
+    pcm: &Arc<Pcm>,
+    spec: Option<(u16, u32)>,
+    duration: Option<Duration>,
+) {
+    if let Some((channels, sample_rate)) = spec
+        && let Some(sender) = ready.take()
+    {
+        let _ = sender.send((
+            BufferedSource {
+                pcm: pcm.clone(),
+                channels,
+                sample_rate,
+                chunk: None,
+                sample_index: 0,
+                playback_gain: 1.,
+            },
+            duration,
+        ));
+    }
+}
 
 /// 每次 seek 重建读取器和解码器；失败和被打断的读取不会留下损坏的解析状态。
 pub(super) fn decode(
@@ -48,7 +71,11 @@ pub(super) fn decode(
         if pcm.control.is_current(generation) {
             match result {
                 Ok(()) => data.decode_finished = true,
-                Err(error) => data.error = Some(error),
+                Err(error) => {
+                    data.error = Some(error);
+                    // 已完成的本地文件若解析/校验失败，重试必须重新下载。
+                    cache.invalidate();
+                }
             }
             pcm.changed.notify_all();
             if ready.is_some() {
@@ -190,6 +217,8 @@ fn decode_generation(
                 if decoder.finalize().verify_ok == Some(false) {
                     return Err("音频校验失败，文件可能已损坏".into());
                 }
+                // 短于起播门槛的歌曲在正常 EOF 时也必须交出输出源。
+                send_ready(ready, pcm, *output_spec, duration);
                 return Ok(());
             }
             Err(error) => return Err(format!("音频读取失败：{error}")),
@@ -232,8 +261,18 @@ fn decode_generation(
         }
         let chunk_samples = (spec.rate as usize / 20).max(1) * channels as usize;
         for (index, samples) in samples.chunks(chunk_samples).enumerate() {
+            // 分配和复制放在锁外，音频回调换块时只需与短暂的队列操作竞争。
+            let chunk = Chunk {
+                samples: samples.to_vec(),
+                generation,
+                position: position
+                    + Duration::from_secs_f64(
+                        (skip + index * chunk_samples / channels as usize) as f64
+                            / spec.rate as f64,
+                    ),
+            };
             let mut data = pcm.data.lock().unwrap();
-            // 按样本量限制约 400 ms，而不是按包数；高采样率的小 FLAC 包也能攒够缓冲。
+            // 按样本量限制约 1 s，而不是按包数。
             while data.queued_samples >= chunk_samples * PCM_CHUNKS
                 && pcm.control.is_current(generation)
             {
@@ -243,27 +282,13 @@ fn decode_generation(
                 return Ok(());
             }
             data.queued_samples += samples.len();
-            data.chunks.push_back(Chunk {
-                samples: samples.to_vec(),
-                generation,
-                position: position
-                    + Duration::from_secs_f64(
-                        (skip + index * chunk_samples / channels as usize) as f64
-                            / spec.rate as f64,
-                    ),
-            });
+            data.chunks.push_back(chunk);
+            let buffered = data.queued_samples
+                >= (spec.rate as f64 * channels as f64 * BUFFER_SECONDS) as usize;
+            drop(data);
             pcm.changed.notify_all();
-            if let Some(sender) = ready.take() {
-                let source = BufferedSource {
-                    pcm: pcm.clone(),
-                    channels,
-                    sample_rate: spec.rate,
-                    chunk: None,
-                    sample_index: 0,
-                };
-                if sender.send((source, duration)).is_err() {
-                    return Ok(());
-                }
+            if buffered {
+                send_ready(ready, pcm, *output_spec, duration);
             }
         }
     }
