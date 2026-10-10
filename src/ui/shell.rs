@@ -193,12 +193,11 @@ impl Render for MainWindow {
                                 .flex_shrink(0.),
                         ),
                     )
-                    .when(!self.album_lyrics.read(cx).is_open(), |content| {
-                        content.children(
-                            self.main_content
-                                .update(cx, |content, cx| content.playlist_overlays(cx)),
-                        )
-                    })
+                    // 保留歌单 overlay 在专辑页滑入层下方，避免打断悬浮标题的退场动画。
+                    .children(
+                        self.main_content
+                            .update(cx, |content, cx| content.playlist_overlays(cx)),
+                    )
                     .child(
                         self.album_lyrics
                             .clone()

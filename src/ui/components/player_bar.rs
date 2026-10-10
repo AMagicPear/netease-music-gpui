@@ -727,8 +727,6 @@ impl Render for PlayerBar {
                 ])
             })
             .bg(colors.surface)
-            .border_t_1()
-            .border_color(colors.border)
             .relative()
             .when(self.album_expanded, |bar| {
                 let backdrop = self.album_backdrop.clone();
@@ -797,10 +795,15 @@ impl Render for PlayerBar {
                                     .overflow_hidden()
                                     .child(
                                         div()
+                                            .id("player-song-title")
+                                            .cursor_pointer()
                                             .text_color(colors.foreground)
                                             .text_size(px(16.))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .truncate()
+                                            .on_click(cx.listener(|_, _, _, cx| {
+                                                cx.emit(OpenAlbumLyrics);
+                                            }))
                                             .child(title),
                                     )
                                     .child(

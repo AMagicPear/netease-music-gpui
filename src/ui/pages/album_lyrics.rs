@@ -35,7 +35,7 @@ const SONG_CONTENT_TOP_PADDING: f32 = 24.;
 const VINYL_MAX_SIDE: f32 = 540.;
 const CONTENT_MAX_ASPECT: f32 = 1.6;
 const SUMMARY_WIDTH_RATIO: f32 = 0.8;
-const SCROLL_DURATION: Duration = Duration::from_millis(450);
+const SCROLL_DURATION: Duration = Duration::from_millis(600);
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum SongTab {
@@ -64,6 +64,7 @@ pub(in crate::ui) struct AlbumLyrics {
     tab: SongTab,
     song_scroll: ScrollTween,
     comments_collapsed: bool,
+    page_height: Option<f32>,
 }
 
 struct FrameData {
@@ -203,6 +204,7 @@ impl AlbumLyrics {
             tab: SongTab::default(),
             song_scroll: ScrollTween::default(),
             comments_collapsed: false,
+            page_height: None,
         }
     }
 
@@ -596,6 +598,15 @@ impl Render for AlbumLyrics {
             self.comments
                 .update(cx, |view, cx| view.set_collapsed(false, cx));
         }
+        let page_height = (f32::from(window.viewport_size().height) - PLAYER_BAR_HEIGHT).max(1.);
+        if let Some(previous_height) = self.page_height {
+            let offset = f32::from(self.scroll.offset().y);
+            if previous_height != page_height {
+                self.scroll
+                    .set_offset(point(px(0.), px(offset + previous_height - page_height)));
+            }
+        }
+        self.page_height = Some(page_height);
         let frame = self.frame_data(window, cx);
         // Backdrop 在 prepaint 写入实际插值色；其下一帧通知让缓存 fade 重新绘制。
         let backdrop_gradient = self.backdrop.gradient();
@@ -724,7 +735,7 @@ impl Render for AlbumLyrics {
                                                 .w(px(152.))
                                                 .h(px(40.))
                                                 .rounded_full()
-                                                .bg(hsla(0., 0., 0.35, 0.55))
+                                                .bg(white().alpha(0.4))
                                                 .border_1()
                                                 .border_color(white().alpha(0.08))
                                                 .text_color(white())

@@ -58,7 +58,11 @@ fn slider_state(position: Duration, duration: Duration) -> SliderState {
         .min(0.)
         .max(duration.as_millis() as f32)
         .step(1.)
-        .default_value(position.min(duration).as_millis() as f32)
+        .default_value(progress_millis(position.min(duration)))
+}
+
+fn progress_millis(position: Duration) -> f32 {
+    (position.as_secs() * 1000) as f32
 }
 
 fn seek_position(milliseconds: f32, duration: Duration) -> Option<Duration> {
@@ -96,7 +100,7 @@ impl ProgressBar {
                 let revision = playback.snapshot().revision;
                 let duration = playback.snapshot().duration;
                 let position = playback.snapshot().position.min(duration);
-                let milliseconds = position.as_millis() as f32;
+                let milliseconds = progress_millis(position);
                 let enabled = playback.can_seek();
                 let changed = this.drag.sync_revision(revision);
                 let range_changed = this.slider.read(cx).max_value() != duration.as_millis() as f32;
@@ -169,7 +173,7 @@ impl ProgressBar {
                     if !this.drag.dragging {
                         let snapshot = this.playback.read(cx).snapshot();
                         let milliseconds =
-                            snapshot.position.min(snapshot.duration).as_millis() as f32;
+                            progress_millis(snapshot.position.min(snapshot.duration));
                         this.slider
                             .update(cx, |slider, cx| slider.set_value(milliseconds, window, cx));
                     }
@@ -202,6 +206,11 @@ impl Render for ProgressBar {
         let colors = blend_colors(
             theme_colors,
             dark_colors(theme_colors, background.0[1].into()),
+            expand,
+        );
+        let track_color = blend_color(
+            rgb(0xe2e3e5).into(),
+            dark_colors(theme_colors, background.0[1].into()).border,
             expand,
         );
         let progress = self.slider.read(cx).percentage().end;
@@ -259,7 +268,7 @@ impl Render for ProgressBar {
                                     .right_0()
                                     .top(px(HIT_SLOP_TOP + (REST_HEIGHT - height) / 2.))
                                     .h(px(height))
-                                    .bg(colors.border),
+                                    .bg(track_color),
                             )
                             .child(
                                 // Indicator 的完整宽度用于指针到进度的映射；填充放在内部。
@@ -345,7 +354,11 @@ impl Render for ProgressBar {
                                                         .flex()
                                                         .items_center()
                                                         .rounded_full()
-                                                        .bg(colors.surface)
+                                                        .bg(blend_color(
+                                                            colors.surface,
+                                                            rgb(0x000000).into(),
+                                                            0.18 * expand,
+                                                        ))
                                                         .text_color(colors.foreground)
                                                         .font_family(DOLPHIN_FAMILY)
                                                         .font_weight(FontWeight::BOLD)

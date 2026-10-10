@@ -50,16 +50,17 @@ pub fn comment_row(comment: &SongComment) -> impl IntoElement {
                 .min_w_0()
                 .child(
                     div()
+                        .mt(px(-3.))
                         .text_color(rgb(0x5975B2))
                         .text_size(px(15.))
                         .child(comment.nickname.clone()),
                 )
                 .child(
                     div()
-                        .mt(px(3.))
                         .text_color(white().alpha(0.9))
                         .text_size(px(15.))
                         .line_height(px(23.))
+                        .mb_1()
                         .child(SelectableText::new(
                             ("comment-content", comment.id),
                             comment.content.clone(),
