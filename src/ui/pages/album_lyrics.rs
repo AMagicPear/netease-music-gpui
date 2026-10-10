@@ -730,16 +730,46 @@ impl Render for AlbumLyrics {
                                         .left(relative(0.5))
                                         .ml(px(-76.))
                                         .child(
-                                            Button::new("publish-song-comment")
-                                                .disabled(true)
+                                            div()
+                                                .relative()
                                                 .w(px(152.))
                                                 .h(px(40.))
-                                                .rounded_full()
-                                                .bg(white().alpha(0.4))
-                                                .border_1()
-                                                .border_color(white().alpha(0.08))
-                                                .text_color(white())
-                                                .child("发布评论"),
+                                                .child(
+                                                    canvas(
+                                                        |_, _, _| (),
+                                                        |bounds, _, window, _| {
+                                                            window.paint_backdrop_blur(
+                                                                bounds,
+                                                                px(12.),
+                                                                px(20.).into(),
+                                                            );
+                                                        },
+                                                    )
+                                                    .absolute()
+                                                    .inset_0(),
+                                                )
+                                                .child(
+                                                    Button::new("publish-song-comment")
+                                                        .disabled(true)
+                                                        .w(px(152.))
+                                                        .h(px(40.))
+                                                        .rounded_full()
+                                                        .bg(linear_gradient(
+                                                            180.,
+                                                            linear_color_stop(
+                                                                white().alpha(0.28),
+                                                                0.,
+                                                            ),
+                                                            linear_color_stop(
+                                                                white().alpha(0.14),
+                                                                1.,
+                                                            ),
+                                                        ))
+                                                        .border_1()
+                                                        .border_color(white().alpha(0.10))
+                                                        .text_color(white())
+                                                        .child("发布评论"),
+                                                ),
                                         ),
                                 )
                             }),

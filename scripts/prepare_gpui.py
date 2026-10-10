@@ -1,4 +1,4 @@
-"""Download pinned GPUI crates and apply the local GPU image transform patch."""
+"""Download pinned GPUI crates and apply the local patches."""
 
 import hashlib
 import io
@@ -19,13 +19,13 @@ CRATES = {
 
 def main():
     root = Path(__file__).resolve().parents[1]
-    patch = root / "vendor/patches/gpui-image-transform-0.3.8.patch"
+    patches = sorted((root / "vendor/patches").glob("*.patch"))
     vendor = root / "vendor"
     stamp = vendor / ".gpui-patch-id"
-    patch_id = hashlib.sha256(patch.read_bytes()).hexdigest()
+    patch_id = hashlib.sha256(b"".join(p.read_bytes() for p in patches)).hexdigest()
     if (stamp.exists() and stamp.read_text() == patch_id
             and all((vendor / name / "Cargo.toml").exists() for name in CRATES)):
-        print("GPUI GPU transform patch is ready")
+        print("GPUI patches are ready", flush=True)
         return
 
     # Prepare everything before replacing the generated source directories.
@@ -55,15 +55,16 @@ def main():
             # The Metal build script uses the sibling patched GPUI source instead.
             if name == "gpui-pre-apple":
                 shutil.rmtree(staging / "vendor" / name / "vendor")
-        subprocess.run(["git", "apply", "--check", str(patch)], cwd=staging, check=True)
-        subprocess.run(["git", "apply", str(patch)], cwd=staging, check=True)
+        for patch in patches:
+            subprocess.run(["git", "apply", "--check", str(patch)], cwd=staging, check=True)
+            subprocess.run(["git", "apply", str(patch)], cwd=staging, check=True)
         for name in CRATES:
             destination = vendor / name
             if destination.exists():
                 shutil.rmtree(destination)
             shutil.move(staging / "vendor" / name, destination)
         stamp.write_text(patch_id)
-    print("GPUI GPU transform patch is ready")
+    print("GPUI patches are ready")
 
 
 if __name__ == "__main__":
