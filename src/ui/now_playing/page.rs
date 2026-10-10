@@ -3,23 +3,17 @@
 mod comments;
 mod lyrics;
 
-use std::{
-    cell::Cell,
-    rc::Rc,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
 use gpui::*;
-use gpui_kit::base::{Button, ColorTokens, Theme, Transition, transition};
+use gpui_kit::base::{Button, ColorTokens, Theme};
 
+use super::NowPlaying;
 use crate::playback::PlaybackController;
 use crate::state::library::MusicLibrary;
 use crate::ui::assets::track_cover_url;
-use crate::ui::components::{
-    ALBUM_REVEAL_DURATION, PLAYER_BAR_HEIGHT, RotationClock, Tonearm, Vinyl, format_duration,
-    window_drag_area,
-};
+use crate::ui::components::{PLAYER_BAR_HEIGHT, Tonearm, Vinyl, format_duration, window_drag_area};
 use crate::ui::cover_color::{
     Backdrop, CoverColor, CoverGradient, dark_colors, dark_gradient, gradient_layer,
 };
@@ -81,16 +75,18 @@ enum SongTab {
     Similar,
 }
 
-pub(in crate::ui) struct AlbumLyrics {
+pub(in crate::ui) struct NowPlayingPage {
     playback: Entity<PlaybackController>,
     library: Entity<MusicLibrary>,
     _library_subscription: Subscription,
     _playback_subscription: Subscription,
+    /// 展开/收起的单一状态源。本页不再自持 `opened`，开合同步也靠它广播。
+    now_playing: Entity<NowPlaying>,
+    _now_playing_subscription: Subscription,
     lyrics: Entity<LyricsView>,
     comments: Entity<CommentsView>,
     vinyl: Entity<Vinyl>,
     summary_vinyl: Entity<Vinyl>,
-    opened: bool,
     scroll: ScrollHandle,
     cover_color: CoverColor,
     backdrop: Backdrop,
@@ -190,14 +186,17 @@ impl ScrollTween {
     }
 }
 
-impl AlbumLyrics {
+impl NowPlayingPage {
     pub(in crate::ui) fn new(
         playback: Entity<PlaybackController>,
         library: Entity<MusicLibrary>,
-        backdrop: Backdrop,
-        clock: Rc<Cell<RotationClock>>,
+        now_playing: Entity<NowPlaying>,
         cx: &mut Context<Self>,
     ) -> Self {
+        // 共享渐变底与旋转时钟都由 NowPlaying 持有：本页绘制/转动时写、播放栏与进度条读，
+        // 句柄共享同一份，迷你碟切到大碟时相位才连续。
+        let backdrop = now_playing.read(cx).backdrop();
+        let clock = now_playing.read(cx).rotation_clock();
         let vinyl = cx.new(|cx| Vinyl::new(playback.clone(), clock.clone(), "images/disc.png", cx));
         let summary_vinyl =
             cx.new(|cx| Vinyl::new(playback.clone(), clock, "images/miniVinyl.png", cx));
@@ -212,7 +211,7 @@ impl AlbumLyrics {
             let next = source_name(&library, &library_playback, cx);
             if next != source {
                 source = next;
-                if this.opened {
+                if this.is_expanded(cx) {
                     cx.notify();
                 }
             }
@@ -234,7 +233,7 @@ impl AlbumLyrics {
             );
             let song_id = state.current_song.as_ref().map(|song| song.id);
             let changed = this.song_id != song_id;
-            if this.opened {
+            if this.is_expanded(cx) {
                 this.sync_song(cx);
             } else if changed && this.song_id.is_some() {
                 // 隐藏后切歌只取消旧请求；下一次 open 再请求实际歌曲。
@@ -242,21 +241,42 @@ impl AlbumLyrics {
                 this.lyrics.update(cx, |view, cx| view.set_song(None, cx));
                 this.comments.update(cx, |view, cx| view.set_song(None, cx));
             }
-            if this.opened && (changed || next != playback_state) {
+            if this.is_expanded(cx) && (changed || next != playback_state) {
                 cx.notify();
             }
             playback_state = next;
+        });
+        // 展开/收起的状态迁移由 NowPlaying 广播；本页在这里跑对应的副作用，
+        // 播放栏、进度条、音量则各自 observe 它来重绘。
+        //
+        // 这个 `expanded` 守卫是必需的，不能省：NowPlaying 还会用 `publish_backdrop`
+        // 每帧广播背景渐变，那些通知同样会打到这里。少了守卫，`on_expand` 会在整个
+        // 600ms 渐变期间被反复触发，`reset_page()` 每帧复位一次，页面看起来就是
+        // "自己弹回顶部"。这里只认状态位的边沿，渐变通知一律放过。
+        let mut expanded = now_playing.read(cx).is_expanded();
+        let now_playing_subscription = cx.observe(&now_playing, move |this, now_playing, cx| {
+            let next = now_playing.read(cx).is_expanded();
+            if next == expanded {
+                return;
+            }
+            expanded = next;
+            if next {
+                this.on_expand(cx);
+            } else {
+                this.on_collapse(cx);
+            }
         });
         Self {
             playback,
             library,
             _library_subscription: library_subscription,
             _playback_subscription: playback_subscription,
+            now_playing,
+            _now_playing_subscription: now_playing_subscription,
             lyrics,
             comments,
             vinyl,
             summary_vinyl,
-            opened: false,
             scroll,
             cover_color: CoverColor::default(),
             backdrop,
@@ -300,30 +320,24 @@ impl AlbumLyrics {
         self.scroll.set_offset(point(px(0.), px(0.)));
     }
 
-    pub(in crate::ui) fn is_open(&self) -> bool {
-        self.opened
+    /// 这一页是否展开。只读单一状态源，页面自己不再存副本。
+    fn is_expanded(&self, cx: &App) -> bool {
+        self.now_playing.read(cx).is_expanded()
     }
 
     pub(in crate::ui) fn vinyl_overlays(&self) -> [Entity<Vinyl>; 2] {
         [self.vinyl.clone(), self.summary_vinyl.clone()]
     }
 
-    pub(in crate::ui) fn open(&mut self, cx: &mut Context<Self>) {
-        if !self.opened {
-            self.reset_page();
-            self.opened = true;
-            self.sync_song(cx);
-            cx.notify();
-        }
+    /// 展开时的副作用：回到歌词页起点并同步当前歌曲。
+    fn on_expand(&mut self, cx: &mut Context<Self>) {
+        self.reset_page();
+        self.sync_song(cx);
+        cx.notify();
     }
 
-    /// 收起整页。页头的收起按钮和播放栏的歌曲标题都走这里，
-    /// 保证两处收起时的歌词停播、评论区复位逻辑完全一致。
-    pub(in crate::ui) fn close(&mut self, cx: &mut Context<Self>) {
-        if !self.opened {
-            return;
-        }
-        self.opened = false;
+    /// 收起时的副作用：停掉歌词跟随、复位评论区，和展开时对称。
+    fn on_collapse(&mut self, cx: &mut Context<Self>) {
         self.lyrics
             .update(cx, |view, cx| view.set_active(false, cx));
         self.comments
@@ -444,6 +458,7 @@ impl AlbumLyrics {
     }
 
     fn frame_data(&mut self, window: &mut Window, cx: &mut Context<Self>) -> FrameData {
+        let expanded = self.now_playing.read(cx).is_expanded();
         let cover_url = self
             .playback
             .read(cx)
@@ -451,7 +466,7 @@ impl AlbumLyrics {
             .current_song
             .as_ref()
             .map(|song| track_cover_url(song.al.pic_url.as_deref(), 480));
-        let color = if self.opened {
+        let color = if expanded {
             cover_url
                 .as_deref()
                 .and_then(|url| self.cover_color.load(url, window, cx))
@@ -463,13 +478,8 @@ impl AlbumLyrics {
         let song = self.playback.read(cx).snapshot().current_song.clone();
         let page_height = (f32::from(window.viewport_size().height) - PLAYER_BAR_HEIGHT).max(1.);
         let height = (page_height - HEADER_HEIGHT).max(1.);
-        let reveal = transition(
-            "album-lyrics-reveal",
-            if self.opened { 1_f32 } else { 0. },
-            Transition::new(ALBUM_REVEAL_DURATION).ease(ease_out_quint()),
-            window,
-            cx,
-        );
+        // 展开/收起的节拍来自 NowPlaying：id、时长、曲线都只有它一处定义。
+        let reveal = NowPlaying::reveal(expanded, window, cx);
         // 摘要条此刻在屏幕上的位置，唱片 / 摘要唱片的绘制用它做连续性判断。
         let summary_top = page_height + HEADER_TOP_INSET + f32::from(self.scroll.offset().y);
         // 「在不在评论区」看的是停在哪一屏，而不是「外层滚到底了没有」：
@@ -770,7 +780,8 @@ impl AlbumLyrics {
         .ml_0()
         .cursor_pointer()
         .on_click(cx.listener(|this, _, _, cx| {
-            this.close(cx);
+            this.now_playing
+                .update(cx, |now_playing, cx| now_playing.collapse(cx));
         }))
     }
 
@@ -816,7 +827,7 @@ impl AlbumLyrics {
     }
 }
 
-impl Render for AlbumLyrics {
+impl Render for NowPlayingPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let now = cx.background_executor().now();
         let scrolling = self.song_scroll.step(&self.scroll, window, now);
@@ -850,25 +861,30 @@ impl Render for AlbumLyrics {
             // 手势进行中：什么都不做，等看门狗按新页高判定去处。
         }
         let frame = self.frame_data(window, cx);
+        let expanded = self.now_playing.read(cx).is_expanded();
         // Backdrop 在 prepaint 写入实际插值色；其下一帧通知让缓存 fade 重新绘制。
         let backdrop_gradient = self.backdrop.gradient();
+        // 把共享底的最新插值广播给播放栏/进度条：它们据此重新取色，配色才能跟着
+        // 封面色渐变一帧帧走（渐变由 gradient_layer 在 prepaint 写入，这里晚一帧读到）。
+        self.now_playing
+            .update(cx, |now_playing, cx| now_playing.publish_backdrop(cx));
         self.lyrics.update(cx, |view, cx| {
             view.configure_backdrop(backdrop_gradient, cx)
         });
         self.lyrics.update(cx, |view, cx| {
             view.set_active(
-                self.opened && self.tab == SongTab::Lyrics && !frame.show_comments,
+                expanded && self.tab == SongTab::Lyrics && !frame.show_comments,
                 cx,
             )
         });
         self.comments.update(cx, |view, cx| {
             // 翻页手势没结束时评论区不可滚：这段时间的滚轮是我们自己的，
             // 让列表去响应的话，抬手后的惯性就会把评论内容滚下去一大截。
-            view.configure(self.opened, frame.show_comments && !self.snap_pending, cx)
+            view.configure(expanded, frame.show_comments && !self.snap_pending, cx)
         });
         self.vinyl.read(cx).clear();
         self.summary_vinyl.read(cx).clear();
-        if !self.opened && frame.reveal <= 0. {
+        if !expanded && frame.reveal <= 0. {
             self.song_scroll.aim(&self.scroll, None, now);
             self.tonearm = Tonearm::default();
             return div().into_any_element();

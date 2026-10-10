@@ -7,11 +7,12 @@ use gpui_kit::base::{
 };
 use gpui_kit::component::slider::{SliderEvent, SliderState};
 
-use super::{ALBUM_REVEAL_DURATION, format_duration};
+use super::format_duration;
 use crate::playback::PlaybackController;
 use crate::ui::cover_color::{
     Backdrop, CoverGradient, blend_color, blend_colors, dark_colors, dark_gradient,
 };
+use crate::ui::now_playing::NowPlaying;
 use crate::ui::theme::DOLPHIN_FAMILY;
 
 /// 轨道静止 / 悬浮时的高度
@@ -73,22 +74,25 @@ fn seek_position(milliseconds: f32, duration: Duration) -> Option<Duration> {
 
 pub struct ProgressBar {
     playback: Entity<PlaybackController>,
+    /// 「整页展开/收起」的单一状态源；深色与否直接读它，不再自存 `dark` 镜像。
+    now_playing: Entity<NowPlaying>,
     backdrop: Backdrop,
     slider: Entity<SliderState>,
     hovered: bool,
-    dark: bool,
     drag: SeekDrag,
     _playback_subscription: Subscription,
     _slider_subscription: Subscription,
+    _now_playing_subscription: Subscription,
 }
 
 impl ProgressBar {
     pub fn new(
         playback: Entity<PlaybackController>,
-        backdrop: Backdrop,
+        now_playing: Entity<NowPlaying>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let backdrop = now_playing.read(cx).backdrop();
         let controller = playback.read(cx);
         let position = controller.snapshot().position;
         let duration = controller.snapshot().duration;
@@ -119,24 +123,22 @@ impl ProgressBar {
                 cx.notify();
             });
         let slider_subscription = Self::subscribe_slider(&slider, revision, window, cx);
+        // 展开状态与共享渐变底都由 NowPlaying 广播；进度条只负责跟着重绘取色。
+        let now_playing_subscription = cx.observe(&now_playing, |_, _, cx| cx.notify());
         Self {
             playback,
+            now_playing,
             backdrop,
             slider,
             hovered: false,
-            dark: false,
             drag: SeekDrag {
                 revision,
                 dragging: false,
             },
             _playback_subscription: playback_subscription,
             _slider_subscription: slider_subscription,
+            _now_playing_subscription: now_playing_subscription,
         }
-    }
-
-    pub(super) fn set_dark(&mut self, dark: bool, cx: &mut Context<Self>) {
-        self.dark = dark;
-        cx.notify();
     }
 
     fn subscribe_slider(
@@ -192,13 +194,7 @@ impl Render for ProgressBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme_colors = Theme::global(cx).tokens.colors;
         // 与播放栏同一时长、同一时刻启动：展开/收起时轨道的颜色一起过渡。
-        let expand = transition(
-            "player-progress-expand",
-            if self.dark { 1_f32 } else { 0. },
-            Transition::new(ALBUM_REVEAL_DURATION).ease(ease_out_quint()),
-            window,
-            cx,
-        );
+        let expand = NowPlaying::reveal(self.now_playing.read(cx).is_expanded(), window, cx);
         let background = self
             .backdrop
             .gradient()

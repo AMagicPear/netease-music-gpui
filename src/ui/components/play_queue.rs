@@ -1,4 +1,7 @@
-//! 「播放列表」浮层：贴窗口右缘滑出，展示当前播放队列。
+//! 播放队列浮层（界面文案沿用它自己的「播放列表」）：贴窗口右缘滑出，展示当前播放队列。
+//!
+//! 别和 [`crate::ui::pages::playlist`] 的"歌单"混了——那个是用户/编辑歌单的详情页，
+//! 这个是当前会话的**播放队列**，所以代码里叫 `PlayQueue`。
 //!
 //! 面板本身是独立实体，由播放栏作为子元素挂载（见 `player_bar`）。它用绝对定位向上
 //! 越出播放栏、盖住页面内容，收起时完全不参与布局。列表交给 gpui-kit 的 [`List`]：
@@ -60,7 +63,7 @@ fn panel_playback_state(playback: &PlaybackController) -> (u64, Option<usize>, b
     )
 }
 
-pub struct PlaylistPanel {
+pub struct PlayQueue {
     playback: Entity<PlaybackController>,
     list: Entity<ListState<QueueDelegate>>,
     /// 期望的开合状态。画面上的位置由 `Presence` 采样出的进度决定，收起后还要滑出去。
@@ -70,7 +73,7 @@ pub struct PlaylistPanel {
     _library_subscription: Subscription,
 }
 
-impl PlaylistPanel {
+impl PlayQueue {
     pub fn new(
         playback: Entity<PlaybackController>,
         library: Entity<MusicLibrary>,
@@ -144,7 +147,7 @@ impl PlaylistPanel {
     }
 }
 
-impl Render for PlaylistPanel {
+impl Render for PlayQueue {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // 进出场都靠这一个采样：收起后仍会继续渲染到进度归零，才滑得出去。
         let presence = Presence::new("player-playlist-panel", self.open)
@@ -514,7 +517,11 @@ fn row_content(
     // 而组悬停状态要到 paint 阶段才登记进 `GroupHitboxes`——prepaint 与 paint
     // 一旦判断不一致，就会踩到 "must call prepaint before paint"。
     if hovered {
-        vec![cover, text, row_actions(index, liked, colors, on_like_click)]
+        vec![
+            cover,
+            text,
+            row_actions(index, liked, colors, on_like_click),
+        ]
     } else {
         // 时长是辅助信息：比 muted_foreground 再淡一档，和歌单行一致。
         let duration = div()

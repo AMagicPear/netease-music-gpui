@@ -6,18 +6,21 @@
 use gpui::*;
 use gpui_kit::component::native_menu::NativeMenu;
 
-actions!(song_menu, [
-    Play,
-    PlayNext,
-    ViewComments,
-    Collect,
-    Download,
-    Share,
-    Buy,
-    CopyLink,
-    Remove,
-    ReduceRecommendation,
-]);
+actions!(
+    song_menu,
+    [
+        Play,
+        PlayNext,
+        ViewComments,
+        Collect,
+        Download,
+        Share,
+        Buy,
+        CopyLink,
+        Remove,
+        ReduceRecommendation,
+    ]
+);
 
 /// 在 `position`（窗口坐标）弹出「更多」菜单。
 pub fn show_song_menu(position: Point<Pixels>, window: &mut Window, cx: &mut App) {

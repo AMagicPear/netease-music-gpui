@@ -5,11 +5,11 @@ use gpui::*;
 
 use super::assets::{CoverPrefetch, thumbnail_url, track_cover_url};
 use super::components::{
-    CloseAlbumLyrics, OpenAlbumLyrics, PLAYER_BAR_HEIGHT, PlayerBar, ResizeDragPreview,
-    icon_hover_color, window_drag_area,
+    PLAYER_BAR_HEIGHT, PlayerBar, ResizeDragPreview, icon_hover_color, window_drag_area,
 };
 use super::cover_color::{Backdrop, CoverColor, CoverGradient, gradient_layer};
-use super::pages::{ContentPage, album_lyrics::AlbumLyrics, playlist::PlaylistPage};
+use super::now_playing::{NowPlaying, NowPlayingPage};
+use super::pages::{ContentPage, playlist::PlaylistPage};
 use super::sidebar::{SidebarChanged, SidebarPage};
 use super::theme::{IconSize, PRESSED_ICON_ALPHA};
 use crate::playback::PlaybackController;
@@ -33,10 +33,7 @@ pub(super) const HEADER_HEIGHT: f32 = HEADER_TOP_INSET + 42.;
 pub struct MainWindow {
     pub main_content: Entity<MainContent>,
     pub player_bar: Entity<PlayerBar>,
-    album_lyrics: Entity<AlbumLyrics>,
-    _album_subscription: Subscription,
-    _album_close_subscription: Subscription,
-    _lyrics_subscription: Subscription,
+    now_playing_page: Entity<NowPlayingPage>,
     _playback_subscription: Subscription,
     _background_subscriptions: Vec<Subscription>,
     cover_tint: CoverColor,
@@ -47,29 +44,18 @@ impl MainWindow {
     pub fn new(
         main_content: Entity<MainContent>,
         player_bar: Entity<PlayerBar>,
+        now_playing: Entity<NowPlaying>,
+        playback: Entity<PlaybackController>,
+        library: Entity<MusicLibrary>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let playback = player_bar.read(cx).playback();
-        let library = player_bar.read(cx).library();
-        let backdrop = player_bar.read(cx).album_backdrop();
-        let clock = player_bar.read(cx).rotation_clock();
-        let album_lyrics =
-            cx.new(|cx| AlbumLyrics::new(playback.clone(), library, backdrop, clock, cx));
+        // 依赖全由 main.rs 这个组合根显式传入：shell 不再从播放栏里"扒"参数。
+        // 黑胶页直接拿到同一个 NowPlaying——开合状态、共享渐变底、黑胶时钟都是它；
+        // 展开/收起的接线（谁触发、谁跟随）全在各自 view 内部，shell 不再当中介。
+        let now_playing_page =
+            cx.new(|cx| NowPlayingPage::new(playback.clone(), library, now_playing, cx));
         let playback_subscription = cx.observe(&playback, |this, playback, cx| {
             this.sync_cover_prefetch(&playback, cx);
-        });
-        let album_subscription = cx.subscribe(&player_bar, |this, _, _: &OpenAlbumLyrics, cx| {
-            this.album_lyrics.update(cx, |page, cx| page.open(cx));
-        });
-        let album_close_subscription =
-            cx.subscribe(&player_bar, |this, _, _: &CloseAlbumLyrics, cx| {
-                this.album_lyrics.update(cx, |page, cx| page.close(cx));
-            });
-        let lyrics_subscription = cx.observe(&album_lyrics, |this, lyrics, cx| {
-            let expanded = lyrics.read(cx).is_open();
-            this.player_bar.update(cx, |player, cx| {
-                player.set_album_expanded(expanded, cx);
-            });
         });
         let playlist_page = main_content.read(cx).playlist_page.clone();
         let background_subscriptions = vec![
@@ -79,10 +65,7 @@ impl MainWindow {
         let mut this = Self {
             main_content,
             player_bar,
-            album_lyrics,
-            _album_subscription: album_subscription,
-            _album_close_subscription: album_close_subscription,
-            _lyrics_subscription: lyrics_subscription,
+            now_playing_page,
             _playback_subscription: playback_subscription,
             _background_subscriptions: background_subscriptions,
             cover_tint: CoverColor::default(),
@@ -189,7 +172,7 @@ impl Render for MainWindow {
                             .update(cx, |content, cx| content.playlist_overlays(cx)),
                     )
                     .child(
-                        self.album_lyrics
+                        self.now_playing_page
                             .clone()
                             .cached(StyleRefinement::default().absolute().inset_0().size_full()),
                     ),
@@ -203,7 +186,7 @@ impl Render for MainWindow {
                 ),
             )
             .child(self.player_bar.read(cx).vinyl_overlay())
-            .children(self.album_lyrics.read(cx).vinyl_overlays())
+            .children(self.now_playing_page.read(cx).vinyl_overlays())
     }
 }
 

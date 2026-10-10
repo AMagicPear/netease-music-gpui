@@ -248,12 +248,7 @@ fn playlist_row(
                 .flex()
                 .flex_col()
                 .gap(px(2.))
-                .child(
-                    div()
-                        .truncate()
-                        .text_size(px(16.))
-                        .child(title),
-                )
+                .child(div().truncate().text_size(px(16.)).child(title))
                 .when_some(subtitle, |column, subtitle| {
                     column.child(
                         div()

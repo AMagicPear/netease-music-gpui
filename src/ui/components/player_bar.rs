@@ -1,29 +1,26 @@
-use std::{cell::Cell, rc::Rc, time::Duration};
+use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_kit::base::{Button, ColorTokens, Popup, Presence, Theme, Transition, transition};
 
-use super::playlist_panel::PlaylistPanel;
+use super::play_queue::PlayQueue;
 use super::progress_bar::ProgressBar;
 use super::volume_control::VolumeControl;
 use super::{
-    LAYER_PROGRESS_BAR, RotationClock, SURFACE_RADIUS, Vinyl, artist_label, icon_hover_color,
-    like_icon_path, surface_shadow,
+    LAYER_PROGRESS_BAR, SURFACE_RADIUS, Vinyl, artist_label, icon_hover_color, like_icon_path,
+    surface_shadow,
 };
 use crate::api::MusicApi;
 use crate::models::AudioQualityLevel;
 use crate::playback::PlaybackController;
 use crate::state::library::MusicLibrary;
-use crate::ui::cover_color::{Backdrop, CoverGradient, blend_color, blend_colors, dark_colors};
+use crate::ui::cover_color::{blend_color, blend_colors, dark_colors};
+use crate::ui::now_playing::NowPlaying;
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
 
 /// 播放栏固定高度；专辑歌词页据此估算可视区域高度。
 pub const PLAYER_BAR_HEIGHT: f32 = 86.;
-
-/// 黑胶页展开/收起的时长。播放栏左封面滑出、整栏配色、进度条、音量、
-/// 页面滑入都用这一个值，它们在同一帧启动、同一时长结束；改这里整体一起变。
-pub const ALBUM_REVEAL_DURATION: Duration = Duration::from_millis(500);
 
 /// 音质弹层的进出场时长；与 gpui-kit dropdown 的 150ms 对齐。
 const QUALITY_POPOVER_MOTION: Duration = Duration::from_millis(150);
@@ -44,7 +41,6 @@ pub struct PlayerBar {
     /// 哪块互动区正被悬停，`(互动区 id, 命中部件)`。
     /// 图标和计数是两个独立 hitbox（计数还可能伸出格子），靠这份状态让两者同步变色。
     hovered_interaction: Option<(&'static str, usize)>,
-    rotation_clock: Rc<Cell<RotationClock>>,
     mini_vinyl: Entity<Vinyl>,
     /// 音质弹层的开合。位置、延迟绘制和窗口边缘避让交给 `base::Popup`，
     /// 但开合状态、点外面关闭和进出场动画得自己管：gpui-kit 的 Popover 一关
@@ -53,51 +49,42 @@ pub struct PlayerBar {
     quality_focus: FocusHandle,
     /// 打开弹层前的焦点，关闭时还回去。
     quality_previous_focus: Option<FocusHandle>,
-    album_expanded: bool,
-    album_backdrop: Backdrop,
-    backdrop_gradient: Option<CoverGradient>,
-    /// 播放列表面板。它自己管开合、动画、滚动和队列展示，播放栏只负责挂载和触发。
-    playlist_panel: Entity<PlaylistPanel>,
-    _playlist_subscription: Subscription,
+    /// 「整页展开/收起」的单一状态源。展开状态、共享渐变底、动效节拍都从这里读，
+    /// 播放栏不再自己存 `album_expanded` 镜像。
+    now_playing: Entity<NowPlaying>,
+    /// 播放队列浮层。它自己管开合、动画、滚动和队列展示，播放栏只负责挂载和触发。
+    play_queue: Entity<PlayQueue>,
+    _play_queue_subscription: Subscription,
     _playback_subscription: Subscription,
     _progress_subscription: Subscription,
     _library_subscription: Subscription,
+    _now_playing_subscription: Subscription,
 }
-
-pub struct OpenAlbumLyrics;
-
-impl EventEmitter<OpenAlbumLyrics> for PlayerBar {}
-
-/// 请求收起专辑歌词页。封面和歌曲标题都指向同一页：封面收起时已滑出屏幕，
-/// 只有歌曲标题常驻可见，所以由它在展开状态下发出这个事件来回切。
-pub struct CloseAlbumLyrics;
-
-impl EventEmitter<CloseAlbumLyrics> for PlayerBar {}
 
 impl PlayerBar {
     pub fn new(
         playback: Entity<PlaybackController>,
         library: Entity<MusicLibrary>,
+        now_playing: Entity<NowPlaying>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let album_backdrop = Backdrop::default();
         let progress_bar =
-            cx.new(|cx| ProgressBar::new(playback.clone(), album_backdrop.clone(), window, cx));
-        let volume = cx.new(|cx| VolumeControl::new(playback.clone(), window, cx));
-        let rotation_clock: Rc<Cell<RotationClock>> = Rc::default();
+            cx.new(|cx| ProgressBar::new(playback.clone(), now_playing.clone(), window, cx));
+        let volume =
+            cx.new(|cx| VolumeControl::new(playback.clone(), now_playing.clone(), window, cx));
+        // 旋转时钟由 NowPlaying 持有，和整页大碟共用同一份。
         let mini_vinyl = cx.new(|cx| {
             Vinyl::new(
                 playback.clone(),
-                rotation_clock.clone(),
+                now_playing.read(cx).rotation_clock(),
                 "images/miniVinyl.png",
                 cx,
             )
         });
-        let playlist =
-            cx.new(|cx| PlaylistPanel::new(playback.clone(), library.clone(), window, cx));
+        let play_queue = cx.new(|cx| PlayQueue::new(playback.clone(), library.clone(), window, cx));
         // 面板自己管开合；播放栏要跟着重绘，触发按钮才能拿到最新的状态。
-        let playlist_subscription = cx.observe(&playlist, |_, _, cx| cx.notify());
+        let play_queue_subscription = cx.observe(&play_queue, |_, _, cx| cx.notify());
         let mut playback_state = {
             let controller = playback.read(cx);
             let state = controller.snapshot();
@@ -135,6 +122,8 @@ impl PlayerBar {
         });
         // 喜欢状态由音乐库维护：歌单页点亮红心后，播放栏也要跟着重绘。
         let library_subscription = cx.observe(&library, |_, _, cx| cx.notify());
+        // 展开状态与共享渐变底都由 NowPlaying 广播；播放栏只负责跟着重绘。
+        let now_playing_subscription = cx.observe(&now_playing, |_, _, cx| cx.notify());
         let mut this = Self {
             playback,
             library,
@@ -145,55 +134,20 @@ impl PlayerBar {
             song_id: None,
             counts: [None; 2],
             hovered_interaction: None,
-            rotation_clock,
             mini_vinyl,
             quality_open: false,
             quality_focus: cx.focus_handle(),
             quality_previous_focus: None,
-            album_expanded: false,
-            album_backdrop,
-            backdrop_gradient: None,
-            playlist_panel: playlist,
-            _playlist_subscription: playlist_subscription,
+            now_playing,
+            play_queue,
+            _play_queue_subscription: play_queue_subscription,
             _playback_subscription: playback_subscription,
             _progress_subscription: progress_subscription,
             _library_subscription: library_subscription,
+            _now_playing_subscription: now_playing_subscription,
         };
         this.load_counts(cx);
         this
-    }
-
-    pub(crate) fn set_album_expanded(&mut self, expanded: bool, cx: &mut Context<Self>) {
-        let changed = self.album_expanded != expanded;
-        let gradient = self.album_backdrop.gradient();
-        let color_changed = expanded && self.backdrop_gradient != gradient;
-        self.backdrop_gradient = gradient;
-        if changed {
-            self.album_expanded = expanded;
-            self.progress_bar
-                .update(cx, |bar, cx| bar.set_dark(expanded, cx));
-            self.volume
-                .update(cx, |volume, cx| volume.set_dark(expanded, cx));
-        }
-        if changed || color_changed {
-            cx.notify();
-        }
-    }
-
-    pub(crate) fn playback(&self) -> Entity<PlaybackController> {
-        self.playback.clone()
-    }
-
-    pub(crate) fn library(&self) -> Entity<MusicLibrary> {
-        self.library.clone()
-    }
-
-    pub(in crate::ui) fn album_backdrop(&self) -> Backdrop {
-        self.album_backdrop.clone()
-    }
-
-    pub(in crate::ui) fn rotation_clock(&self) -> Rc<Cell<RotationClock>> {
-        self.rotation_clock.clone()
     }
 
     pub(in crate::ui) fn vinyl_overlay(&self) -> AnyElement {
@@ -567,100 +521,96 @@ impl PlayerBar {
                             (AudioQualityLevel::Standard, "标准", "128kbps", "标", false),
                         ]
                         .into_iter()
-                        .map(
-                            |(quality, title, detail, mark, vip)| {
-                                let selected = selected_quality == quality;
-                                let muted_icon = matches!(
-                                    quality,
-                                    AudioQualityLevel::ExHigh | AudioQualityLevel::Standard
-                                );
-                                let (icon_bg, icon_fg) = if muted_icon {
-                                    (colors.muted, colors.muted_foreground.alpha(0.4))
-                                } else {
-                                    (rgb(0xfdf0ed).into(), rgb(0xc97f71).into())
-                                };
-                                div()
-                                    .id(match quality {
-                                        AudioQualityLevel::JyEffect => "quality-jyeffect-row",
-                                        AudioQualityLevel::HiRes => "quality-hires-row",
-                                        AudioQualityLevel::Lossless => "quality-lossless-row",
-                                        AudioQualityLevel::ExHigh => "quality-exhigh-row",
-                                        _ => "quality-standard-row",
-                                    })
-                                    .w_full()
-                                    .flex_1()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(9.))
-                                    .px(px(16.))
-                                    // GPUI 的 overflow_hidden() 只做矩形裁剪，底部圆角让背景贴合弹层。
-                                    .when(quality == AudioQualityLevel::Standard, |row| {
-                                        row.rounded_b(px(10.))
-                                    })
-                                    .hover(|row| row.bg(colors.muted))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.playback.update(cx, |playback, cx| {
-                                            playback.set_quality(quality, cx)
-                                        });
-                                    }))
-                                    .child(
-                                        div()
-                                            .size(px(32.))
-                                            .flex_none()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .rounded_full()
-                                            .bg(icon_bg)
-                                            .text_color(icon_fg)
-                                            .text_size(px(11.))
-                                            .child(mark),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .flex()
-                                            .flex_col()
-                                            .gap(px(8.))
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap(px(4.))
-                                                    .child(
-                                                        div()
-                                                            .text_size(px(14.))
-                                                            .line_height(px(16.))
-                                                            .child(title),
+                        .map(|(quality, title, detail, mark, vip)| {
+                            let selected = selected_quality == quality;
+                            let muted_icon = matches!(
+                                quality,
+                                AudioQualityLevel::ExHigh | AudioQualityLevel::Standard
+                            );
+                            let (icon_bg, icon_fg) = if muted_icon {
+                                (colors.muted, colors.muted_foreground.alpha(0.4))
+                            } else {
+                                (rgb(0xfdf0ed).into(), rgb(0xc97f71).into())
+                            };
+                            div()
+                                .id(match quality {
+                                    AudioQualityLevel::JyEffect => "quality-jyeffect-row",
+                                    AudioQualityLevel::HiRes => "quality-hires-row",
+                                    AudioQualityLevel::Lossless => "quality-lossless-row",
+                                    AudioQualityLevel::ExHigh => "quality-exhigh-row",
+                                    _ => "quality-standard-row",
+                                })
+                                .w_full()
+                                .flex_1()
+                                .flex()
+                                .items_center()
+                                .gap(px(9.))
+                                .px(px(16.))
+                                // GPUI 的 overflow_hidden() 只做矩形裁剪，底部圆角让背景贴合弹层。
+                                .when(quality == AudioQualityLevel::Standard, |row| {
+                                    row.rounded_b(px(10.))
+                                })
+                                .hover(|row| row.bg(colors.muted))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.playback.update(cx, |playback, cx| {
+                                        playback.set_quality(quality, cx)
+                                    });
+                                }))
+                                .child(
+                                    div()
+                                        .size(px(32.))
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded_full()
+                                        .bg(icon_bg)
+                                        .text_color(icon_fg)
+                                        .text_size(px(11.))
+                                        .child(mark),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(8.))
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(4.))
+                                                .child(
+                                                    div()
+                                                        .text_size(px(14.))
+                                                        .line_height(px(16.))
+                                                        .child(title),
+                                                )
+                                                .when(vip, |line| {
+                                                    line.child(
+                                                        img("icons/VIP/vip.svg")
+                                                            .w(px(30.375))
+                                                            .h(px(13.5)),
                                                     )
-                                                    .when(vip, |line| {
-                                                        line.child(
-                                                            img("icons/VIP/vip.svg")
-                                                                .w(px(30.375))
-                                                                .h(px(13.5)),
-                                                        )
-                                                    }),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_size(px(11.))
-                                                    .line_height(px(14.))
-                                                    .text_color(
-                                                        colors.muted_foreground.alpha(0.4),
-                                                    )
-                                                    .child(detail),
-                                            ),
-                                    )
-                                    .when(selected, |row| {
-                                        row.child(
-                                            img("icons/音质选项/quality_selected.svg")
-                                                .size(px(24.))
-                                                .flex_none(),
+                                                }),
                                         )
-                                    })
-                            },
-                        ),
+                                        .child(
+                                            div()
+                                                .text_size(px(11.))
+                                                .line_height(px(14.))
+                                                .text_color(colors.muted_foreground.alpha(0.4))
+                                                .child(detail),
+                                        ),
+                                )
+                                .when(selected, |row| {
+                                    row.child(
+                                        img("icons/音质选项/quality_selected.svg")
+                                            .size(px(24.))
+                                            .flex_none(),
+                                    )
+                                })
+                        }),
                     ),
                 )
         })
@@ -731,17 +681,16 @@ fn hover_icon(
 impl Render for PlayerBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme_colors = Theme::global(cx).tokens.colors;
+        // 展开状态和共享渐变底都来自 NowPlaying：播放栏只读，不再自持镜像。
+        // `Entity::read` 会借住 `cx`，所以放在一个 block 里一次取完再往下走。
+        let (album_expanded, album_backdrop) = {
+            let now_playing = self.now_playing.read(cx);
+            (now_playing.is_expanded(), now_playing.backdrop())
+        };
         // 展开/收起时整条栏的颜色跟着黑胶页的滑入一起过渡，而不是瞬间跳变。
-        let expand = transition(
-            "player-bar-expand",
-            if self.album_expanded { 1_f32 } else { 0. },
-            Transition::new(ALBUM_REVEAL_DURATION).ease(ease_out_quint()),
-            window,
-            cx,
-        );
+        let expand = NowPlaying::reveal(album_expanded, window, cx);
         self.mini_vinyl.read(cx).clear();
-        let backdrop_color = self
-            .album_backdrop
+        let backdrop_color = album_backdrop
             .gradient()
             .map(|gradient| Hsla::from(gradient.0[1]))
             .unwrap_or(hsla(0., 0., 0.12, 1.));
@@ -750,10 +699,10 @@ impl Render for PlayerBar {
             dark_colors(theme_colors, backdrop_color),
             expand,
         );
-        let expanded = self.progress_bar.read(cx).expanded();
+        let progress_expanded = self.progress_bar.read(cx).expanded();
         let shadow_opacity = transition(
             "player-bar-shadow",
-            if expanded && !self.album_expanded {
+            if progress_expanded && !album_expanded {
                 1.
             } else {
                 0.
@@ -819,7 +768,7 @@ impl Render for PlayerBar {
             .text_color(colors.primary_foreground)
             .into_any_element();
         // 触发按钮要拿"渲染这一刻"的开合状态比对，见下面按钮上的说明。
-        let playlist_open_at_render = self.playlist_panel.read(cx).is_open();
+        let play_queue_open_at_render = self.play_queue.read(cx).is_open();
 
         div()
             .w_full()
@@ -828,7 +777,7 @@ impl Render for PlayerBar {
             .flex()
             .flex_col()
             // 普通页面保留进度条悬停阴影；展开页不绘制。
-            .when(!self.album_expanded, |bar| {
+            .when(!album_expanded, |bar| {
                 bar.shadow(vec![
                     BoxShadow::new(
                         px(0.),
@@ -841,8 +790,8 @@ impl Render for PlayerBar {
             })
             .bg(colors.surface)
             .relative()
-            .when(self.album_expanded, |bar| {
-                let backdrop = self.album_backdrop.clone();
+            .when(album_expanded, |bar| {
+                let backdrop = album_backdrop.clone();
                 let surface = theme_colors.surface;
                 bar.child(
                     canvas(
@@ -884,8 +833,9 @@ impl Render for PlayerBar {
                                 div()
                                     .id("player-album-cover")
                                     .cursor_pointer()
-                                    .on_click(cx.listener(|_, _, _, cx| {
-                                        cx.emit(OpenAlbumLyrics);
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.now_playing
+                                            .update(cx, |now_playing, cx| now_playing.expand(cx));
                                     }))
                                     .size(px(60.))
                                     .flex_none()
@@ -920,14 +870,12 @@ impl Render for PlayerBar {
                                             .text_size(px(16.))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .truncate()
-                                            // 标题常驻播放栏，展开状态下点它应该是收起：
-                                            // 用当前展开状态决定发哪个事件，和页头收起按钮殊途同归。
+                                            // 标题常驻播放栏：收起态点它展开、展开态点它收起，
+                                            // 直接 toggle 单一状态源，和页头收起按钮殊途同归。
                                             .on_click(cx.listener(|this, _, _, cx| {
-                                                if this.album_expanded {
-                                                    cx.emit(CloseAlbumLyrics);
-                                                } else {
-                                                    cx.emit(OpenAlbumLyrics);
-                                                }
+                                                this.now_playing.update(cx, |now_playing, cx| {
+                                                    now_playing.toggle(cx)
+                                                });
                                             }))
                                             .child(title),
                                     )
@@ -1110,8 +1058,8 @@ impl Render for PlayerBar {
                                 .on_mouse_down(
                                     MouseButton::Left,
                                     cx.listener(move |this, _, _, cx| {
-                                        let panel = this.playlist_panel.clone();
-                                        if panel.read(cx).is_open() == playlist_open_at_render {
+                                        let panel = this.play_queue.clone();
+                                        if panel.read(cx).is_open() == play_queue_open_at_render {
                                             panel.update(cx, |panel, cx| panel.toggle(cx));
                                         }
                                     }),
@@ -1157,7 +1105,7 @@ impl Render for PlayerBar {
                             )),
                     )
                     // 面板自己绝对定位并延后绘制，不参与这一栏的布局。
-                    .child(self.playlist_panel.clone()),
+                    .child(self.play_queue.clone()),
             )
     }
 }

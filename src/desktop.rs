@@ -15,16 +15,19 @@ use crate::ui::shell::MainWindow;
 mod dock_actions {
     use gpui::actions;
 
-    actions!(netease_music, [
-        TogglePlayback,
-        NextTrack,
-        PreviousTrack,
-        ToggleLike,
-        RepeatOff,
-        RepeatOneTrack,
-        RepeatAllTracks,
-        ShufflePlayback,
-    ]);
+    actions!(
+        netease_music,
+        [
+            TogglePlayback,
+            NextTrack,
+            PreviousTrack,
+            ToggleLike,
+            RepeatOff,
+            RepeatOneTrack,
+            RepeatAllTracks,
+            ShufflePlayback,
+        ]
+    );
 }
 
 /// 应用持有视图和托盘；窗口不可见时，播放 Entity 和页面状态仍然存活。
@@ -221,14 +224,16 @@ fn build_dock_menu(state: DockMenuState) -> Vec<gpui::MenuItem> {
             if liked { "取消喜欢" } else { "喜欢" },
             dock_actions::ToggleLike,
         ),
-        gpui::MenuItem::submenu(gpui::Menu::new("循环播放").items([
-            gpui::MenuItem::action("关", dock_actions::RepeatOff)
-                .checked(mode == PlayMode::Sequential),
-            gpui::MenuItem::action("单曲", dock_actions::RepeatOneTrack)
-                .checked(mode == PlayMode::RepeatOne),
-            gpui::MenuItem::action("全部", dock_actions::RepeatAllTracks)
-                .checked(mode == PlayMode::RepeatAll),
-        ])),
+        gpui::MenuItem::submenu(
+            gpui::Menu::new("循环播放").items([
+                gpui::MenuItem::action("关", dock_actions::RepeatOff)
+                    .checked(mode == PlayMode::Sequential),
+                gpui::MenuItem::action("单曲", dock_actions::RepeatOneTrack)
+                    .checked(mode == PlayMode::RepeatOne),
+                gpui::MenuItem::action("全部", dock_actions::RepeatAllTracks)
+                    .checked(mode == PlayMode::RepeatAll),
+            ]),
+        ),
         gpui::MenuItem::action("随机播放", dock_actions::ShufflePlayback)
             .checked(mode == PlayMode::Shuffle),
     ]

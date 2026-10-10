@@ -4,13 +4,13 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_kit::base::{
     ColorTokens, Presence, Slider, SliderIndicator, SliderThumb, SliderTrack, Theme, Transition,
-    transition,
 };
 use gpui_kit::component::slider::{SliderEvent, SliderState};
 
-use super::{ALBUM_REVEAL_DURATION, LAYER_VOLUME_BALLOON, icon_hover_color};
+use super::{LAYER_VOLUME_BALLOON, icon_hover_color};
 use crate::playback::PlaybackController;
-use crate::ui::cover_color::{blend_colors, dark_colors};
+use crate::ui::cover_color::dark_colors;
+use crate::ui::now_playing::NowPlaying;
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA};
 
 /// 气泡圆角。
@@ -49,14 +49,17 @@ pub struct VolumeControl {
     /// 鼠标按在气泡里（多半是在拖音量）：此时即使指针跑出气泡也不能收起。
     pressed: bool,
     open: bool,
-    dark: bool,
+    /// 「整页展开/收起」的单一状态源；深色与否直接读它，不再自存 `dark` 镜像。
+    now_playing: Entity<NowPlaying>,
     _playback_subscription: Subscription,
     _slider_subscription: Subscription,
+    _now_playing_subscription: Subscription,
 }
 
 impl VolumeControl {
     pub fn new(
         playback: Entity<PlaybackController>,
+        now_playing: Entity<NowPlaying>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -87,6 +90,16 @@ impl VolumeControl {
                 playback.set_volume((value / 100.).clamp(0., 1.), cx);
             });
         });
+        // 只在"展开/收起"翻转时重绘：背景渐变的每帧广播（publish_backdrop）也会打到
+        // 这里，但音量不跟渐变走（见 render 说明），没必要陪着逐帧重绘。
+        let mut expanded = now_playing.read(cx).is_expanded();
+        let now_playing_subscription = cx.observe(&now_playing, move |_, now_playing, cx| {
+            let next = now_playing.read(cx).is_expanded();
+            if next != expanded {
+                expanded = next;
+                cx.notify();
+            }
+        });
         Self {
             playback,
             slider,
@@ -94,15 +107,11 @@ impl VolumeControl {
             balloon_hovered: false,
             pressed: false,
             open: false,
-            dark: false,
+            now_playing,
             _playback_subscription: playback_subscription,
             _slider_subscription: slider_subscription,
+            _now_playing_subscription: now_playing_subscription,
         }
-    }
-
-    pub(super) fn set_dark(&mut self, dark: bool, cx: &mut Context<Self>) {
-        self.dark = dark;
-        cx.notify();
     }
 
     /// 只有图标能让它出现；图标、气泡、以及两者之间那块"桥"都能让它留着。
@@ -309,19 +318,14 @@ impl VolumeControl {
 impl Render for VolumeControl {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme_colors = Theme::global(cx).tokens.colors;
-        // 与播放栏同一时长、同一时刻启动，音量图标也跟着一起过渡。
-        let expand = transition(
-            "player-volume-expand",
-            if self.dark { 1_f32 } else { 0. },
-            Transition::new(ALBUM_REVEAL_DURATION).ease(ease_out_quint()),
-            window,
-            cx,
-        );
-        let colors = blend_colors(
-            theme_colors,
-            dark_colors(theme_colors, hsla(0., 0., 0.12, 1.)),
-            expand,
-        );
+        // 音量不跟展开动画渐变：可见的只有图标本身，而它换色的那一刻鼠标必然在左半区
+        // （点是封面/歌名才触发展开），音量气泡不可能正开着，渐没渐变都看不出来。
+        // 直接按状态取色，省掉一条 transition，也就不用逐帧重绘。
+        let colors = if self.now_playing.read(cx).is_expanded() {
+            dark_colors(theme_colors, hsla(0., 0., 0.12, 1.))
+        } else {
+            theme_colors
+        };
         let percent = self.slider.read(cx).percentage().end;
         // 指针还在图标上就已经算"展开"了，所以图标高亮直接看 open。
         let icon_color = if self.open {
@@ -365,7 +369,8 @@ impl Render for VolumeControl {
                             .absolute()
                             // 进场时从图标那头往上浮：起点比终点低 BALLOON_RISE。
                             .bottom(
-                                IconSize::Middle.pixels() - BRIDGE_OVERLAP
+                                IconSize::Middle.pixels()
+                                    - BRIDGE_OVERLAP
                                     - BALLOON_RISE * (1. - progress),
                             )
                             .left(relative(0.5))

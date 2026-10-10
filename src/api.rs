@@ -193,11 +193,13 @@ impl MusicApi {
         song_id: u64,
         liked: bool,
     ) -> Result<(), String> {
-        Self::request(client.like(
-            &Query::new()
-                .param("id", &song_id.to_string())
-                .param("like", if liked { "true" } else { "false" }),
-        ))
+        Self::request(
+            client.like(
+                &Query::new()
+                    .param("id", &song_id.to_string())
+                    .param("like", if liked { "true" } else { "false" }),
+            ),
+        )
         .await?;
         Ok(())
     }

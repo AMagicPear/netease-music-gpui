@@ -5,8 +5,8 @@ use gpui_kit::base::ColorTokens;
 mod collect_window;
 mod comment_row;
 mod drag_preview;
+mod play_queue;
 mod player_bar;
-mod playlist_panel;
 mod popover;
 mod progress_bar;
 mod song_menu;
@@ -20,11 +20,9 @@ mod volume_control;
 pub use collect_window::open_collect_window;
 pub use comment_row::comment_row;
 pub use drag_preview::ResizeDragPreview;
-pub use player_bar::{
-    ALBUM_REVEAL_DURATION, CloseAlbumLyrics, OpenAlbumLyrics, PLAYER_BAR_HEIGHT, PlayerBar,
-};
+pub use player_bar::{PLAYER_BAR_HEIGHT, PlayerBar};
 pub use song_menu::show_song_menu;
-// 播放列表面板和音质弹窗共用同一份圆角与投影；子模块通过 `super::` 取名。
+// 播放队列浮层和音质弹窗共用同一份圆角与投影；子模块通过 `super::` 取名。
 use popover::{SURFACE_RADIUS, surface_shadow};
 pub use spinner::spinner;
 pub use tab_bar::{TabBar, TabChanged, TabItem};
@@ -36,7 +34,7 @@ pub use virtual_table::{
 
 // 浮层都用 deferred 绘制，数字大的画得更晚、盖在上面。
 //
-// 进度条在最底下；播放列表面板压在它上面。音量气泡最小也最临时，它从图标上方
+// 进度条在最底下；播放队列浮层压在它上面。音量气泡最小也最临时，它从图标上方
 // 弹出时会和弹层重叠，所以压在最上面——音质弹窗由 gpui-kit 的 `base::Popup` 绘制，
 // 占用 `POPUP_PRIORITY`，气泡必须比它更高才盖得住。
 pub(super) const LAYER_PROGRESS_BAR: usize = 1;

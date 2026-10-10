@@ -55,11 +55,7 @@ impl PlaylistDetail {
     /// 取消的去掉，新点亮的从 `cache`（音乐库本次会话缓存过的歌曲）补到队首
     /// ——服务器歌单也是新喜欢的在前。
     /// 返回是否有变化，调用方据此决定要不要重绘。
-    pub fn reconcile_liked(
-        &mut self,
-        liked: &HashSet<u64>,
-        cache: &HashMap<u64, Song>,
-    ) -> bool {
+    pub fn reconcile_liked(&mut self, liked: &HashSet<u64>, cache: &HashMap<u64, Song>) -> bool {
         let is_liked_playlist = self
             .playlist
             .as_ref()

@@ -13,6 +13,7 @@ use state::{account::AccountState, library::MusicLibrary};
 use ui::{
     assets::Assets,
     components::PlayerBar,
+    now_playing::NowPlaying,
     shell::{MainContent, MainWindow},
     theme,
 };
@@ -55,8 +56,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let main_content = cx.new(|cx| {
                     MainContent::new(window, user_profile, library.clone(), playback.clone(), cx)
                 });
-                let player_bar = cx.new(|cx| PlayerBar::new(playback, library, window, cx));
-                cx.new(|cx| MainWindow::new(main_content, player_bar, cx))
+                let now_playing = cx.new(|_| NowPlaying::new());
+                let player_bar = cx.new(|cx| {
+                    PlayerBar::new(
+                        playback.clone(),
+                        library.clone(),
+                        now_playing.clone(),
+                        window,
+                        cx,
+                    )
+                });
+                cx.new(|cx| {
+                    MainWindow::new(main_content, player_bar, now_playing, playback, library, cx)
+                })
             },
         )
         .unwrap();
