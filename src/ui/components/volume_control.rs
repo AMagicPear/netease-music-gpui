@@ -1,7 +1,10 @@
+use std::time::Duration;
+
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_kit::base::{
-    ColorTokens, Slider, SliderIndicator, SliderThumb, SliderTrack, Theme, Transition, transition,
+    ColorTokens, Presence, Slider, SliderIndicator, SliderThumb, SliderTrack, Theme, Transition,
+    transition,
 };
 use gpui_kit::component::slider::{SliderEvent, SliderState};
 
@@ -27,6 +30,9 @@ const BRIDGE_OVERLAP: Pixels = px(2.);
 const TRACK_WIDTH: Pixels = px(6.);
 const TRACK_HIT_WIDTH: Pixels = px(20.);
 const THUMB_SIZE: Pixels = px(10.);
+/// 气泡进出场：和 gpui-kit dropdown 同一路数的 150ms，位移 4px。
+const BALLOON_MOTION_DURATION: Duration = Duration::from_millis(150);
+const BALLOON_RISE: Pixels = px(4.);
 
 /// 悬停状态的来源，用于区分是谁的 hover 发生了变化。
 #[derive(Clone, Copy)]
@@ -127,38 +133,50 @@ impl VolumeControl {
     ///
     /// 桥把图标顶边和气泡底边之间那道缝补上，两者连成一整片命中区，
     /// 鼠标走过去不会掉到"谁都不算"的空档里，于是可以即时关闭、不用延迟。
-    fn balloon(&self, percent: f32, colors: ColorTokens, cx: &mut Context<Self>) -> Stateful<Div> {
+    ///
+    /// `interactive` 为假时不挂任何命中/悬停监听：退场动画那 150ms 里气泡还在树上，
+    /// 但它只是"正在消失的画面"，不该继续吞鼠标。
+    fn balloon(
+        &self,
+        percent: f32,
+        interactive: bool,
+        colors: ColorTokens,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         div()
             .id("player-volume-balloon")
-            // 气泡和透明桥共同遮住下方命中区，避免 hover 穿透。
-            .occlude()
             .relative()
             .w(BALLOON_WIDTH)
             .h(BALLOON_HEIGHT + BALLOON_GAP + BRIDGE_OVERLAP)
             .flex()
             .flex_col()
-            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                this.set_hover(HoverTarget::Balloon, *hovered, cx);
-            }))
-            // 捕获阶段接按下/抬起：滑块自己会在冒泡阶段 stop_propagation，
-            // 冒泡监听收不到按在滑块上的那一下，拖到气泡外就会被收起。
-            .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                if event.button == MouseButton::Left {
-                    this.set_pressed(true, cx);
-                }
-            }))
-            .capture_any_mouse_up(cx.listener(|this, event: &MouseUpEvent, _, cx| {
-                if event.button == MouseButton::Left {
-                    this.set_pressed(false, cx);
-                }
-            }))
-            // 在气泡外松手时只有这个回调会到。
-            .on_mouse_up_out(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.set_pressed(false, cx);
-                }),
-            )
+            .when(interactive, |balloon| {
+                balloon
+                    // 气泡和透明桥共同遮住下方命中区，避免 hover 穿透。
+                    .occlude()
+                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                        this.set_hover(HoverTarget::Balloon, *hovered, cx);
+                    }))
+                    // 捕获阶段接按下/抬起：滑块自己会在冒泡阶段 stop_propagation，
+                    // 冒泡监听收不到按在滑块上的那一下，拖到气泡外就会被收起。
+                    .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                        if event.button == MouseButton::Left {
+                            this.set_pressed(true, cx);
+                        }
+                    }))
+                    .capture_any_mouse_up(cx.listener(|this, event: &MouseUpEvent, _, cx| {
+                        if event.button == MouseButton::Left {
+                            this.set_pressed(false, cx);
+                        }
+                    }))
+                    // 在气泡外松手时只有这个回调会到。
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.set_pressed(false, cx);
+                        }),
+                    )
+            })
             .child(self.balloon_body(percent, colors))
             // 桥：透明、不画东西，只贡献命中区。
             .child(div().w_full().h(BALLOON_GAP + BRIDGE_OVERLAP))
@@ -311,6 +329,12 @@ impl Render for VolumeControl {
         } else {
             colors.muted_foreground
         };
+        // 进出场共用一条 Presence：`should_render()` 在退场期间仍为真，
+        // 气泡会继续挂着直到动画放完才卸载——这正是"消失动画"能存在的前提。
+        let presence = Presence::new("player-volume-balloon", self.open)
+            .transition(Transition::new(BALLOON_MOTION_DURATION).ease(ease_out_quint()))
+            .sample(window, cx);
+        let progress = presence.progress;
 
         div()
             .id("player-volume")
@@ -333,15 +357,20 @@ impl Render for VolumeControl {
             }))
             // 气泡钉死在图标正上方：水平中心与图标对齐，底部的"桥"再压住图标 2px。
             // 不做窗口边界避让——音量按钮离窗口右边界还隔着"更多"按钮，越不了界。
-            .when(self.open, |this| {
+            .when(presence.should_render(), |this| {
                 this.child(
                     // 进度条和通用弹层都是延迟绘制且层级更低，气泡画在最后才不会被横穿。
                     deferred(
-                        self.balloon(percent, colors, cx)
+                        self.balloon(percent, self.open, colors, cx)
                             .absolute()
-                            .bottom(IconSize::Middle.pixels() - BRIDGE_OVERLAP)
+                            // 进场时从图标那头往上浮：起点比终点低 BALLOON_RISE。
+                            .bottom(
+                                IconSize::Middle.pixels() - BRIDGE_OVERLAP
+                                    - BALLOON_RISE * (1. - progress),
+                            )
                             .left(relative(0.5))
-                            .ml(-BALLOON_WIDTH / 2.),
+                            .ml(-BALLOON_WIDTH / 2.)
+                            .opacity(progress),
                     )
                     .with_priority(LAYER_VOLUME_BALLOON),
                 )

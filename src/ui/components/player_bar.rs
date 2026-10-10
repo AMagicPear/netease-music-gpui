@@ -2,8 +2,7 @@ use std::{cell::Cell, rc::Rc, time::Duration};
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_kit::base::{Button, ColorTokens, Theme, Transition, transition};
-use gpui_kit::component::popover::Popover;
+use gpui_kit::base::{Button, ColorTokens, Popup, Presence, Theme, Transition, transition};
 
 use super::playlist_panel::PlaylistPanel;
 use super::progress_bar::ProgressBar;
@@ -26,6 +25,11 @@ pub const PLAYER_BAR_HEIGHT: f32 = 86.;
 /// 页面滑入都用这一个值，它们在同一帧启动、同一时长结束；改这里整体一起变。
 pub const ALBUM_REVEAL_DURATION: Duration = Duration::from_millis(500);
 
+/// 音质弹层的进出场时长；与 gpui-kit dropdown 的 150ms 对齐。
+const QUALITY_POPOVER_MOTION: Duration = Duration::from_millis(150);
+/// 进场时从落点下方浮上来的距离（退场原路缩回）。
+const QUALITY_POPOVER_TRAVEL: Pixels = px(6.);
+
 pub struct PlayerBar {
     playback: Entity<PlaybackController>,
     /// 喜欢状态不在播放控制器里，而在音乐库中，红心要据此显示实心/空心。
@@ -42,6 +46,13 @@ pub struct PlayerBar {
     hovered_interaction: Option<(&'static str, usize)>,
     rotation_clock: Rc<Cell<RotationClock>>,
     mini_vinyl: Entity<Vinyl>,
+    /// 音质弹层的开合。位置、延迟绘制和窗口边缘避让交给 `base::Popup`，
+    /// 但开合状态、点外面关闭和进出场动画得自己管：gpui-kit 的 Popover 一关
+    /// 就在同一帧卸载内容，没有东西留给退场动画。
+    quality_open: bool,
+    quality_focus: FocusHandle,
+    /// 打开弹层前的焦点，关闭时还回去。
+    quality_previous_focus: Option<FocusHandle>,
     album_expanded: bool,
     album_backdrop: Backdrop,
     backdrop_gradient: Option<CoverGradient>,
@@ -130,6 +141,9 @@ impl PlayerBar {
             hovered_interaction: None,
             rotation_clock,
             mini_vinyl,
+            quality_open: false,
+            quality_focus: cx.focus_handle(),
+            quality_previous_focus: None,
             album_expanded: false,
             album_backdrop,
             backdrop_gradient: None,
@@ -330,259 +344,177 @@ impl PlayerBar {
         selected_quality: AudioQualityLevel,
         quality_label: &'static str,
         colors: ColorTokens,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme_colors = Theme::global(cx).tokens.colors;
-        // 弹层的开合、点外面关闭、锚点定位都由 gpui-kit 的 Popover（base::Popup）负责；
-        // appearance(false) 表示表面外观由下面这套样式自己给，与播放列表面板保持一致。
-        Popover::new("player-quality-popover")
-            .appearance(false)
-            .anchor(Anchor::BottomCenter)
-            .offset(px(12.))
-            .trigger_style(StyleRefinement::default().flex_none())
-            .bg(theme_colors.surface)
-            .rounded(SURFACE_RADIUS)
-            .shadow(vec![surface_shadow(theme_colors)])
-            .trigger(
-                Button::new("player-quality-button")
-                    .aria_label("音质选项")
-                    .h(px(16.))
-                    .px(px(2.))
-                    .flex_none()
-                    .border_1()
-                    .border_color(colors.muted_foreground)
-                    .rounded(px(4.))
-                    .text_size(px(10.))
-                    .text_color(colors.muted_foreground)
-                    .hover(|style| {
-                        let hover = icon_hover_color(colors.muted_foreground, colors);
-                        style.text_color(hover).border_color(hover)
-                    })
-                    .child(quality_label),
-            )
-            .text_color(theme_colors.secondary_foreground)
-            .child({
-                let colors = theme_colors;
-                div()
-                    .w(px(380.))
-                    .h(px(480.))
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .px_4()
-                            .py(px(10.))
-                            .text_size(px(16.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("当前歌曲音质"),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .flex()
-                            .gap(px(8.))
-                            .px(px(16.))
-                            .pb(px(10.))
-                            .children(
-                                [
-                                    (
-                                        AudioQualityLevel::Sky,
-                                        "沉浸环绕声",
-                                        "Surround Audio",
-                                        "环绕音感 最高5.1声道",
-                                    ),
-                                    (
-                                        AudioQualityLevel::JyMaster,
-                                        "超清母带",
-                                        "Master",
-                                        "极致细节 192kHz/24bit",
-                                    ),
-                                ]
-                                .into_iter()
-                                .map(
-                                    |(quality, title, subtitle, detail)| {
-                                        div()
-                                            .id(match quality {
-                                                AudioQualityLevel::Sky => "quality-sky-card",
-                                                _ => "quality-master-card",
-                                            })
-                                            .flex_1()
-                                            .h(px(112.))
-                                            .relative()
-                                            .rounded(px(10.))
-                                            .bg(rgb(0xfff3dc))
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.playback.update(cx, |playback, cx| {
-                                                    playback.set_quality(quality, cx)
-                                                });
-                                            }))
-                                            .child(
-                                                svg()
-                                                    .path(match quality {
-                                                        AudioQualityLevel::Sky => {
-                                                            "icons/音质选项/immersive_audio.svg"
-                                                        }
-                                                        _ => "icons/音质选项/master_audio.svg",
-                                                    })
-                                                    .absolute()
-                                                    .top(px(10.))
-                                                    .left(px(10.))
-                                                    .size(px(32.))
-                                                    .text_color(rgb(0xe8bd77)),
-                                            )
-                                            .child(
-                                                img("icons/VIP/svip.svg")
-                                                    .absolute()
-                                                    .top(px(10.))
-                                                    .right(px(10.))
-                                                    .w(px(33.75))
-                                                    .h(px(13.5)),
-                                            )
-                                            .child(
-                                                div()
-                                                    .absolute()
-                                                    .left(px(10.))
-                                                    .bottom(px(10.))
-                                                    .flex()
-                                                    .flex_col()
-                                                    .child(
-                                                        div()
-                                                            .text_size(px(14.))
-                                                            .line_height(px(17.))
-                                                            .child(title),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .text_size(px(14.))
-                                                            .line_height(px(17.))
-                                                            .child(subtitle),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .pt(px(8.))
-                                                            .text_size(px(11.))
-                                                            .line_height(px(14.))
-                                                            .text_color(
-                                                                colors.muted_foreground.alpha(0.4),
-                                                            )
-                                                            .child(detail),
-                                                    ),
-                                            )
-                                    },
-                                ),
-                            ),
-                    )
-                    .child(
-                        div().flex_1().flex().flex_col().children(
+        // 进出场共用一条 Presence：`should_render()` 在退场期间仍为真，
+        // 弹层会继续挂着直到动画放完才卸载——退场动画能存在全靠这一步。
+        let presence = Presence::new("player-quality-popover-motion", self.quality_open)
+            .transition(Transition::new(QUALITY_POPOVER_MOTION).ease(ease_out_quint()))
+            .sample(window, cx);
+        // 触发按钮：点自己开/关。守卫比较的是**本次渲染时**的开合值——
+        // "点外面"的捕获监听可能已经先把状态关掉了，那时不能再翻回去。
+        let was_open = self.quality_open;
+        let popup = Popup::new(
+            "player-quality-popover",
+            Button::new("player-quality-button")
+                .aria_label("音质选项")
+                .h(px(16.))
+                .px(px(2.))
+                .flex_none()
+                .border_1()
+                .border_color(colors.muted_foreground)
+                .rounded(px(4.))
+                .text_size(px(10.))
+                .text_color(colors.muted_foreground)
+                .hover(|style| {
+                    let hover = icon_hover_color(colors.muted_foreground, colors);
+                    style.text_color(hover).border_color(hover)
+                })
+                .child(quality_label)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| {
+                        if this.quality_open == was_open {
+                            this.set_quality_popover(!was_open, window, cx);
+                        }
+                        cx.stop_propagation();
+                    }),
+                ),
+        )
+        .anchor(Anchor::BottomCenter)
+        .offset(px(12.))
+        // 和原来的 trigger_style 一样：只占自己的位置，不参与拉伸。
+        .flex_none()
+        // 焦点落在弹层上：键盘才收得到 Esc / Enter，鼠标点进来也会自动聚焦。
+        .track_focus(&self.quality_focus)
+        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            match event.keystroke.key.as_str() {
+                "escape" => this.set_quality_popover(false, window, cx),
+                "enter" | "space" => this.toggle_quality_popover(window, cx),
+                _ => {}
+            }
+        }));
+
+        if !presence.should_render() {
+            return popup;
+        }
+        popup.content({
+            let colors = theme_colors;
+            div()
+                .id("player-quality-surface")
+                // 非模态对话框：会抢焦点、Esc 可关，和原生 Popover 给屏幕阅读器的语义一致。
+                .role(Role::Dialog)
+                .w(px(380.))
+                .h(px(480.))
+                .flex()
+                .flex_col()
+                // 表面外观和播放列表面板共用同一套圆角 / 投影。
+                .bg(theme_colors.surface)
+                .rounded(SURFACE_RADIUS)
+                .shadow(vec![surface_shadow(theme_colors)])
+                .text_color(theme_colors.secondary_foreground)
+                // 入场：从下方 6px 浮起并淡入；退场同一条曲线原路收回。
+                .opacity(presence.progress)
+                .top(QUALITY_POPOVER_TRAVEL * (1. - presence.progress))
+                // 点弹层外面关闭。它在捕获阶段触发，鼠标落在弹层内不会到这儿；
+                // 点在触发按钮上时它会先关，按钮那边的守卫再挡住重开。
+                .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                    this.set_quality_popover(false, window, cx);
+                }))
+                .child(
+                    div()
+                        .px_4()
+                        .py(px(10.))
+                        .text_size(px(16.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("当前歌曲音质"),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .gap(px(8.))
+                        .px(px(16.))
+                        .pb(px(10.))
+                        .children(
                             [
                                 (
-                                    AudioQualityLevel::JyEffect,
-                                    "高清臻音 (Spatial Audio)",
-                                    "高频细节还原与清晰沉浸感，96kHz/24bit",
-                                    "臻",
-                                    true,
+                                    AudioQualityLevel::Sky,
+                                    "沉浸环绕声",
+                                    "Surround Audio",
+                                    "环绕音感 最高5.1声道",
                                 ),
                                 (
-                                    AudioQualityLevel::HiRes,
-                                    "高解析度无损 (Hi-Res)",
-                                    "更饱满清晰的高解析度音质，最高192kHz/24bit",
-                                    "H",
-                                    true,
+                                    AudioQualityLevel::JyMaster,
+                                    "超清母带",
+                                    "Master",
+                                    "极致细节 192kHz/24bit",
                                 ),
-                                (
-                                    AudioQualityLevel::Lossless,
-                                    "无损 (SQ)",
-                                    "高保真无损音质，最高48kHz/16bit",
-                                    "SQ",
-                                    true,
-                                ),
-                                (
-                                    AudioQualityLevel::ExHigh,
-                                    "极高 (HQ)",
-                                    "近 CD 音质的细节体验，最高320kbps",
-                                    "HQ",
-                                    false,
-                                ),
-                                (AudioQualityLevel::Standard, "标准", "128kbps", "标", false),
                             ]
                             .into_iter()
                             .map(
-                                |(quality, title, detail, mark, vip)| {
-                                    let selected = selected_quality == quality;
-                                    let muted_icon = matches!(
-                                        quality,
-                                        AudioQualityLevel::ExHigh | AudioQualityLevel::Standard
-                                    );
-                                    let (icon_bg, icon_fg) = if muted_icon {
-                                        (colors.muted, colors.muted_foreground.alpha(0.4))
-                                    } else {
-                                        (rgb(0xfdf0ed).into(), rgb(0xc97f71).into())
-                                    };
+                                |(quality, title, subtitle, detail)| {
                                     div()
                                         .id(match quality {
-                                            AudioQualityLevel::JyEffect => "quality-jyeffect-row",
-                                            AudioQualityLevel::HiRes => "quality-hires-row",
-                                            AudioQualityLevel::Lossless => "quality-lossless-row",
-                                            AudioQualityLevel::ExHigh => "quality-exhigh-row",
-                                            _ => "quality-standard-row",
+                                            AudioQualityLevel::Sky => "quality-sky-card",
+                                            _ => "quality-master-card",
                                         })
-                                        .w_full()
                                         .flex_1()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(9.))
-                                        .px(px(16.))
-                                        // GPUI 的 overflow_hidden() 只做矩形裁剪，底部圆角让背景贴合弹层。
-                                        .when(quality == AudioQualityLevel::Standard, |row| {
-                                            row.rounded_b(px(10.))
-                                        })
-                                        .hover(|row| row.bg(colors.muted))
+                                        .h(px(112.))
+                                        .relative()
+                                        .rounded(px(10.))
+                                        .bg(rgb(0xfff3dc))
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.playback.update(cx, |playback, cx| {
                                                 playback.set_quality(quality, cx)
                                             });
                                         }))
                                         .child(
-                                            div()
+                                            svg()
+                                                .path(match quality {
+                                                    AudioQualityLevel::Sky => {
+                                                        "icons/音质选项/immersive_audio.svg"
+                                                    }
+                                                    _ => "icons/音质选项/master_audio.svg",
+                                                })
+                                                .absolute()
+                                                .top(px(10.))
+                                                .left(px(10.))
                                                 .size(px(32.))
-                                                .flex_none()
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .rounded_full()
-                                                .bg(icon_bg)
-                                                .text_color(icon_fg)
-                                                .text_size(px(11.))
-                                                .child(mark),
+                                                .text_color(rgb(0xe8bd77)),
+                                        )
+                                        .child(
+                                            img("icons/VIP/svip.svg")
+                                                .absolute()
+                                                .top(px(10.))
+                                                .right(px(10.))
+                                                .w(px(33.75))
+                                                .h(px(13.5)),
                                         )
                                         .child(
                                             div()
-                                                .flex_1()
-                                                .min_w_0()
+                                                .absolute()
+                                                .left(px(10.))
+                                                .bottom(px(10.))
                                                 .flex()
                                                 .flex_col()
-                                                .gap(px(8.))
                                                 .child(
                                                     div()
-                                                        .flex()
-                                                        .items_center()
-                                                        .gap(px(4.))
-                                                        .child(
-                                                            div()
-                                                                .text_size(px(14.))
-                                                                .line_height(px(16.))
-                                                                .child(title),
-                                                        )
-                                                        .when(vip, |line| {
-                                                            line.child(
-                                                                img("icons/VIP/vip.svg")
-                                                                    .w(px(30.375))
-                                                                    .h(px(13.5)),
-                                                            )
-                                                        }),
+                                                        .text_size(px(14.))
+                                                        .line_height(px(17.))
+                                                        .child(title),
                                                 )
                                                 .child(
                                                     div()
+                                                        .text_size(px(14.))
+                                                        .line_height(px(17.))
+                                                        .child(subtitle),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .pt(px(8.))
                                                         .text_size(px(11.))
                                                         .line_height(px(14.))
                                                         .text_color(
@@ -591,18 +523,163 @@ impl PlayerBar {
                                                         .child(detail),
                                                 ),
                                         )
-                                        .when(selected, |row| {
-                                            row.child(
-                                                img("icons/音质选项/quality_selected.svg")
-                                                    .size(px(24.))
-                                                    .flex_none(),
-                                            )
-                                        })
                                 },
                             ),
                         ),
-                    )
-            })
+                )
+                .child(
+                    div().flex_1().flex().flex_col().children(
+                        [
+                            (
+                                AudioQualityLevel::JyEffect,
+                                "高清臻音 (Spatial Audio)",
+                                "高频细节还原与清晰沉浸感，96kHz/24bit",
+                                "臻",
+                                true,
+                            ),
+                            (
+                                AudioQualityLevel::HiRes,
+                                "高解析度无损 (Hi-Res)",
+                                "更饱满清晰的高解析度音质，最高192kHz/24bit",
+                                "H",
+                                true,
+                            ),
+                            (
+                                AudioQualityLevel::Lossless,
+                                "无损 (SQ)",
+                                "高保真无损音质，最高48kHz/16bit",
+                                "SQ",
+                                true,
+                            ),
+                            (
+                                AudioQualityLevel::ExHigh,
+                                "极高 (HQ)",
+                                "近 CD 音质的细节体验，最高320kbps",
+                                "HQ",
+                                false,
+                            ),
+                            (AudioQualityLevel::Standard, "标准", "128kbps", "标", false),
+                        ]
+                        .into_iter()
+                        .map(
+                            |(quality, title, detail, mark, vip)| {
+                                let selected = selected_quality == quality;
+                                let muted_icon = matches!(
+                                    quality,
+                                    AudioQualityLevel::ExHigh | AudioQualityLevel::Standard
+                                );
+                                let (icon_bg, icon_fg) = if muted_icon {
+                                    (colors.muted, colors.muted_foreground.alpha(0.4))
+                                } else {
+                                    (rgb(0xfdf0ed).into(), rgb(0xc97f71).into())
+                                };
+                                div()
+                                    .id(match quality {
+                                        AudioQualityLevel::JyEffect => "quality-jyeffect-row",
+                                        AudioQualityLevel::HiRes => "quality-hires-row",
+                                        AudioQualityLevel::Lossless => "quality-lossless-row",
+                                        AudioQualityLevel::ExHigh => "quality-exhigh-row",
+                                        _ => "quality-standard-row",
+                                    })
+                                    .w_full()
+                                    .flex_1()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(9.))
+                                    .px(px(16.))
+                                    // GPUI 的 overflow_hidden() 只做矩形裁剪，底部圆角让背景贴合弹层。
+                                    .when(quality == AudioQualityLevel::Standard, |row| {
+                                        row.rounded_b(px(10.))
+                                    })
+                                    .hover(|row| row.bg(colors.muted))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.playback.update(cx, |playback, cx| {
+                                            playback.set_quality(quality, cx)
+                                        });
+                                    }))
+                                    .child(
+                                        div()
+                                            .size(px(32.))
+                                            .flex_none()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded_full()
+                                            .bg(icon_bg)
+                                            .text_color(icon_fg)
+                                            .text_size(px(11.))
+                                            .child(mark),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(8.))
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap(px(4.))
+                                                    .child(
+                                                        div()
+                                                            .text_size(px(14.))
+                                                            .line_height(px(16.))
+                                                            .child(title),
+                                                    )
+                                                    .when(vip, |line| {
+                                                        line.child(
+                                                            img("icons/VIP/vip.svg")
+                                                                .w(px(30.375))
+                                                                .h(px(13.5)),
+                                                        )
+                                                    }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(11.))
+                                                    .line_height(px(14.))
+                                                    .text_color(
+                                                        colors.muted_foreground.alpha(0.4),
+                                                    )
+                                                    .child(detail),
+                                            ),
+                                    )
+                                    .when(selected, |row| {
+                                        row.child(
+                                            img("icons/音质选项/quality_selected.svg")
+                                                .size(px(24.))
+                                                .flex_none(),
+                                        )
+                                    })
+                            },
+                        ),
+                    ),
+                )
+        })
+    }
+
+    /// 打开 / 关闭音质弹层。打开时把焦点收进弹层（键盘才收得到 Esc），
+    /// 关闭时还回去。
+    fn set_quality_popover(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.quality_open == open {
+            return;
+        }
+        self.quality_open = open;
+        if open {
+            self.quality_previous_focus = window.focused(cx);
+            self.quality_focus.focus(window, cx);
+        } else if self.quality_focus.contains_focused(window, cx) {
+            if let Some(previous) = self.quality_previous_focus.take() {
+                previous.focus(window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn toggle_quality_popover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_quality_popover(!self.quality_open, window, cx);
     }
 }
 
@@ -1036,6 +1113,7 @@ impl Render for PlayerBar {
                                 selected_quality,
                                 quality_label,
                                 colors,
+                                window,
                                 cx,
                             ))
                             .child(

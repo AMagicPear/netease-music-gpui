@@ -1,8 +1,8 @@
 //! 两种浮层（音质弹窗、播放列表面板）共用的表面外观。
 //!
-//! 音质弹窗本身的开合、点击外部关闭、锚点定位和无障碍角色都已交给 gpui-kit 的
-//! `component::Popover`（底下是 `base::Popover` + `base::Popup`），这里只剩下
-//! 本项目的底色/圆角/投影，以及播放列表面板复用的常量。
+//! 音质弹窗的开合、点外面关闭、焦点和进出场动画都由播放栏自己管（见
+//! `player_bar::PlayerBar::quality_popover`），只有锚点定位和延迟绘制借了
+//! `base::Popup`。这里剩下本项目的底色/圆角/投影，以及播放列表面板复用的常量。
 
 use gpui::{BoxShadow, Pixels, px};
 use gpui_kit::base::ColorTokens;
