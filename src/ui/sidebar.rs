@@ -5,6 +5,7 @@ use gpui_kit::base::{Button, ColorTokens, Theme};
 
 use super::assets::thumbnail_url;
 use super::pages::{ContentPage, LIBRARY_PAGES, MAIN_PAGES};
+use super::shell::{HEADER_HEIGHT, HEADER_TOP_INSET};
 use super::theme::IconSize;
 use crate::models::Playlist;
 use crate::state::library::MusicLibrary;
@@ -45,17 +46,15 @@ impl SidebarPage {
 /// 顶部 logo 区域，同时充当窗口拖动手柄。
 fn page_header(colors: ColorTokens) -> impl IntoElement {
     window_drag_area("sidebar-header")
-        .h(px(42.))
+        .h(px(HEADER_HEIGHT))
+        .pt(px(HEADER_TOP_INSET))
         .flex_none()
         .w_full()
         .flex()
         .items_center()
         .gap(px(8.))
-        // 原来的 px(18) + left_1；上下留白保持 Logo 位于 y=10。
         .pl(px(22.))
         .pr(px(14.))
-        .pt(px(10.))
-        .pb(px(8.))
         .child(
             div()
                 .size(px(24.))
@@ -280,7 +279,7 @@ fn playlist_group(
 }
 
 impl Render for SidebarPage {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = Theme::global(cx).tokens.colors;
         let library = self.library.read(cx);
         let (created, subscribed): (Vec<_>, Vec<_>) = library

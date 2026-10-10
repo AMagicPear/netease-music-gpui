@@ -12,7 +12,6 @@ use std::{
 use gpui::prelude::*;
 use gpui::*;
 use gpui_kit::base::{Button, ColorTokens, Theme, Transition, transition};
-use gpui_kit::component::TitleBar;
 
 use crate::playback::PlaybackController;
 use crate::state::library::MusicLibrary;
@@ -24,7 +23,7 @@ use crate::ui::components::{
 use crate::ui::cover_color::{
     Backdrop, CoverColor, CoverGradient, dark_colors, dark_gradient, gradient_layer,
 };
-use crate::ui::shell::{PAGE_HEADER_HEIGHT, WINDOW_HEADER_HEIGHT, hover_icon};
+use crate::ui::shell::{HEADER_HEIGHT, HEADER_TOP_INSET, hover_icon, mini_and_window_buttons};
 use comments::{CommentsView, ScrollBack};
 use lyrics::LyricsView;
 
@@ -264,7 +263,7 @@ impl AlbumLyrics {
         let colors = dark_colors(Theme::global(cx).tokens.colors, gradient.0[1].into());
         let song = self.playback.read(cx).snapshot().current_song.clone();
         let page_height = (f32::from(window.viewport_size().height) - PLAYER_BAR_HEIGHT).max(1.);
-        let height = (page_height - WINDOW_HEADER_HEIGHT - PAGE_HEADER_HEIGHT).max(1.);
+        let height = (page_height - HEADER_HEIGHT).max(1.);
         let reveal = transition(
             "album-lyrics-reveal",
             if self.opened { 1_f32 } else { 0. },
@@ -272,8 +271,8 @@ impl AlbumLyrics {
             window,
             cx,
         );
-        let summary_top = page_height + WINDOW_HEADER_HEIGHT + f32::from(self.scroll.offset().y);
-        let show_comments = summary_top <= WINDOW_HEADER_HEIGHT;
+        let summary_top = page_height + HEADER_TOP_INSET + f32::from(self.scroll.offset().y);
+        let show_comments = summary_top <= HEADER_TOP_INSET;
         let content_height = (height - SONG_CONTENT_TOP_PADDING).max(1.);
         let content_width = (f32::from(window.viewport_size().width) - SONG_CONTENT_PADDING * 2.)
             .min(SONG_CONTENT_MAX_WIDTH)
@@ -557,33 +556,65 @@ impl AlbumLyrics {
             .into_any_element()
     }
 
-    fn render_window_header(&self, frame: &FrameData, cx: &mut Context<Self>) -> AnyElement {
-        TitleBar::new()
-            .on_close_window(|_, window, cx| crate::desktop::close_window(window, cx))
+    /// 收起整页的按钮。
+    ///
+    /// 放在页头左端，和右端那组图标同一行——页头只有一块，所以它不需要再单占一行。
+    fn collapse_button(&self, frame: &FrameData, cx: &mut Context<Self>) -> Button {
+        hover_icon(
+            "close-album-lyrics",
+            "收起专辑歌词页",
+            "icons/unfold.svg",
+            frame.colors,
+        )
+        .ml_0()
+        .cursor_pointer()
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.opened = false;
+            this.lyrics
+                .update(cx, |view, cx| view.set_active(false, cx));
+            this.comments
+                .update(cx, |view, cx| view.configure(false, false, cx));
+            cx.notify();
+        }))
+    }
+
+    /// 页头。整块自带顶部留白（`pt`），所以只有一块：左端收起，右端播放器模式 + 图标组。
+    fn page_header(
+        &self,
+        frame: &FrameData,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        window_drag_area("album-lyrics-header")
             .absolute()
             .top_0()
             .left_0()
-            .h(px(WINDOW_HEADER_HEIGHT))
+            .h(px(HEADER_HEIGHT))
+            .pt(px(HEADER_TOP_INSET))
             .w_full()
-            .border_b_0()
             .bg(transparent_black())
+            .px(px(40.))
+            .flex()
+            .items_center()
+            .child(self.collapse_button(frame, cx))
             .child(
-                hover_icon(
-                    "close-album-lyrics",
-                    "收起专辑歌词页",
-                    "icons/unfold.svg",
-                    frame.colors,
-                )
-                .ml_0()
-                .cursor_pointer()
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.opened = false;
-                    this.lyrics
-                        .update(cx, |view, cx| view.set_active(false, cx));
-                    this.comments
-                        .update(cx, |view, cx| view.configure(false, false, cx));
-                    cx.notify();
-                })),
+                div()
+                    .ml_auto()
+                    .flex()
+                    .items_center()
+                    .when(!frame.show_comments, |group| {
+                        group.child(
+                            div()
+                                .text_color(frame.colors.muted_foreground)
+                                .text_size(px(13.))
+                                .child("播放器模式"),
+                        )
+                    })
+                    .children(mini_and_window_buttons(
+                        "album-header-mini-button",
+                        window,
+                        frame.colors,
+                    )),
             )
             .into_any_element()
     }
@@ -695,7 +726,7 @@ impl Render for AlbumLyrics {
                                 div()
                                     .id("album-lyrics-scroll")
                                     .size_full()
-                                    .pt(px(WINDOW_HEADER_HEIGHT + PAGE_HEADER_HEIGHT))
+                                    .pt(px(HEADER_HEIGHT))
                                     .overflow_y_scroll()
                                     .track_scroll(&self.scroll)
                                     .child(song_page)
@@ -705,7 +736,7 @@ impl Render for AlbumLyrics {
                                             .debug_selector(|| "album-comments-page".into())
                                             .w_full()
                                             .h(px(frame.page_height))
-                                            .pt(px(WINDOW_HEADER_HEIGHT))
+                                            .pt(px(HEADER_TOP_INSET))
                                             .flex()
                                             .flex_col()
                                             .overflow_hidden()
@@ -774,8 +805,7 @@ impl Render for AlbumLyrics {
                                 )
                             }),
                     )
-                    .child(self.render_window_header(&frame, cx))
-                    .child(page_header(&frame)),
+                    .child(self.page_header(&frame, window, cx)),
             )
             .into_any_element()
     }
@@ -812,35 +842,6 @@ fn build_song_page(frame: &FrameData, song_info: AnyElement, vinyl: Option<Div>)
                 .child(artwork(vinyl))
                 .child(song_info),
         )
-        .into_any_element()
-}
-
-fn page_header(frame: &FrameData) -> AnyElement {
-    window_drag_area("album-lyrics-header")
-        .absolute()
-        .top(px(WINDOW_HEADER_HEIGHT))
-        .left_0()
-        .h(px(PAGE_HEADER_HEIGHT))
-        .w_full()
-        .bg(transparent_black())
-        .px(px(40.))
-        .flex()
-        .items_center()
-        .justify_end()
-        .when(!frame.show_comments, |header| {
-            header.child(
-                div()
-                    .text_color(frame.colors.muted_foreground)
-                    .text_size(px(13.))
-                    .child("播放器模式"),
-            )
-        })
-        .child(hover_icon(
-            "album-header-mini-button",
-            "迷你模式",
-            "icons/menu_mini.svg",
-            frame.colors,
-        ))
         .into_any_element()
 }
 

@@ -21,15 +21,15 @@ use crate::models::Song;
 use crate::playback::PlaybackController;
 use crate::state::library::MusicLibrary;
 use crate::ui::assets::{track_cover_image, track_cover_url};
-use crate::ui::shell::{PAGE_HEADER_HEIGHT, WINDOW_HEADER_HEIGHT};
+use crate::ui::shell::HEADER_HEIGHT;
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA};
 
 /// 面板固定宽度。
 const PANEL_WIDTH: Pixels = px(386.);
 /// 面板与上方头部、下方播放栏之间留出的间隔。
 const PANEL_GAP: Pixels = px(12.);
-/// 头部高度；「播放列表」和计数排在这一行里。
-const HEADER_HEIGHT: Pixels = px(58.);
+/// 面板自己的头部高度；「播放列表」和计数排在这一行里。
+const PANEL_HEADER_HEIGHT: Pixels = px(58.);
 /// 每一首歌占的高度。
 const ROW_HEIGHT: Pixels = px(64.);
 /// 头部与每一行的左右留白。面板本身不再额外加 padding。
@@ -156,7 +156,7 @@ impl Render for PlaylistPanel {
         let width = PANEL_WIDTH.min(window.viewport_size().width);
         let offset = -(1. - presence.progress) * f32::from(width);
         let height = (window.viewport_size().height
-            - px(WINDOW_HEADER_HEIGHT + PAGE_HEADER_HEIGHT)
+            - px(HEADER_HEIGHT)
             - px(PLAYER_BAR_HEIGHT)
             - PANEL_GAP * 2.)
             .max(px(0.));
@@ -195,7 +195,7 @@ impl Render for PlaylistPanel {
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| this.set_open(false, cx)))
                 .child(
                     div()
-                        .h(HEADER_HEIGHT.min(height))
+                        .h(PANEL_HEADER_HEIGHT.min(height))
                         .flex_none()
                         .flex()
                         .items_center()

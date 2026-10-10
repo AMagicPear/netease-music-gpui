@@ -17,8 +17,8 @@ use crate::state::account::AccountState;
 use crate::state::library::MusicLibrary;
 use gpui_kit::base::input::{Input, InputState};
 use gpui_kit::base::{Button, ColorTokens, Scrollbar, ScrollbarMode, Theme};
+use gpui_kit::component::Sizable;
 use gpui_kit::component::avatar::Avatar;
-use gpui_kit::component::{Sizable, TitleBar};
 
 const MIN_SIDEBAR_WIDTH: Pixels = px(204.);
 const MAX_SIDEBAR_WIDTH: Pixels = px(627.);
@@ -26,8 +26,9 @@ const MAX_SIDEBAR_WIDTH: Pixels = px(627.);
 const SEARCH_BOX_WIDTH: Pixels = px(258.);
 /// 搜索框的压缩下限
 const SEARCH_BOX_MIN_WIDTH: Pixels = px(40.);
-pub(super) const WINDOW_HEADER_HEIGHT: f32 = 30.;
-pub(super) const PAGE_HEADER_HEIGHT: f32 = 42.;
+/// macOS 顶部给系统红绿灯留白，其余平台的窗口按钮与工具栏同行。
+pub(super) const HEADER_TOP_INSET: f32 = if cfg!(target_os = "macos") { 30. } else { 0. };
+pub(super) const HEADER_HEIGHT: f32 = HEADER_TOP_INSET + 42.;
 
 pub struct MainWindow {
     pub main_content: Entity<MainContent>,
@@ -167,29 +168,12 @@ impl Render for MainWindow {
                         self.main_content.read(cx).playlist_backdrop.clone(),
                     ))
                     .child(
-                        TitleBar::new()
-                            .on_close_window(|_, window, cx| {
-                                crate::desktop::close_window(window, cx)
-                            })
-                            .h(px(WINDOW_HEADER_HEIGHT))
-                            .pl(px(0.))
-                            .border_b_0()
-                            .bg(gpui::transparent_black())
-                            .child(
-                                div()
-                                    .w(self.main_content.read(cx).sidebar_width)
-                                    .h_full()
-                                    .flex_none()
-                                    .bg(colors.foreground.alpha(0.03)),
-                            ),
-                    )
-                    .child(
                         self.main_content.clone().cached(
                             StyleRefinement::default()
                                 .w_full()
-                                .h((window.viewport_size().height
-                                    - px(WINDOW_HEADER_HEIGHT + PLAYER_BAR_HEIGHT))
-                                .max(px(0.)))
+                                // 页头是 MainContent 自己内部的第一行，所以从窗口顶部量起。
+                                .h((window.viewport_size().height - px(PLAYER_BAR_HEIGHT))
+                                    .max(px(0.)))
                                 .flex_shrink(0.),
                         ),
                     )
@@ -313,6 +297,7 @@ impl MainContent {
 /// 搜索框：左边放大镜图标，右边文本输入框，宽度可被压缩
 fn search_box(input: Entity<InputState>, colors: ColorTokens) -> impl IntoElement {
     div()
+        .occlude()
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .h_9()
         .w(SEARCH_BOX_WIDTH)
@@ -354,6 +339,7 @@ pub(super) fn hover_icon(
         .size(IconSize::Small.pixels())
         .ml(px(10.))
         .flex_none()
+        .occlude()
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(
             svg()
@@ -369,110 +355,177 @@ pub(super) fn hover_icon(
         )
 }
 
-fn page_header(
+/// 页头右端那三个窗口按钮：最小化 / 最大化或还原 / 关闭。
+fn window_buttons(window: &Window, colors: ColorTokens) -> [Button; 3] {
+    // 最大化后中间那个换成「向下还原」——官方客户端也是这么切的。
+    let (maximize_icon, maximize_label) = if window.is_maximized() {
+        ("icons/window/restore.svg", "向下还原")
+    } else {
+        ("icons/window/maximize.svg", "最大化")
+    };
+    [
+        hover_icon(
+            "header-minimize-button",
+            "最小化",
+            "icons/window/minimize.svg",
+            colors,
+        )
+        .on_click(|_, window, _| window.minimize_window()),
+        hover_icon(
+            "header-maximize-button",
+            maximize_label,
+            maximize_icon,
+            colors,
+        )
+        .on_click(|_, window, _| window.zoom_window()),
+        hover_icon(
+            "header-close-button",
+            "关闭",
+            "icons/window/close.svg",
+            colors,
+        )
+        .on_click(|_, window, cx| crate::desktop::close_window(window, cx)),
+    ]
+}
+
+/// 主界面和歌词页共用的窗口按钮组。
+pub(super) fn mini_and_window_buttons(
+    mini_id: &'static str,
+    window: &Window,
     colors: ColorTokens,
-    search_input: Entity<InputState>,
+) -> Vec<Button> {
+    let mut buttons = vec![hover_icon(
+        mini_id,
+        "迷你模式",
+        "icons/menu_mini.svg",
+        colors,
+    )];
+    if !cfg!(target_os = "macos") {
+        buttons.extend(window_buttons(window, colors));
+    }
+    buttons
+}
+
+/// 页头右端的头像与昵称菜单。
+fn profile_menu(
     nickname: String,
     avatar_url: String,
     vip_badge: Option<String>,
-) -> impl IntoElement {
-    window_drag_area("page-header")
-        .h(px(PAGE_HEADER_HEIGHT))
+    colors: ColorTokens,
+) -> [AnyElement; 2] {
+    let avatar = div()
+        .id("header-avatar")
+        .ml_auto()
         .flex_none()
-        .w_full()
-        .px(px(40.))
+        .occlude()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(Avatar::new().with_size(px(28.)).flex_none().src(avatar_url))
+        .into_any_element();
+    let menu = div()
+        .id("header-profile-menu")
+        // 把整块（昵称 + VIP + 箭头）声明成一个 group，
+        // 子元素就能用 group_hover 感知「整块是否被悬浮」，而不是各自单独判断。
+        .group("header-profile-menu")
+        .occlude()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .ml(px(4.))
         .flex()
         .items_center()
-        .min_w(px(0.))
+        .gap(px(4.))
+        .text_size(px(13.))
+        // 昵称保持原本设计的 0.7；文字子元素会继承这个色，
+        // 所以这里的 hover 一并让昵称变深到 foreground。
+        .text_color(colors.foreground.alpha(0.7))
+        .hover(|style| style.text_color(colors.foreground))
+        .child(nickname)
+        .when_some(vip_badge, |menu, badge| {
+            menu.child(img(badge).h(px(16.)).flex_none())
+        })
         .child(
-            Button::new("back-button")
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .h_9()
-                .w_7()
+            svg()
+                .path("icons/unfold.svg")
+                .size(px(20.))
                 .flex_none()
-                .border_1()
-                .border_color(colors.border)
-                .rounded_lg()
-                .hover(|style| style.bg(colors.accent))
-                .child(
-                    svg()
-                        .path("icons/backward.svg")
-                        .size(px(11.))
-                        .text_color(colors.secondary_foreground),
-                ),
+                // svg 不继承文字色的 hover，改用 group_hover：
+                // 只要整块被悬浮，箭头也跟着变深到 foreground。
+                .text_color(colors.foreground.alpha(0.6))
+                .group_hover("header-profile-menu", |style| {
+                    style.text_color(colors.foreground)
+                }),
         )
-        .child(search_box(search_input, colors))
-        .child(
-            div()
-                .id("header-avatar")
-                .ml_auto()
-                .flex_none()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(Avatar::new().with_size(px(28.)).flex_none().src(avatar_url)),
-        )
-        .child(
-            div()
-                .id("header-profile-menu")
-                // 把整块（昵称 + VIP + 箭头）声明成一个 group，
-                // 子元素就能用 group_hover 感知「整块是否被悬浮」，而不是各自单独判断。
-                .group("header-profile-menu")
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .ml(px(4.))
-                .flex()
-                .items_center()
-                .gap(px(4.))
-                .text_size(px(13.))
-                // 昵称保持原本设计的 0.7；文字子元素会继承这个色，
-                // 所以这里的 hover 一并让昵称变深到 foreground。
-                .text_color(colors.foreground.alpha(0.7))
-                .hover(|style| style.text_color(colors.foreground))
-                .child(nickname)
-                .when_some(vip_badge, |menu, badge| {
-                    menu.child(img(badge).h(px(16.)).flex_none())
-                })
-                .child(
-                    svg()
-                        .path("icons/unfold.svg")
-                        .size(px(20.))
-                        .flex_none()
-                        // svg 不继承文字色的 hover，改用 group_hover：
-                        // 只要整块被悬浮，箭头也跟着变深到 foreground。
-                        .text_color(colors.foreground.alpha(0.6))
-                        .group_hover("header-profile-menu", |style| {
-                            style.text_color(colors.foreground)
-                        }),
-                ),
-        )
-        .child(hover_icon(
-            "header-message-button",
-            "消息",
-            "icons/message.svg",
-            colors,
-        ))
-        .child(hover_icon(
-            "header-setting-button",
-            "设置",
-            "icons/setting.svg",
-            colors,
-        ))
-        .child(hover_icon(
-            "header-skin-button",
-            "皮肤",
-            "icons/skin.svg",
-            colors,
-        ))
-        .child(hover_icon(
-            "header-mini-button",
-            "迷你模式",
-            "icons/menu_mini.svg",
-            colors,
-        ))
+        .into_any_element();
+    [avatar, menu]
+}
+
+impl MainContent {
+    /// 页头空白处拖动窗口，交互控件阻止拖动。
+    fn page_header(&self, window: &Window, colors: ColorTokens, cx: &App) -> impl IntoElement {
+        let profile = self.user_profile.read(cx);
+        window_drag_area("page-header")
+            .h(px(HEADER_HEIGHT))
+            .pt(px(HEADER_TOP_INSET))
+            .flex_none()
+            .w_full()
+            .px(px(40.))
+            .flex()
+            .items_center()
+            .min_w(px(0.))
+            .child(
+                Button::new("back-button")
+                    .occlude()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .h_9()
+                    .w_7()
+                    .flex_none()
+                    .border_1()
+                    .border_color(colors.border)
+                    .rounded_lg()
+                    .hover(|style| style.bg(colors.accent))
+                    .child(
+                        svg()
+                            .path("icons/backward.svg")
+                            .size(px(11.))
+                            .text_color(colors.secondary_foreground),
+                    ),
+            )
+            .child(search_box(self.search_input.clone(), colors))
+            .children(profile_menu(
+                profile.profile.nickname.clone(),
+                thumbnail_url(&profile.profile.avatar_url, 56),
+                profile.vip.as_ref().and_then(|vip| {
+                    vip.badge_path(time::OffsetDateTime::now_utc().unix_timestamp() as u64 * 1000)
+                }),
+                colors,
+            ))
+            .child(hover_icon(
+                "header-message-button",
+                "消息",
+                "icons/message.svg",
+                colors,
+            ))
+            .child(hover_icon(
+                "header-setting-button",
+                "设置",
+                "icons/setting.svg",
+                colors,
+            ))
+            .child(hover_icon(
+                "header-skin-button",
+                "皮肤",
+                "icons/skin.svg",
+                colors,
+            ))
+            .children(mini_and_window_buttons(
+                "header-mini-button",
+                window,
+                colors,
+            ))
+    }
 }
 
 impl Render for MainContent {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = Theme::global(cx).tokens.colors;
-        let user_profile = self.user_profile.read(cx);
         let active_page = self.active_page;
         let page_scroll = &self.page_scroll[&active_page];
         let page = match active_page {
@@ -508,17 +561,7 @@ impl Render for MainContent {
                     .min_w(px(0.))
                     .flex()
                     .flex_col()
-                    .child(page_header(
-                        colors,
-                        self.search_input.clone(),
-                        user_profile.profile.nickname.clone(),
-                        thumbnail_url(&user_profile.profile.avatar_url, 56),
-                        user_profile.vip.as_ref().and_then(|vip| {
-                            vip.badge_path(
-                                time::OffsetDateTime::now_utc().unix_timestamp() as u64 * 1000,
-                            )
-                        }),
-                    ))
+                    .child(self.page_header(window, colors, cx))
                     // 右侧具体页面
                     .child(
                         div()
@@ -586,7 +629,7 @@ impl MainContent {
                 .absolute()
                 .left(self.sidebar_width)
                 .right_0()
-                .top(px(WINDOW_HEADER_HEIGHT + PAGE_HEADER_HEIGHT))
+                .top(px(HEADER_HEIGHT))
                 .bottom_0()
                 .overflow_hidden()
                 .child(self.playlist_page.read(cx).playing_overlay())

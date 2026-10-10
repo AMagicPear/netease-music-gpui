@@ -3,13 +3,14 @@ use std::{cell::Cell, rc::Rc, time::Duration};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_kit::base::{Button, ColorTokens, Theme, Transition, transition};
+use gpui_kit::component::popover::Popover;
 
 use super::playlist_panel::PlaylistPanel;
 use super::progress_bar::ProgressBar;
 use super::volume_control::VolumeControl;
 use super::{
-    LAYER_PROGRESS_BAR, Popover, RotationClock, Vinyl, artist_label, icon_hover_color,
-    like_icon_path,
+    LAYER_PROGRESS_BAR, RotationClock, SURFACE_RADIUS, Vinyl, artist_label, icon_hover_color,
+    like_icon_path, surface_shadow,
 };
 use crate::api::MusicApi;
 use crate::models::AudioQualityLevel;
@@ -319,12 +320,18 @@ impl PlayerBar {
         quality_label: &'static str,
         colors: ColorTokens,
         cx: &mut Context<Self>,
-    ) -> Popover {
+    ) -> impl IntoElement {
         let theme_colors = Theme::global(cx).tokens.colors;
+        // 弹层的开合、点外面关闭、锚点定位都由 gpui-kit 的 Popover（base::Popup）负责；
+        // appearance(false) 表示表面外观由下面这套样式自己给，与播放列表面板保持一致。
         Popover::new("player-quality-popover")
-            .flex_none()
+            .appearance(false)
             .anchor(Anchor::BottomCenter)
             .offset(px(12.))
+            .trigger_style(StyleRefinement::default().flex_none())
+            .bg(theme_colors.surface)
+            .rounded(SURFACE_RADIUS)
+            .shadow(vec![surface_shadow(theme_colors)])
             .trigger(
                 Button::new("player-quality-button")
                     .aria_label("音质选项")

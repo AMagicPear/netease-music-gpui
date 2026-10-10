@@ -1,7 +1,6 @@
 use crate::models::AudioQualityLevel;
-use gpui::{Hsla, InteractiveElement, MouseButton, div};
-use gpui_kit::base::{ColorTokens, InteractiveElementExt};
-use std::{cell::Cell, rc::Rc};
+use gpui::{Div, Hsla, InteractiveElement, MouseButton, Stateful, WindowControlArea, div};
+use gpui_kit::base::ColorTokens;
 
 mod comment_row;
 mod drag_preview;
@@ -19,8 +18,7 @@ mod volume_control;
 pub use comment_row::comment_row;
 pub use drag_preview::ResizeDragPreview;
 pub use player_bar::{ALBUM_REVEAL_DURATION, OpenAlbumLyrics, PLAYER_BAR_HEIGHT, PlayerBar};
-pub use popover::Popover;
-// 播放列表面板和音质浮窗共用同一份圆角与投影；子模块通过 `super::` 取名。
+// 播放列表面板和音质弹窗共用同一份圆角与投影；子模块通过 `super::` 取名。
 use popover::{SURFACE_RADIUS, surface_shadow};
 pub use spinner::spinner;
 pub use tab_bar::{TabBar, TabChanged, TabItem};
@@ -32,11 +30,12 @@ pub use virtual_table::{
 
 // 浮层都用 deferred 绘制，数字大的画得更晚、盖在上面。
 //
-// 进度条在最底下；通用弹层要盖住进度条；音量气泡最小也最临时，
-// 它从图标上方弹出时会和弹层重叠，所以压在最上面。
+// 进度条在最底下；播放列表面板压在它上面。音量气泡最小也最临时，它从图标上方
+// 弹出时会和弹层重叠，所以压在最上面——音质弹窗由 gpui-kit 的 `base::Popup` 绘制，
+// 占用 `POPUP_PRIORITY`，气泡必须比它更高才盖得住。
 pub(super) const LAYER_PROGRESS_BAR: usize = 1;
 pub(super) const LAYER_POPOVER: usize = 2;
-pub(super) const LAYER_VOLUME_BALLOON: usize = 3;
+pub(super) const LAYER_VOLUME_BALLOON: usize = gpui_kit::base::POPUP_PRIORITY + 1;
 
 /// 暗背景图标只稍微提亮，浅背景仍使用主题前景色。
 pub(super) fn icon_hover_color(mut base: Hsla, colors: ColorTokens) -> Hsla {
@@ -51,39 +50,28 @@ pub(super) fn icon_hover_color(mut base: Hsla, colors: ColorTokens) -> Hsla {
     base
 }
 
-/// 普通内容区的窗口拖拽，不创建 TitleBar 或窗口控制按钮。
-pub(super) fn window_drag_area(id: &'static str) -> gpui::Stateful<gpui::Div> {
-    let should_move = Rc::new(Cell::new(false));
+// 下面是跨页面共用的展示规则。同一个规则只在歌单列表和播放栏各写一遍很容易漂移
+// （比如换了素材只改一处），所以集中在这里，由调用方决定怎么渲染。
+
+/// Windows 用原生命中区；macOS/Linux 在按下时把拖拽交给系统。
+pub(super) fn window_drag_area(id: &'static str) -> Stateful<Div> {
     div()
         .id(id)
-        .on_mouse_down_out({
-            let should_move = should_move.clone();
-            move |_, _, _| should_move.set(false)
-        })
-        .on_mouse_down(MouseButton::Left, {
-            let should_move = should_move.clone();
-            move |_, _, _| should_move.set(true)
-        })
-        .on_mouse_up(MouseButton::Left, {
-            let should_move = should_move.clone();
-            move |_, _, _| should_move.set(false)
-        })
-        .on_mouse_move(move |event, window, _| {
-            if should_move.replace(false) && event.pressed_button == Some(MouseButton::Left) {
-                window.start_window_move();
-            }
-        })
-        .on_double_click(|_, window, _| {
-            if cfg!(target_os = "macos") {
-                window.titlebar_double_click();
-            } else {
-                window.zoom_window();
+        .window_control_area(WindowControlArea::Drag)
+        .on_mouse_down(MouseButton::Left, |event, window, _| {
+            if !cfg!(target_os = "windows") {
+                if event.click_count == 2 {
+                    if cfg!(target_os = "macos") {
+                        window.titlebar_double_click();
+                    } else {
+                        window.zoom_window();
+                    }
+                } else {
+                    window.start_window_move();
+                }
             }
         })
 }
-
-// 下面是跨页面共用的展示规则。同一个规则只在歌单列表和播放栏各写一遍很容易漂移
-// （比如换了素材只改一处），所以集中在这里，由调用方决定怎么渲染。
 
 /// 音质徽章的图标，素材与官方「音质选项」一一对应。
 /// 标准 / 较高 / 极高 共用 HQ，其余档位各有专属素材。
