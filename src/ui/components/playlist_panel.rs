@@ -313,6 +313,18 @@ impl ListDelegate for QueueDelegate {
             },
         ));
 
+        // 行上右键：和行内「更多」图标弹同一份原生菜单，只是换个触发方式。
+        // 位置同样取鼠标点下的窗口坐标，所以两处菜单落点行为一致。
+        let on_right_click: RowCallback<ClickEvent> = Box::new(cx.listener(
+            move |_: &mut ListState<QueueDelegate>,
+                  event: &ClickEvent,
+                  window: &mut Window,
+                  cx: &mut Context<ListState<QueueDelegate>>| {
+                cx.stop_propagation();
+                crate::ui::components::show_song_menu(event.position(), window, cx);
+            },
+        ));
+
         let on_hover: RowCallback<bool> = Box::new(cx.listener(
             move |list: &mut ListState<QueueDelegate>,
                   hovered: &bool,
@@ -341,6 +353,7 @@ impl ListDelegate for QueueDelegate {
             hover_color: colors.muted,
             round_bottom_left: index + 1 == count,
             on_double_click: Some(on_double_click),
+            on_right_click: Some(on_right_click),
             on_hover: Some(on_hover),
             children: row_content(&song, index, state, colors, on_cover_click, on_like_click),
         })
@@ -606,6 +619,8 @@ struct QueueRow {
     /// 免得盖出一个直角（`overflow_hidden` 只做矩形裁剪）。
     round_bottom_left: bool,
     on_double_click: Option<RowCallback<ClickEvent>>,
+    /// 行上右键（非左键的 click）。挂了它就弹「更多」那份菜单，效果和行内图标一致。
+    on_right_click: Option<RowCallback<ClickEvent>>,
     /// 进出本行时回调。悬停状态由委托保存，这里只负责把事件送回去。
     on_hover: Option<RowCallback<bool>>,
     children: Vec<AnyElement>,
@@ -629,6 +644,7 @@ impl RenderOnce for QueueRow {
             hover_color,
             round_bottom_left,
             on_double_click,
+            on_right_click,
             on_hover,
             children,
         } = self;
@@ -649,6 +665,10 @@ impl RenderOnce for QueueRow {
             .when(round_bottom_left, |row| row.rounded_bl(SURFACE_RADIUS))
             .map(|row| match on_double_click {
                 Some(handler) => row.on_double_click(handler),
+                None => row,
+            })
+            .map(|row| match on_right_click {
+                Some(handler) => row.on_aux_click(handler),
                 None => row,
             })
             .map(|row| match on_hover {

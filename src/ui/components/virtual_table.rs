@@ -121,11 +121,15 @@ pub fn virtual_table<V: Render>(
     render_header: impl 'static + Fn(&TableColumn, usize) -> AnyElement,
     on_header_layout: impl 'static + Fn(Vec<Bounds<Pixels>>),
     on_row_hover: impl 'static + Fn(&mut V, u64, bool, &mut Context<V>),
+    // 行上右键（非左键的 click）时回调。只把行 key 和窗口坐标交回调用者：
+    // 组件不知道菜单是什么，由调用者决定在哪弹什么。
+    on_row_aux_click: impl 'static + Fn(&mut V, u64, Point<Pixels>, &mut Window, &mut Context<V>),
     cx: &App,
 ) -> impl IntoElement {
     let colors = Theme::global(cx).tokens.colors;
     // 每一行都要挂一份回调，所以包成 `Rc`：逐行 clone 的是引用，不是闭包本体。
     let on_row_hover = Rc::new(on_row_hover);
+    let on_row_aux_click = Rc::new(on_row_aux_click);
     let header = table_row(
         &columns,
         columns.iter().enumerate().map(|(index, column)| {
@@ -165,6 +169,15 @@ pub fn virtual_table<V: Render>(
                         let on_row_hover = on_row_hover.clone();
                         cx.listener(move |view, hovered: &bool, _, cx| {
                             on_row_hover(view, key, *hovered, cx);
+                        })
+                    })
+                    // 右键挂在整行上而不是某个图标上，行内任何位置都能唤出菜单。
+                    // 用 `on_aux_click`（非左键的 click），和行内「更多」按钮的 `on_click`
+                    // 是同一套按下-抬起判定，只是按键不同。
+                    .on_aux_click({
+                        let on_row_aux_click = on_row_aux_click.clone();
+                        cx.listener(move |view, event: &ClickEvent, window, cx| {
+                            on_row_aux_click(view, key, event.position(), window, cx);
                         })
                     })
                     // hover 不是「把底色压深」，而是把整行托起来：底色换成项目的表面色

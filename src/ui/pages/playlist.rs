@@ -1420,6 +1420,11 @@ impl Render for PlaylistPage {
                         move |columns| layout.set([columns[1], columns[2]])
                     },
                     |this, index, hovered, cx| this.set_hovered_row(index, hovered, cx),
+                    // 行上右键和点「更多」图标是同一个效果：都弹这份原生菜单，
+                    // 位置也都取鼠标点的窗口坐标（「更多」取的是它自己的点击位置）。
+                    |_, _, position, window, cx| {
+                        crate::ui::components::show_song_menu(position, window, cx)
+                    },
                     cx,
                 )
                 .into_any_element();
