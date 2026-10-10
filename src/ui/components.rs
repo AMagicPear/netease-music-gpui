@@ -20,7 +20,9 @@ mod volume_control;
 pub use collect_window::open_collect_window;
 pub use comment_row::comment_row;
 pub use drag_preview::ResizeDragPreview;
-pub use player_bar::{ALBUM_REVEAL_DURATION, OpenAlbumLyrics, PLAYER_BAR_HEIGHT, PlayerBar};
+pub use player_bar::{
+    ALBUM_REVEAL_DURATION, CloseAlbumLyrics, OpenAlbumLyrics, PLAYER_BAR_HEIGHT, PlayerBar,
+};
 pub use song_menu::show_song_menu;
 // 播放列表面板和音质弹窗共用同一份圆角与投影；子模块通过 `super::` 取名。
 use popover::{SURFACE_RADIUS, surface_shadow};

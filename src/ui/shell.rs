@@ -5,8 +5,8 @@ use gpui::*;
 
 use super::assets::{CoverPrefetch, thumbnail_url, track_cover_url};
 use super::components::{
-    OpenAlbumLyrics, PLAYER_BAR_HEIGHT, PlayerBar, ResizeDragPreview, icon_hover_color,
-    window_drag_area,
+    CloseAlbumLyrics, OpenAlbumLyrics, PLAYER_BAR_HEIGHT, PlayerBar, ResizeDragPreview,
+    icon_hover_color, window_drag_area,
 };
 use super::cover_color::{Backdrop, CoverColor, CoverGradient, gradient_layer};
 use super::pages::{ContentPage, album_lyrics::AlbumLyrics, playlist::PlaylistPage};
@@ -35,6 +35,7 @@ pub struct MainWindow {
     pub player_bar: Entity<PlayerBar>,
     album_lyrics: Entity<AlbumLyrics>,
     _album_subscription: Subscription,
+    _album_close_subscription: Subscription,
     _lyrics_subscription: Subscription,
     _playback_subscription: Subscription,
     _background_subscriptions: Vec<Subscription>,
@@ -60,6 +61,10 @@ impl MainWindow {
         let album_subscription = cx.subscribe(&player_bar, |this, _, _: &OpenAlbumLyrics, cx| {
             this.album_lyrics.update(cx, |page, cx| page.open(cx));
         });
+        let album_close_subscription =
+            cx.subscribe(&player_bar, |this, _, _: &CloseAlbumLyrics, cx| {
+                this.album_lyrics.update(cx, |page, cx| page.close(cx));
+            });
         let lyrics_subscription = cx.observe(&album_lyrics, |this, lyrics, cx| {
             let expanded = lyrics.read(cx).is_open();
             this.player_bar.update(cx, |player, cx| {
@@ -76,6 +81,7 @@ impl MainWindow {
             player_bar,
             album_lyrics,
             _album_subscription: album_subscription,
+            _album_close_subscription: album_close_subscription,
             _lyrics_subscription: lyrics_subscription,
             _playback_subscription: playback_subscription,
             _background_subscriptions: background_subscriptions,

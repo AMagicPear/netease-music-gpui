@@ -68,6 +68,12 @@ pub struct OpenAlbumLyrics;
 
 impl EventEmitter<OpenAlbumLyrics> for PlayerBar {}
 
+/// 请求收起专辑歌词页。封面和歌曲标题都指向同一页：封面收起时已滑出屏幕，
+/// 只有歌曲标题常驻可见，所以由它在展开状态下发出这个事件来回切。
+pub struct CloseAlbumLyrics;
+
+impl EventEmitter<CloseAlbumLyrics> for PlayerBar {}
+
 impl PlayerBar {
     pub fn new(
         playback: Entity<PlaybackController>,
@@ -904,12 +910,24 @@ impl Render for PlayerBar {
                                         div()
                                             .id("player-song-title")
                                             .cursor_pointer()
+                                            // 命中区贴合歌名本身：列布局默认把子项拉到整列宽，
+                                            // 歌名比歌手短时右侧空白也会被算进点击区。`self_start`
+                                            // 取消拉伸让宽度收缩到文字，`max_w_full` 再把上限卡在
+                                            // 本列宽度内，歌名过长时仍能省略号截断而不是溢出。
+                                            .self_start()
+                                            .max_w_full()
                                             .text_color(colors.foreground)
                                             .text_size(px(16.))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .truncate()
-                                            .on_click(cx.listener(|_, _, _, cx| {
-                                                cx.emit(OpenAlbumLyrics);
+                                            // 标题常驻播放栏，展开状态下点它应该是收起：
+                                            // 用当前展开状态决定发哪个事件，和页头收起按钮殊途同归。
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                if this.album_expanded {
+                                                    cx.emit(CloseAlbumLyrics);
+                                                } else {
+                                                    cx.emit(OpenAlbumLyrics);
+                                                }
                                             }))
                                             .child(title),
                                     )

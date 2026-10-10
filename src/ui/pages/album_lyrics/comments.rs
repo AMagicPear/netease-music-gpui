@@ -8,11 +8,8 @@ use crate::ui::components::{comment_row, spinner};
 use crate::ui::cover_color::{Backdrop, dark_colors, dark_gradient};
 use crate::ui::theme::DOLPHIN_FAMILY;
 
-pub(super) struct ScrollBack;
-
 pub(super) struct CommentsView {
     backdrop: Backdrop,
-    outer: ScrollHandle,
     scroll: ScrollHandle,
     song_id: Option<u64>,
     generation: u64,
@@ -29,13 +26,10 @@ pub(super) struct CommentsView {
     layout_pending: bool,
 }
 
-impl EventEmitter<ScrollBack> for CommentsView {}
-
 impl CommentsView {
-    pub(super) fn new(outer: ScrollHandle, backdrop: Backdrop) -> Self {
+    pub(super) fn new(backdrop: Backdrop) -> Self {
         Self {
             backdrop,
-            outer,
             scroll: ScrollHandle::default(),
             song_id: None,
             generation: 0,
@@ -223,16 +217,17 @@ impl Render for CommentsView {
                     .overflow_hidden()
                     .when(scrollable, |comments| comments.overflow_y_scroll())
                     .track_scroll(&self.scroll)
-                    .on_scroll_wheel(cx.listener(|this, _, _, cx| {
-                        if this.enabled && this.show_comments && !this.collapsed {
-                            // 原生滚动先更新内层，越过顶部的剩余位移才交回外层。
-                            let remainder = this.scroll.offset().y.max(px(0.));
-                            if remainder > px(0.) {
-                                this.scroll.set_offset(point(px(0.), px(0.)));
-                                this.outer
-                                    .set_offset(this.outer.offset() + point(px(0.), remainder));
-                                cx.emit(ScrollBack);
-                            }
+                    .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
+                        // 不可滚的时候什么都不做，让事件冒泡给页面。
+                        if !(this.enabled && this.show_comments && !this.collapsed) {
+                            return;
+                        }
+                        // 列表自己吃得下这段位移就自己滚（原生滚动随后会执行）；
+                        // 吃不下（到顶还要往上、到底还要往下）就让事件冒泡，
+                        // 由页面决定要不要翻页——不再往外层塞剩余位移。
+                        let delta = event.delta.pixel_delta(window.line_height()).y;
+                        let to = this.scroll.offset().y + delta;
+                        if to <= px(0.) && to >= -this.scroll.max_offset().y {
                             cx.stop_propagation();
                         }
                     }))
