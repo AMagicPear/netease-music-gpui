@@ -1,11 +1,12 @@
 use gpui::prelude::*;
 use gpui::*;
-use gpui_kit::base::{Button, Scrollbar, ScrollbarMode, Theme};
+use gpui_kit::base::{Button, Scrollbar, ScrollbarMode, TextSelectionLayer, Theme};
 
 use crate::api::MusicApi;
 use crate::models::SongComment;
 use crate::ui::components::{comment_row, spinner};
 use crate::ui::cover_color::{Backdrop, dark_colors, dark_gradient};
+use crate::ui::theme::DOLPHIN_FAMILY;
 
 pub(super) struct ScrollBack;
 
@@ -213,6 +214,7 @@ impl Render for CommentsView {
         div()
             .size_full()
             .relative()
+            .child(TextSelectionLayer)
             .child(
                 div()
                     .id("album-comments-region")
@@ -242,13 +244,24 @@ impl Render for CommentsView {
                             .debug_selector(|| "album-comments-heading".into())
                             .flex()
                             .items_center()
-                            .gap_1()
+                            .items_start()
                             .mb_4()
                             .text_color(white())
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_size(px(18.))
-                            .child("全部评论")
-                            .child(div().text_size(px(12.)).child(self.total.to_string())),
+                            .child(
+                                div()
+                                    .text_size(px(16.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("全部评论"),
+                            )
+                            .child(
+                                div()
+                                    .ml(px(1.))
+                                    .text_size(px(13.))
+                                    .font_weight(FontWeight::BOLD)
+                                    .font_family(DOLPHIN_FAMILY)
+                                    .child(self.total.to_string()),
+                            ),
                     )
                     .child(list),
             )
