@@ -468,15 +468,19 @@ impl PlaylistPage {
             .gap(px(12.))
             .child(
                 play_all_button(colors, compact).on_click(cx.listener(|this, _, _, cx| {
-                    let id = this
-                        .detail
-                        .read(cx)
-                        .songs
-                        .get(*this.display_order.first().unwrap_or(&0))
-                        .map(|song| song.id);
-                    if let Some(id) = id {
-                        this.select_song(id, cx);
-                    }
+                    let detail = this.detail.read(cx);
+                    let Some(playlist_id) = detail.playlist.as_ref().map(|playlist| playlist.id)
+                    else {
+                        return;
+                    };
+                    let songs = this
+                        .display_order
+                        .iter()
+                        .map(|&index| detail.songs[index].clone())
+                        .collect();
+                    this.playback.update(cx, |playback, cx| {
+                        playback.play_list_from_start(playlist_id, songs, cx);
+                    });
                 })),
             )
             // 下载：宽度自适应，比 muted 更浅的底 + 比 muted 更浅的描边，

@@ -272,6 +272,19 @@ impl PlaybackController {
         }
     }
 
+    /// 播放整张歌单；随机模式先洗牌，再从洗牌后的第一首开始。
+    pub fn play_list_from_start(&mut self, source: u64, songs: Vec<Song>, cx: &mut Context<Self>) {
+        self.set_list(Some(source), songs, None);
+        self.apply_mode_to_list(self.state.mode);
+        let Some(song) = self.queue.first().cloned() else {
+            cx.notify();
+            return;
+        };
+        self.queue_cursor = Some(0);
+        self.queue_revision = self.queue_revision.wrapping_add(1);
+        self.select_song(song, cx);
+    }
+
     /// 换列表并把游标指到 `song_id`；不做任何其他判断，方便离线构造与测试。
     fn set_list(
         &mut self,
