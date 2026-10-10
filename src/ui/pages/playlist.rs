@@ -617,6 +617,140 @@ impl PlaylistPage {
             )
     }
 
+    fn playlist_metadata(&self, colors: ColorTokens, cx: &Context<Self>) -> Div {
+        let detail = self.detail.read(cx);
+        let playlist = detail.playlist.as_ref();
+        let cover_url = self.cover_url(cx);
+        let play_count = playlist.map(|playlist| playlist.play_count);
+        let created_date = playlist.and_then(|playlist| {
+            time::OffsetDateTime::from_unix_timestamp(playlist.create_time / 1000)
+                .ok()
+                .map(|date| {
+                    format!(
+                        "{}-{:02}-{:02}创建",
+                        date.year(),
+                        u8::from(date.month()),
+                        date.day()
+                    )
+                })
+        });
+        let description = playlist.and_then(Playlist::description).map(one_line);
+        let tags = playlist.map(Playlist::tags).unwrap_or_default();
+        let cover = div()
+            .size(px(170.))
+            .flex_none()
+            .relative()
+            .when_some(cover_url, |cover, url| {
+                cover
+                    .child(
+                        img(url)
+                            .size_full()
+                            .object_fit(ObjectFit::Cover)
+                            .rounded(px(8.)),
+                    )
+                    // 在封面内部从顶部向下渐淡，播放量放在遮罩上方。
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .rounded(px(8.))
+                            .bg(linear_gradient(
+                                180.,
+                                linear_color_stop(black().alpha(0.2), 0.),
+                                linear_color_stop(black().alpha(0.), 0.35),
+                            )),
+                    )
+            })
+            .when_some(play_count, |cover, count| {
+                cover.child(
+                    div()
+                        .absolute()
+                        .top_1()
+                        .right_2()
+                        .flex()
+                        .items_center()
+                        .text_color(white())
+                        .text_size(px(15.))
+                        .font_family(DOLPHIN_FAMILY)
+                        .child(
+                            svg()
+                                .path("icons/headphone.svg")
+                                .size(px(15.))
+                                .text_color(white()),
+                        )
+                        .child(play_count_label(count)),
+                )
+            });
+        let author = div()
+            .flex()
+            .min_w(px(0.))
+            .items_center()
+            .when_some(playlist, |author, playlist| {
+                author
+                    .child(
+                        Avatar::new()
+                            .with_size(px(26.))
+                            .flex_none()
+                            .src(thumbnail_url(&playlist.creator.avatar_url, 52)),
+                    )
+                    .child(
+                        div()
+                            .ml(px(6.))
+                            .min_w(px(0.))
+                            .truncate()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(colors.secondary_foreground)
+                            .child(playlist.creator.nickname.clone()),
+                    )
+            })
+            .when(!tags.is_empty(), |author| {
+                author.child(tag_row(tags, colors))
+            })
+            .when_some(created_date, |row, date| {
+                row.child(
+                    div()
+                        .ml(px(12.))
+                        .flex_none()
+                        .text_size(px(12.))
+                        .text_color(colors.muted_foreground)
+                        .font_weight(FontWeight::LIGHT)
+                        .child(date),
+                )
+            });
+        div().flex().gap_6().child(cover).child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w(px(0.))
+                .justify_between()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .min_w(px(0.))
+                        // 三行共用一个间距；其余留白交给 justify_between。
+                        .gap(px(6.))
+                        .child(self.playlist_title(cx))
+                        // 简介单行截断，没有就整行不出现。
+                        .when_some(description, |column, text| {
+                            column.child(
+                                div()
+                                    .min_w(px(0.))
+                                    .truncate()
+                                    .text_size(px(13.))
+                                    .font_weight(SECONDARY_FONT_WEIGHT)
+                                    .text_color(colors.muted_foreground)
+                                    .child(text),
+                            )
+                        })
+                        .child(author),
+                )
+                .child(self.action_buttons(false, cx)),
+        )
+    }
+
     fn toggle_sort(&mut self, column: SongSort, cx: &mut Context<Self>) {
         self.sort = next_sort(self.sort, column);
         let songs = &self.detail.read(cx).songs;
@@ -728,6 +862,92 @@ impl PlaylistPage {
         }
     }
 
+    fn song_title_cell(
+        &self,
+        song: &Song,
+        display: &SongDisplay,
+        is_current_song: bool,
+        colors: ColorTokens,
+    ) -> AnyElement {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .min_w(px(0.))
+            .child(
+                div()
+                    .size(px(36.))
+                    .flex_none()
+                    .rounded(px(4.))
+                    .overflow_hidden()
+                    .bg(colors.muted)
+                    .when_some(display.cover.clone(), |cover, source| {
+                        // GPUI 的 overflow_hidden 按矩形裁剪，圆角需要直接设置在图片上。
+                        cover.child(
+                            img(crate::ui::assets::track_cover_image(source))
+                                .size_full()
+                                .rounded(px(4.))
+                                .object_fit(ObjectFit::Cover),
+                        )
+                    }),
+            )
+            .child(
+                // 文字保持 flex_1 + min_w(0)，空间不足时截断文字，不改变列宽。
+                div()
+                    .min_w(px(0.))
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .min_w(px(0.))
+                            .flex_1()
+                            // 标题和副标题共用 StyledText，截断时只有一个省略号。
+                            .child(
+                                div()
+                                    .text_size(px(14.))
+                                    .text_color(if is_current_song {
+                                        colors.primary
+                                    } else {
+                                        colors.foreground
+                                    })
+                                    .truncate()
+                                    .child(title_with_subtitle(display, colors)),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(4.))
+                                    .min_w(px(0.))
+                                    // img 保留徽章原色并按比例定宽；flex_none 让空间不足时截断歌手名。
+                                    .when_some(song.best_quality_level(), |row, level| {
+                                        row.child(
+                                            img(quality_badge_path(level)).h(px(13.)).flex_none(),
+                                        )
+                                    })
+                                    .child(
+                                        div()
+                                            .min_w(px(0.))
+                                            .truncate()
+                                            .font_weight(SECONDARY_FONT_WEIGHT)
+                                            .text_color(if is_current_song {
+                                                colors.primary
+                                            } else {
+                                                colors.muted_foreground
+                                            })
+                                            .child(artist_label(song, colors)),
+                                    ),
+                            ),
+                    )
+                    // 隐形元素仍占宽度且可点击，因此只在 hover 时挂载操作图标。
+                    .when(self.hovered_row == Some(song.id), |title| {
+                        title.child(row_actions(song.id, colors))
+                    }),
+            )
+            .into_any_element()
+    }
+
     fn song_cells(&mut self, index: usize, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let colors = Theme::global(cx).tokens.colors;
         let library = self.library.read(cx);
@@ -819,89 +1039,7 @@ impl PlaylistPage {
                     .child(format!("{:02}", index + 1))
                     .into_any_element()
             },
-            div()
-                .flex()
-                .items_center()
-                .gap(px(10.))
-                .min_w(px(0.))
-                .child(
-                    div()
-                        .size(px(36.))
-                        .flex_none()
-                        .rounded(px(4.))
-                        .overflow_hidden()
-                        .bg(colors.muted)
-                        // picUrl 可以直接使用 API 返回的远程地址。
-                        .when_some(display.cover.clone(), |cover, source| {
-                            // GPUI 的 overflow_hidden 按矩形裁剪，圆角需要直接设置在图片上。
-                            cover.child(
-                                img(crate::ui::assets::track_cover_image(source))
-                                    .size_full()
-                                    .rounded(px(4.))
-                                    .object_fit(ObjectFit::Cover),
-                            )
-                        }),
-                )
-                .child(
-                    // 标题这一格横向分成两块：左边是两行文字，右边是 hover 时才出现的操作图标。
-                    // 文字那块保持 `flex_1 + min_w(0)`，所以宽度不够时先截断文字、列宽不变。
-                    div()
-                        .min_w(px(0.))
-                        .flex_1()
-                        .flex()
-                        .items_center()
-                        .child(
-                            div()
-                                .min_w(px(0.))
-                                .flex_1()
-                                // 标题行：标题和副标题是同一行文字（见 title_with_subtitle），
-                                // 所以窄了只会出现一个省略号。
-                                .child(
-                                    div()
-                                        .text_size(px(14.))
-                                        .text_color(if is_current_song {
-                                            colors.primary
-                                        } else {
-                                            colors.foreground
-                                        })
-                                        .truncate()
-                                        .child(title_with_subtitle(display, colors)),
-                                )
-                                .child(
-                                    // 歌手/制作人：音质徽章 + 名字。名字不写字号，继承行内的 ROW_TEXT_SIZE。
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(4.))
-                                        .min_w(px(0.))
-                                        // 徽章用 img() 才保得住原始配色；宽度由 img() 按图片比例自动定，
-                                        // flex_none 是为了让它别被压缩（空间不够时该截断的是歌手名）。
-                                        .when_some(song.best_quality_level(), |row, level| {
-                                            row.child(
-                                                img(quality_badge_path(level))
-                                                    .h(px(13.))
-                                                    .flex_none(),
-                                            )
-                                        })
-                                        .child(
-                                            div()
-                                                .min_w(px(0.))
-                                                .truncate()
-                                                .font_weight(SECONDARY_FONT_WEIGHT)
-                                                .text_color(if is_current_song {
-                                                    colors.primary
-                                                } else {
-                                                    colors.muted_foreground
-                                                })
-                                                .child(artist_label(song, colors)),
-                                        ),
-                                ),
-                        )
-                        // 只在悬浮这一行时才把图标挂上。这和"渲染出来但隐形"是两回事：
-                        // 隐形元素照样占宽度、也照样能被点到，会凭空吃掉标题宽度和一片点击热区。
-                        .when(hovered, |title| title.child(row_actions(song_id, colors))),
-                )
-                .into_any_element(),
+            self.song_title_cell(song, display, is_current_song, colors),
             div()
                 .truncate()
                 .font_weight(SECONDARY_FONT_WEIGHT)
@@ -1107,23 +1245,6 @@ impl Render for PlaylistPage {
         ][self.tabs.read(cx).selected_index()];
         let library = self.library.read(cx);
         let detail = self.detail.read(cx);
-        let playlist = detail.playlist.as_ref();
-        let cover_url = self.cover_url(cx);
-        let play_count = playlist.map(|playlist| playlist.play_count);
-        let created_date = playlist.and_then(|playlist| {
-            time::OffsetDateTime::from_unix_timestamp(playlist.create_time / 1000)
-                .ok()
-                .map(|date| {
-                    format!(
-                        "{}-{:02}-{:02}创建",
-                        date.year(),
-                        u8::from(date.month()),
-                        date.day()
-                    )
-                })
-        });
-        let description = playlist.and_then(Playlist::description).map(one_line);
-        let tags = playlist.map(Playlist::tags).unwrap_or_default();
         let error = detail
             .error
             .as_ref()
@@ -1272,130 +1393,10 @@ impl Render for PlaylistPage {
                 .into_any_element(),
         };
 
-        let cover = div()
-            .size(px(170.))
-            .flex_none()
-            .relative()
-            .when_some(cover_url, |cover, url| {
-                cover
-                    .child(
-                        img(url)
-                            .size_full()
-                            .object_fit(ObjectFit::Cover)
-                            .rounded(px(8.)),
-                    )
-                    // 在封面内部从顶部向下渐淡，播放量放在遮罩上方。
-                    .child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .rounded(px(8.))
-                            .bg(linear_gradient(
-                                180.,
-                                linear_color_stop(black().alpha(0.2), 0.),
-                                linear_color_stop(black().alpha(0.), 0.35),
-                            )),
-                    )
-            })
-            .when_some(play_count, |cover, count| {
-                cover.child(
-                    div()
-                        .absolute()
-                        .top_1()
-                        .right_2()
-                        .flex()
-                        .items_center()
-                        .text_color(white())
-                        .text_size(px(15.))
-                        .font_family(DOLPHIN_FAMILY)
-                        .child(
-                            svg()
-                                .path("icons/headphone.svg")
-                                .size(px(15.))
-                                .text_color(white()),
-                        )
-                        .child(play_count_label(count)),
-                )
-            });
-
-        let title = self.playlist_title(cx);
-
-        let author = div()
-            .flex()
-            .min_w(px(0.))
-            .items_center()
-            .when_some(playlist, |author, playlist| {
-                author
-                    .child(
-                        Avatar::new()
-                            .with_size(px(26.))
-                            .flex_none()
-                            .src(thumbnail_url(&playlist.creator.avatar_url, 52)),
-                    )
-                    .child(
-                        div()
-                            .ml(px(6.))
-                            .min_w(px(0.))
-                            .truncate()
-                            .text_size(px(13.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(colors.secondary_foreground)
-                            .child(playlist.creator.nickname.clone()),
-                    )
-            })
-            .when(!tags.is_empty(), |author| {
-                author.child(tag_row(tags, colors))
-            })
-            .when_some(created_date, |row, date| {
-                row.child(
-                    div()
-                        .ml(px(12.))
-                        .flex_none()
-                        .text_size(px(12.))
-                        .text_color(colors.muted_foreground)
-                        .font_weight(FontWeight::LIGHT)
-                        .child(date),
-                )
-            });
-
         let measured_size = self.measured_size.clone();
         div()
             .relative()
-            // 封面标题区域
-            .child(
-                div().flex().gap_6().child(cover).child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .justify_between()
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .min_w(px(0.))
-                                // 三行共用一个间距；其余留白交给 justify_between。
-                                .gap(px(6.))
-                                .child(title)
-                                // 简介插在标题和作者之间：单行截断，没有就整行不出现。
-                                .when_some(description, |column, text| {
-                                    column.child(
-                                        div()
-                                            .min_w(px(0.))
-                                            .truncate()
-                                            .text_size(px(13.))
-                                            .font_weight(SECONDARY_FONT_WEIGHT)
-                                            .text_color(colors.muted_foreground)
-                                            .child(text),
-                                    )
-                                })
-                                .child(author),
-                        )
-                        // 操作按钮组：播放全部 / 下载 / 更多
-                        .child(self.action_buttons(false, cx)),
-                ),
-            )
+            .child(self.playlist_metadata(colors, cx))
             // 控件区域
             .child(div().mt(px(28.)).child(self.tabs.clone()))
             // 具体内容区域
@@ -1421,67 +1422,7 @@ impl Render for PlaylistPage {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ALBUM_SHARE_MAX, ALBUM_SHARE_MIN, Song, SongDisplay, SongSort, next_sort, one_line,
-        play_count_label, resized_album_share, song_order,
-    };
-
-    #[test]
-    fn indicator_bars_keep_fixed_layout_and_bottom_alignment() {
-        use super::*;
-        let bounds = Bounds::new(point(px(10.), px(20.)), size(px(12.), px(15.)));
-        for progress in [0., 0.25, 0.5, 0.75, 1.] {
-            for (index, bar) in indicator_bars(bounds, progress).into_iter().enumerate() {
-                assert_eq!(bar.left(), bounds.left() + px(index as f32 * 5.));
-                assert_eq!(bar.size.width, px(2.));
-                assert_eq!(bar.bottom(), bounds.bottom());
-                assert!(bar.size.height >= px(2.) && bar.size.height <= px(15.));
-            }
-        }
-    }
-
-    #[test]
-    fn cached_song_display_preserves_subtitle_and_thumbnail() {
-        let mut song = Song {
-            name: "歌曲".into(),
-            tns: vec!["翻译".into()],
-            alia: vec!["别名".into()],
-            ..Default::default()
-        };
-        song.al.pic_url = Some("http://p1.music.126.net/cover.jpg".into());
-        let display = SongDisplay::new(&song);
-        assert_eq!(display.title.as_ref(), "歌曲（翻译）");
-        assert_eq!(&display.title[display.subtitle], "（翻译）");
-        assert_eq!(display.album.as_ref(), "未知专辑");
-        assert_eq!(display.duration.as_ref(), "00:00");
-        let Some(gpui::ImageSource::Resource(gpui::Resource::Uri(uri))) = display.cover else {
-            panic!("remote cover must stay a URI resource");
-        };
-        assert_eq!(
-            uri.as_ref(),
-            "https://p1.music.126.net/cover.jpg?param=72y72"
-        );
-        song.tns.clear();
-        assert_eq!(SongDisplay::new(&song).title.as_ref(), "歌曲（别名）");
-        song.alia.clear();
-        assert!(SongDisplay::new(&song).subtitle.is_empty());
-    }
-
-    #[test]
-    fn play_count_switches_to_wan_at_one_hundred_thousand() {
-        assert_eq!(play_count_label(0), "0");
-        assert_eq!(play_count_label(99_999), "99999");
-        assert_eq!(play_count_label(100_000), "10万");
-        assert_eq!(play_count_label(812_568), "81.2万");
-        assert_eq!(play_count_label(86_630_448), "8663万");
-    }
-
-    #[test]
-    fn description_folds_to_a_single_line() {
-        assert_eq!(one_line("华语\n流行  "), "华语 流行");
-        assert_eq!(one_line("  只有一行  "), "只有一行");
-        assert_eq!(one_line(""), "");
-    }
+    use super::{Song, SongSort, next_sort, song_order};
 
     #[test]
     fn sorting_keeps_source_order_and_returns_to_default() {
@@ -1506,15 +1447,5 @@ mod tests {
             assert!(sort.is_some());
         }
         assert!(next_sort(sort, SongSort::Title).is_none());
-    }
-
-    #[test]
-    fn resize_preserves_ratio_and_bounds() {
-        let share = resized_album_share(0.35, 50., 500.);
-        assert!((share - 0.25).abs() < 0.00001);
-        assert_eq!(resized_album_share(share, 0., 1000.), share);
-        assert_eq!(resized_album_share(share, 10000., 500.), ALBUM_SHARE_MIN);
-        assert_eq!(resized_album_share(share, -10000., 500.), ALBUM_SHARE_MAX);
-        assert_eq!(resized_album_share(share, 50., 0.), share);
     }
 }

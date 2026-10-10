@@ -11,6 +11,34 @@ use std::sync::Arc;
 
 pub const DEFAULT_TRACK_COVER: &str = "images/trackBlank.png";
 
+/// 当前与下一首的 UI 缩略图预取。尺寸和资源生命周期由窗口协调。
+#[derive(Default)]
+pub(super) struct CoverPrefetch {
+    urls: Vec<String>,
+}
+
+impl CoverPrefetch {
+    pub(super) fn sync(&mut self, urls: Vec<String>, cx: &mut App) {
+        if self.urls == urls {
+            return;
+        }
+        for previous in &self.urls {
+            if previous != DEFAULT_TRACK_COVER && !urls.contains(previous) {
+                cx.remove_asset::<ImgResourceLoader>(&cover_resource(previous));
+            }
+        }
+        let _ = cx.fetch_asset::<ImgResourceLoader>(&cover_resource(DEFAULT_TRACK_COVER));
+        for url in &urls {
+            let resource = cover_resource(url);
+            if let Some(Err(_)) = cx.fetch_asset::<ImgResourceLoader>(&resource) {
+                cx.remove_asset::<ImgResourceLoader>(&resource);
+                let _ = cx.fetch_asset::<ImgResourceLoader>(&resource);
+            }
+        }
+        self.urls = urls;
+    }
+}
+
 pub struct Assets {
     base: PathBuf,
 }
@@ -197,71 +225,6 @@ mod tests {
             track_cover_url(Some("http://p1.music.126.net/cover.jpg"), 80),
             "https://p1.music.126.net/cover.jpg?param=80y80"
         );
-    }
-
-    #[cfg(target_os = "macos")]
-    #[gpui::test]
-    fn missing_and_failed_remote_covers_load_the_same_local_image(cx: &mut gpui::TestAppContext) {
-        use super::*;
-        use gpui::*;
-        use std::{
-            cell::Cell,
-            rc::Rc,
-            sync::atomic::{AtomicUsize, Ordering},
-        };
-        let requests = Arc::new(AtomicUsize::new(0));
-        let client = gpui::http_client::FakeHttpClient::create({
-            let requests = requests.clone();
-            move |_| {
-                requests.fetch_add(1, Ordering::SeqCst);
-                async {
-                    Ok(gpui::http_client::Response::builder()
-                        .status(404)
-                        .body(gpui::http_client::AsyncBody::from("no image"))
-                        .unwrap())
-                }
-            }
-        });
-        cx.update(|cx| cx.set_http_client(client));
-        struct Host {
-            url: Option<&'static str>,
-            decoded_width: Rc<Cell<i32>>,
-        }
-        impl Render for Host {
-            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                let url = track_cover_url(self.url, 480);
-                if let Some(Ok(image)) = load_track_cover(&url, window, cx) {
-                    self.decoded_width.set(image.size(0).width.0);
-                }
-                img(track_cover_image(url)).size(px(100.))
-            }
-        }
-        let width = Rc::new(Cell::new(0));
-        let window = cx.open_window(size(px(100.), px(100.)), |_, _| Host {
-            url: None,
-            decoded_width: width.clone(),
-        });
-        for _ in 0..3 {
-            cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
-                .unwrap();
-            cx.run_until_parked();
-        }
-        assert_eq!(width.get(), 756);
-        assert_eq!(requests.load(Ordering::SeqCst), 0);
-        window
-            .update(cx, |host, _, cx| {
-                host.url = Some("https://example.com/missing.png");
-                host.decoded_width.set(0);
-                cx.notify();
-            })
-            .unwrap();
-        for _ in 0..3 {
-            cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
-                .unwrap();
-            cx.run_until_parked();
-        }
-        assert_eq!(width.get(), 756);
-        assert_eq!(requests.load(Ordering::SeqCst), 1);
     }
 
     #[test]

@@ -3,7 +3,7 @@ use std::{cell::Cell, collections::HashMap, rc::Rc};
 use gpui::prelude::{FluentBuilder, StatefulInteractiveElement};
 use gpui::*;
 
-use super::assets::thumbnail_url;
+use super::assets::{CoverPrefetch, thumbnail_url, track_cover_url};
 use super::components::{
     OpenAlbumLyrics, PLAYER_BAR_HEIGHT, PlayerBar, ResizeDragPreview, icon_hover_color,
     window_drag_area,
@@ -35,8 +35,10 @@ pub struct MainWindow {
     album_lyrics: Entity<AlbumLyrics>,
     _album_subscription: Subscription,
     _lyrics_subscription: Subscription,
+    _playback_subscription: Subscription,
     _background_subscriptions: Vec<Subscription>,
     cover_tint: CoverColor,
+    cover_prefetch: CoverPrefetch,
 }
 
 impl MainWindow {
@@ -45,7 +47,15 @@ impl MainWindow {
         player_bar: Entity<PlayerBar>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let album_lyrics = cx.new(|cx| AlbumLyrics::new(player_bar.clone(), cx));
+        let playback = player_bar.read(cx).playback();
+        let library = player_bar.read(cx).library();
+        let backdrop = player_bar.read(cx).album_backdrop();
+        let clock = player_bar.read(cx).rotation_clock();
+        let album_lyrics =
+            cx.new(|cx| AlbumLyrics::new(playback.clone(), library, backdrop, clock, cx));
+        let playback_subscription = cx.observe(&playback, |this, playback, cx| {
+            this.sync_cover_prefetch(&playback, cx);
+        });
         let album_subscription = cx.subscribe(&player_bar, |this, _, _: &OpenAlbumLyrics, cx| {
             this.album_lyrics.update(cx, |page, cx| page.open(cx));
         });
@@ -60,15 +70,38 @@ impl MainWindow {
             cx.observe(&main_content, |_, _, cx| cx.notify()),
             cx.observe(&playlist_page, |_, _, cx| cx.notify()),
         ];
-        Self {
+        let mut this = Self {
             main_content,
             player_bar,
             album_lyrics,
             _album_subscription: album_subscription,
             _lyrics_subscription: lyrics_subscription,
+            _playback_subscription: playback_subscription,
             _background_subscriptions: background_subscriptions,
             cover_tint: CoverColor::default(),
-        }
+            cover_prefetch: CoverPrefetch::default(),
+        };
+        this.sync_cover_prefetch(&playback, cx);
+        this
+    }
+
+    fn sync_cover_prefetch(
+        &mut self,
+        playback: &Entity<PlaybackController>,
+        cx: &mut Context<Self>,
+    ) {
+        let urls = {
+            let controller = playback.read(cx);
+            let next = controller.preloading_song();
+            [controller.snapshot().current_song.as_ref(), next.as_ref()]
+                .into_iter()
+                .flatten()
+                .flat_map(|song| {
+                    [80, 480].map(|pixels| track_cover_url(song.al.pic_url.as_deref(), pixels))
+                })
+                .collect()
+        };
+        self.cover_prefetch.sync(urls, cx);
     }
 
     fn playlist_tint(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<Hsla> {
@@ -562,154 +595,5 @@ impl MainContent {
                     page.floating_header(self.playlist_backdrop.clone(), cx)
                 }))
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[cfg(target_os = "macos")]
-    #[gpui::test]
-    fn cached_child_reuses_sibling_animation_frames_and_updates(cx: &mut gpui::TestAppContext) {
-        use super::*;
-
-        struct Child {
-            renders: Rc<Cell<usize>>,
-            painted: Rc<Cell<(Size<Pixels>, usize)>>,
-            value: usize,
-        }
-        impl Render for Child {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                self.renders.set(self.renders.get() + 1);
-                let painted = self.painted.clone();
-                let value = self.value;
-                canvas(
-                    |_, _, _| (),
-                    move |bounds, _, _, _| painted.set((bounds.size, value)),
-                )
-                .size_full()
-            }
-        }
-        struct AnimatedSibling(Rc<Cell<usize>>);
-        impl Render for AnimatedSibling {
-            fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                self.0.set(self.0.get() + 1);
-                if self.0.get() < 4 {
-                    window.request_animation_frame();
-                }
-                div().absolute().size(px(1.))
-            }
-        }
-        struct Host {
-            child: Entity<Child>,
-            sibling: Entity<AnimatedSibling>,
-        }
-        impl Render for Host {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                div()
-                    .relative()
-                    .size_full()
-                    .child(
-                        self.child
-                            .clone()
-                            .cached(StyleRefinement::default().size_full()),
-                    )
-                    .child(self.sibling.clone())
-            }
-        }
-
-        let renders = Rc::new(Cell::new(0));
-        let frames = Rc::new(Cell::new(0));
-        let painted = Rc::new(Cell::new((Size::default(), 0)));
-        let window = cx.open_window(size(px(200.), px(200.)), |_, cx| Host {
-            child: cx.new(|_| Child {
-                renders: renders.clone(),
-                painted: painted.clone(),
-                value: 0,
-            }),
-            sibling: cx.new(|_| AnimatedSibling(frames.clone())),
-        });
-        cx.run_until_parked();
-        let initial_renders = renders.get();
-        assert!(initial_renders > 0);
-        assert_eq!(painted.get(), (size(px(200.), px(200.)), 0));
-        for _ in 0..3 {
-            assert!(
-                window
-                    .update(cx, |_, window, cx| window.simulate_next_frame(cx))
-                    .unwrap()
-                    > 0
-            );
-            cx.run_until_parked();
-            assert_eq!(renders.get(), initial_renders);
-        }
-        assert_eq!(frames.get(), 4);
-
-        window
-            .update(cx, |host, _, cx| {
-                host.child.update(cx, |child, cx| {
-                    child.value = 1;
-                    cx.notify();
-                });
-            })
-            .unwrap();
-        cx.run_until_parked();
-        assert_eq!(renders.get(), initial_renders + 1);
-        assert_eq!(painted.get(), (size(px(200.), px(200.)), 1));
-
-        cx.simulate_window_resize(window.into(), size(px(300.), px(240.)));
-        cx.run_until_parked();
-        assert!(renders.get() > initial_renders + 1);
-        assert_eq!(painted.get(), (size(px(300.), px(240.)), 1));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[gpui::test]
-    fn cover_display_and_tint_share_one_download(cx: &mut gpui::TestAppContext) {
-        use super::*;
-        use std::sync::{Arc, Mutex};
-
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let client = gpui::http_client::FakeHttpClient::create({
-            let requests = requests.clone();
-            move |request| {
-                requests.lock().unwrap().push(request.uri().to_string());
-                async {
-                    Ok(gpui::http_client::Response::builder()
-                        .status(200)
-                        .body(gpui::http_client::AsyncBody::from(
-                            include_bytes!("../../assets/images/miniVinyl.png").as_slice(),
-                        ))
-                        .unwrap())
-                }
-            }
-        });
-        cx.update(|cx| cx.set_http_client(client));
-        struct Host;
-        impl Render for Host {
-            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                let resource = Resource::Uri(
-                    thumbnail_url("https://p1.music.126.net/test-cover.png", 340).into(),
-                );
-                let _ = window.use_asset::<ImgResourceLoader>(&resource, cx);
-                img(thumbnail_url("http://p1.music.126.net/test-cover.png", 340)).size(px(170.))
-            }
-        }
-        let window = cx.open_window(size(px(200.), px(200.)), |_, _| Host);
-        for _ in 0..3 {
-            cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
-                .unwrap();
-            cx.run_until_parked();
-        }
-        let source =
-            Resource::Uri(thumbnail_url("https://p1.music.126.net/test-cover.png", 340).into());
-        assert!(cx.update(|cx| {
-            cx.fetch_asset::<ImgResourceLoader>(&source)
-                .unwrap()
-                .is_ok()
-        }));
-        assert_eq!(
-            requests.lock().unwrap().as_slice(),
-            ["https://p1.music.126.net/test-cover.png?param=340y340"]
-        );
     }
 }

@@ -23,6 +23,38 @@ use symphonia::core::{
 const PCM_CHUNKS: usize = 20;
 pub(super) type Ready = tokio::sync::oneshot::Sender<(BufferedSource, Option<Duration>)>;
 
+struct DecodeFailure {
+    message: String,
+    corrupt: bool,
+}
+
+impl DecodeFailure {
+    fn operation(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            corrupt: false,
+        }
+    }
+
+    fn corrupt(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            corrupt: true,
+        }
+    }
+
+    fn from_error(context: &str, error: Error) -> Self {
+        // 网络/取消由 CacheReader 返回 IoError(Other)，不代表文件内容损坏。
+        // 不支持的格式、资源限制和解析器重置也不应淘汰可复用的文件。
+        let corrupt = matches!(&error, Error::DecodeError(_))
+            || matches!(&error, Error::IoError(error) if error.kind() == io::ErrorKind::UnexpectedEof);
+        Self {
+            message: format!("{context}：{error}"),
+            corrupt,
+        }
+    }
+}
+
 fn send_ready(
     ready: &mut Option<Ready>,
     pcm: &Arc<Pcm>,
@@ -72,9 +104,11 @@ pub(super) fn decode(
             match result {
                 Ok(()) => data.decode_finished = true,
                 Err(error) => {
-                    data.error = Some(error);
-                    // 已完成的本地文件若解析/校验失败，重试必须重新下载。
-                    cache.invalidate();
+                    if error.corrupt {
+                        // 只有确认内容损坏时淘汰租约，操作失败后仍允许恢复下载并提交。
+                        cache.invalidate();
+                    }
+                    data.error = Some(error.message);
                 }
             }
             pcm.changed.notify_all();
@@ -113,7 +147,7 @@ fn decode_generation(
     ready: &mut Option<Ready>,
     output_spec: &mut Option<(u16, u32)>,
     source_duration: Option<Duration>,
-) -> Result<(), String> {
+) -> Result<(), DecodeFailure> {
     let eof = Arc::new(AtomicBool::new(false));
     let reader = CacheReader {
         cache: cache.clone(),
@@ -128,15 +162,17 @@ fn decode_generation(
     };
     let mut format = symphonia::default::get_probe()
         .format(&Hint::new(), stream, &options, &Default::default())
-        .map_err(|error| format!("音频格式读取失败：{error}"))?
+        .map_err(|error| DecodeFailure::from_error("音频格式读取失败", error))?
         .format;
-    let track = format.default_track().ok_or("音频中没有可播放的轨道")?;
+    let track = format
+        .default_track()
+        .ok_or_else(|| DecodeFailure::operation("音频中没有可播放的轨道"))?;
     let track_id = track.id;
     let params = track.codec_params.clone();
     let time_base = params
         .time_base
         .or_else(|| params.sample_rate.map(|rate| TimeBase::new(1, rate)))
-        .ok_or("音频缺少时间基准")?;
+        .ok_or_else(|| DecodeFailure::operation("音频缺少时间基准"))?;
     let native_duration = params
         .n_frames
         .map(|frames| time_duration(time_base.calc_time(frames)));
@@ -174,7 +210,7 @@ fn decode_generation(
                     track_id: Some(track_id),
                 },
             )
-            .map_err(|error| format!("无法跳转播放位置：{error}"))?;
+            .map_err(|error| DecodeFailure::operation(format!("无法跳转播放位置：{error}")))?;
         expected_position = seek_time(
             time_duration(time_base.calc_time(seeked.actual_ts)),
             native_target,
@@ -188,7 +224,7 @@ fn decode_generation(
                 verify: target.is_zero(),
             },
         )
-        .map_err(|error| format!("音频解码器初始化失败：{error}"))?;
+        .map_err(|error| DecodeFailure::from_error("音频解码器初始化失败", error))?;
     let mut decoded_end = expected_position;
     let mut decoded_any = false;
     loop {
@@ -212,30 +248,31 @@ fn decode_generation(
                         )
                     };
                 if !complete {
-                    return Err("音频内容提前结束或已损坏，请重试".into());
+                    return Err(DecodeFailure::corrupt("音频内容提前结束或已损坏，请重试"));
                 }
                 if decoder.finalize().verify_ok == Some(false) {
-                    return Err("音频校验失败，文件可能已损坏".into());
+                    return Err(DecodeFailure::corrupt("音频校验失败，文件可能已损坏"));
                 }
                 // 短于起播门槛的歌曲在正常 EOF 时也必须交出输出源。
                 send_ready(ready, pcm, *output_spec, duration);
                 return Ok(());
             }
-            Err(error) => return Err(format!("音频读取失败：{error}")),
+            Err(error) => return Err(DecodeFailure::from_error("音频读取失败", error)),
         };
         if packet.track_id() != track_id {
             continue;
         }
         let audio = decoder
             .decode(&packet)
-            .map_err(|error| format!("音频解码失败：{error}"))?;
+            .map_err(|error| DecodeFailure::from_error("音频解码失败", error))?;
         let spec = *audio.spec();
-        let channels = u16::try_from(spec.channels.count()).map_err(|_| "音频声道过多")?;
+        let channels = u16::try_from(spec.channels.count())
+            .map_err(|_| DecodeFailure::operation("音频声道过多"))?;
         if channels == 0 || spec.rate == 0 {
-            return Err("音频声道或采样率无效".into());
+            return Err(DecodeFailure::corrupt("音频声道或采样率无效"));
         }
         if output_spec.is_some_and(|expected| expected != (channels, spec.rate)) {
-            return Err("歌曲播放期间声道或采样率发生变化".into());
+            return Err(DecodeFailure::operation("歌曲播放期间声道或采样率发生变化"));
         }
         *output_spec = Some((channels, spec.rate));
         let mut buffer = SampleBuffer::<f32>::new(audio.capacity() as u64, spec);
@@ -247,7 +284,7 @@ fn decode_generation(
             target,
         );
         if params.codec == CODEC_TYPE_FLAC && position > decoded_end + Duration::from_micros(100) {
-            return Err("音频帧缺失或已损坏，请重试".into());
+            return Err(DecodeFailure::corrupt("音频帧缺失或已损坏，请重试"));
         }
         let frames = buffer.samples().len() / channels as usize;
         decoded_end = position + Duration::from_secs_f64(frames as f64 / spec.rate as f64);

@@ -34,9 +34,9 @@ struct Server {
     task: tokio::task::JoinHandle<()>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum ServerFailure {
-    WrongRange(u64),
+    WrongRange(u64, Arc<AtomicBool>),
     TruncatedRange,
 }
 
@@ -63,6 +63,7 @@ async fn serve(
             let bytes = bytes.clone();
             let sender = sender.clone();
             let stalled = stalled.clone();
+            let broken = broken.clone();
             connections.spawn(async move {
                 let mut request = Vec::new();
                 let mut buffer = [0; 1024];
@@ -81,7 +82,7 @@ async fn serve(
                     notify.notified().await;
                 }
                 let (header, body) = if range {
-                    let reported = if matches!(broken, Some(ServerFailure::WrongRange(offset)) if offset >= start && offset <= end as u64) { start + 1 } else { start };
+                    let reported = if matches!(&broken, Some(ServerFailure::WrongRange(offset, enabled)) if enabled.load(Ordering::Acquire) && *offset >= start && *offset <= end as u64) { start + 1 } else { start };
                     (format!("HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {reported}-{end}/{}\r\nConnection: close\r\n\r\n", end + 1 - start as usize, bytes.len()), &bytes[start as usize..=end])
                 } else {
                     (format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()), bytes.as_slice())
@@ -350,14 +351,29 @@ async fn dropping_audio_wakes_a_reader_waiting_for_a_stalled_range() {
 
 #[tokio::test]
 async fn failed_seek_keeps_worker_alive_and_new_seek_recovers() {
+    let failure = Arc::new(AtomicBool::new(true));
+    let bytes = wav(60);
+    let byte_len = bytes.len() as u64;
     let server = serve(
-        wav(60),
+        bytes,
         true,
-        Some(ServerFailure::WrongRange(18 * BLOCK_BYTES)),
+        Some(ServerFailure::WrongRange(18 * BLOCK_BYTES, failure.clone())),
         None,
     )
     .await;
-    let (audio, mut source) = open(&server).await;
+    let store = super::super::audio_cache::AudioCacheStore::temporary().unwrap();
+    let info = AudioSourceInfo {
+        url: server.url.clone(),
+        cache_id: Some("recoverable-seek".into()),
+        byte_len: Some(byte_len),
+        duration: Some(Duration::from_secs(60)),
+        quality: None,
+    };
+    let lease = store.acquire(7, &info).unwrap();
+    let (audio, mut source) =
+        StreamingAudio::open_cached(reqwest::Client::new(), info.clone(), store.clone(), 7)
+            .await
+            .unwrap();
     audio.seek(Duration::from_secs(50));
     let pcm = audio.pcm.clone();
     tokio::task::spawn_blocking(move || {
@@ -371,10 +387,36 @@ async fn failed_seek_keeps_worker_alive_and_new_seek_recovers() {
     })
     .await
     .unwrap();
+    assert!(lease.open_reader().is_ok(), "网络或跳转失败不应淘汰租约");
+    failure.store(false, Ordering::Release);
     audio.seek(Duration::from_secs(1));
     wait_pcm(&audio.pcm).await;
     assert!(audio.error().is_none());
     assert_eq!(next_audible(&mut source).await, 2000. / 32768.);
+    let cache = audio.cache.clone();
+    tokio::task::spawn_blocking(move || {
+        let data = cache.data.lock().unwrap();
+        let (data, timeout) = cache
+            .changed
+            .wait_timeout_while(data, Duration::from_secs(3), |data| {
+                !data.complete && data.error.is_none()
+            })
+            .unwrap();
+        assert!(!timeout.timed_out());
+        assert!(data.complete, "恢复后必须下载完整");
+    })
+    .await
+    .unwrap();
+    assert!(lease.complete(), "恢复后完整文件仍可提交缓存");
+    let renewed = AudioSourceInfo {
+        url: "http://127.0.0.1:1/renewed.wav".into(),
+        ..info
+    };
+    let (_cached_audio, mut output) =
+        StreamingAudio::open_cached(reqwest::Client::new(), renewed, store, 7)
+            .await
+            .unwrap();
+    assert_eq!(next_audible(&mut output).await, 1000. / 32768.);
 }
 
 #[tokio::test]
@@ -520,8 +562,7 @@ async fn mp3_hires_flac_and_aac_decode_seek_and_finish_without_a_device() {
     }
 }
 
-#[tokio::test]
-async fn corrupt_flac_reports_decoder_error() {
+fn corrupt_flac() -> Vec<u8> {
     let mut bytes = include_bytes!("../../../tests/fixtures/tone.flac").to_vec();
     let mut frame = 4;
     loop {
@@ -533,6 +574,12 @@ async fn corrupt_flac_reports_decoder_error() {
         }
     }
     bytes[frame + 20] ^= 0x80;
+    bytes
+}
+
+#[tokio::test]
+async fn corrupt_flac_reports_decoder_error() {
+    let bytes = corrupt_flac();
     let server = serve(bytes, true, None, None).await;
     let result = tokio::time::timeout(
         Duration::from_secs(3),
@@ -564,6 +611,56 @@ async fn corrupt_flac_reports_decoder_error() {
         })
         .await
         .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn truncated_and_corrupt_completed_files_are_removed_from_cache() {
+    let mut truncated = wav(2);
+    truncated.truncate(44 + 48000 * 2);
+    for bytes in [truncated, corrupt_flac()] {
+        let store = super::super::audio_cache::AudioCacheStore::temporary().unwrap();
+        let info = AudioSourceInfo {
+            url: "http://127.0.0.1:1/corrupt".into(),
+            cache_id: Some("corrupt-content".into()),
+            byte_len: Some(bytes.len() as u64),
+            duration: None,
+            quality: None,
+        };
+        let lease = store.acquire(1, &info).unwrap();
+        std::fs::write(lease.path(), &bytes).unwrap();
+        lease.commit(bytes.len() as u64).unwrap();
+        let result =
+            StreamingAudio::open_cached(reqwest::Client::new(), info.clone(), store.clone(), 1)
+                .await;
+        if let Ok((audio, mut output)) = result {
+            tokio::task::spawn_blocking(move || {
+                let deadline = std::time::Instant::now() + Duration::from_secs(3);
+                while audio.error().is_none() {
+                    assert!(std::time::Instant::now() < deadline, "损坏缓存应报错");
+                    read_frame(&mut output);
+                    std::thread::yield_now();
+                }
+                assert!(!audio.finished());
+            })
+            .await
+            .unwrap();
+        }
+        assert!(!lease.complete(), "损坏文件不能再作为完整缓存命中");
+        assert!(lease.open_reader().is_err());
+        let replacement = store.acquire(1, &info).unwrap();
+        assert!(!Arc::ptr_eq(&lease, &replacement));
+        assert!(!replacement.complete());
+        let old_path = lease.path().to_owned();
+        drop(lease);
+        // 解码线程的最后一个 Arc 可能比错误通知稍晚释放。
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while old_path.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("最后一个损坏租约释放后删除文件");
     }
 }
 

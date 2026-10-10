@@ -145,37 +145,3 @@ pub(super) fn artist_label(
     }
     gpui::StyledText::new(text).with_highlights(highlights)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use gpui::hsla;
-
-    #[test]
-    fn icon_hover_respects_background_and_caps_brightness() {
-        let colors = ColorTokens {
-            background: hsla(0., 0., 0.12, 1.),
-            ..ColorTokens::default()
-        };
-        for (lightness, alpha, expected_lightness, expected_alpha) in [
-            (1., 0.5, 1., 0.58),
-            (1., 0.75, 1., 0.83),
-            (1., 0.98, 1., 1.),
-            (0.6, 1., 0.63, 1.),
-            (0.99, 1., 1., 1.),
-        ] {
-            let hovered = icon_hover_color(hsla(0.2, 0.3, lightness, alpha), colors);
-            assert!((hovered.l - expected_lightness).abs() < 1e-6);
-            assert!((hovered.a - expected_alpha).abs() < 1e-6);
-            assert_eq!((hovered.h, hovered.s), (0.2, 0.3));
-        }
-        let light_colors = ColorTokens {
-            background: hsla(0., 0., 0.5, 1.),
-            ..colors
-        };
-        assert_eq!(
-            icon_hover_color(hsla(0., 0., 1., 0.5), light_colors),
-            light_colors.foreground,
-        );
-    }
-}

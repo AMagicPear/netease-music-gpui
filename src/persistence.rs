@@ -47,6 +47,9 @@ pub struct PlaybackState {
     pub playlist_id: u64,
     pub queue: Vec<Song>,
     pub song_id: u64,
+    /// 精确恢复重复歌曲所在的队列项；旧缓存仍按 song_id 查找。
+    #[serde(default)]
+    pub queue_cursor: Option<usize>,
     pub position: Duration,
     /// 上次的播放方式；早期缓存没有这个字段，缺失时回落到顺序播放。
     #[serde(default)]
@@ -54,12 +57,6 @@ pub struct PlaybackState {
     /// 选择的音质；早期缓存没有这个字段，缺失时回落到默认档位。
     #[serde(default)]
     pub quality: AudioQualityLevel,
-}
-
-impl Default for Persistence {
-    fn default() -> Self {
-        Self::new().expect("无法确定应用持久化目录")
-    }
 }
 
 impl Persistence {
@@ -191,11 +188,8 @@ mod tests {
 
     #[test]
     fn playback_state_round_trips_through_its_store() {
-        let directory = std::env::temp_dir().join(format!(
-            "netease-music-gpui-persistence-{}",
-            std::process::id()
-        ));
-        let store = Persistence::at(directory.clone());
+        let directory = tempfile::tempdir().unwrap();
+        let store = Persistence::at(directory.path().to_owned());
         let state = PlaybackState {
             playlist_id: 42,
             queue: vec![Song {
@@ -204,6 +198,7 @@ mod tests {
                 ..Default::default()
             }],
             song_id: 7,
+            queue_cursor: Some(0),
             position: Duration::from_secs(13),
             mode: PlayMode::Shuffle,
             quality: AudioQualityLevel::Lossless,
@@ -215,23 +210,19 @@ mod tests {
         assert_eq!(loaded.playlist_id, 42);
         assert_eq!(loaded.queue[0].id, 7);
         assert_eq!(loaded.song_id, 7);
+        assert_eq!(loaded.queue_cursor, Some(0));
         assert_eq!(loaded.position, Duration::from_secs(13));
         assert_eq!(loaded.mode, PlayMode::Shuffle);
         assert_eq!(loaded.quality, AudioQualityLevel::Lossless);
-        fs::remove_dir_all(directory).unwrap();
     }
 
     /// 旧版缓存没有 mode 字段，不能被整份丢弃——队列和进度仍然要恢复。
     #[test]
     fn legacy_cache_without_play_mode_still_loads() {
-        let directory = std::env::temp_dir().join(format!(
-            "netease-music-gpui-legacy-cache-{}",
-            std::process::id()
-        ));
-        let store = Persistence::at(directory.clone());
-        fs::create_dir_all(&directory).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let store = Persistence::at(directory.path().to_owned());
         fs::write(
-            directory.join("playback.json"),
+            directory.path().join("playback.json"),
             serde_json::json!({
                 "playlist_id": 42,
                 "queue": [],
@@ -244,9 +235,9 @@ mod tests {
 
         let loaded = store.load_playback().unwrap();
         assert_eq!(loaded.song_id, 7);
+        assert_eq!(loaded.queue_cursor, None);
         assert_eq!(loaded.mode, PlayMode::default());
         assert_eq!(loaded.quality, AudioQualityLevel::default());
-        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -261,6 +252,7 @@ mod tests {
             playlist_id: 1,
             queue: Vec::new(),
             song_id: 2,
+            queue_cursor: None,
             position: Duration::ZERO,
             mode: PlayMode::Sequential,
             quality: AudioQualityLevel::Standard,

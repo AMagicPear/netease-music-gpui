@@ -11,8 +11,8 @@ use crate::{
     models::{AudioQualityLevel, PlayMode, Song},
     persistence::{Persistence, PlaybackState},
 };
-use gpui::{App, Context, ImgResourceLoader, ReadGlobal, Window};
-use rand::seq::SliceRandom;
+use gpui::{App, Context, ReadGlobal, Window};
+use rand::{Rng, seq::SliceRandom};
 use souvlaki::{MediaControlEvent, SeekDirection};
 use std::{sync::Arc, time::Duration};
 
@@ -27,13 +27,12 @@ impl Drop for CancelAudioOnDrop {
 }
 
 struct Preload {
-    song_id: u64,
+    song: Song,
     quality: AudioQualityLevel,
     request: AudioRequest,
 }
 
 /// 共享 GPUI Entity：统一接收 UI 命令，管理播放列表、异步请求和状态通知。
-#[derive(Default)]
 pub struct PlaybackController {
     state: PlaybackSnapshot,
     engine: PlayerEngine,
@@ -51,9 +50,11 @@ pub struct PlaybackController {
     persistence: Persistence,
     audio_cache: Arc<tokio::sync::OnceCell<Arc<AudioCacheStore>>>,
     preload: Option<Preload>,
-    preloaded_covers: Vec<String>,
     /// tick 每 100 ms 运行一次；攒够 5 秒才写一次状态，关键事件仍立即写。
     ticks_since_save: u32,
+    /// 最后释放：测试临时目录必须覆盖控制器 Drop 中的保存和 flush。
+    #[cfg(test)]
+    test_directory: Option<tempfile::TempDir>,
 }
 
 /// 播放中周期性落盘的间隔（tick 数）。暂停时 tick 不再写盘。
@@ -61,18 +62,43 @@ const SAVE_INTERVAL_TICKS: u32 = 50;
 const PRELOAD_REMAINING: Duration = Duration::from_secs(60);
 
 impl PlaybackController {
+    /// 仅构造空控制器；存储由调用方明确注入，不启动 UI、网络或播放任务。
+    pub(crate) fn with_persistence(persistence: Persistence) -> Self {
+        Self {
+            state: PlaybackSnapshot::default(),
+            engine: PlayerEngine::default(),
+            queue: Vec::new(),
+            queue_cursor: None,
+            queue_source: None,
+            play_when_ready: false,
+            request: None,
+            pending_position: Duration::ZERO,
+            system_media: None,
+            persistence,
+            audio_cache: Arc::default(),
+            preload: None,
+            ticks_since_save: 0,
+            #[cfg(test)]
+            test_directory: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        let directory = tempfile::tempdir().expect("无法创建测试存储目录");
+        let mut this = Self::with_persistence(Persistence::at(directory.path().to_owned()));
+        this.test_directory = Some(directory);
+        this
+    }
+
     pub fn new(window: &Window, persistence: Persistence, cx: &mut Context<Self>) -> Self {
-        let mut this = Self::default();
-        this.persistence = persistence;
+        let mut this = Self::with_persistence(persistence);
         if let Some(cache) = this.persistence.load_playback() {
-            // 列表、音质和播放方式一起恢复；列表里保存的就是当时的播放顺序，
-            // 随机模式洗好的顺序已经落在里面，不必重新洗一遍。
-            this.set_list(Some(cache.playlist_id), cache.queue, Some(cache.song_id));
-            this.state.mode = cache.mode;
-            this.state.quality = cache.quality;
+            let position = cache.position;
+            this.restore_list(cache);
             if let Some(song) = this.current_list_song() {
                 // 启动时只恢复列表与进度，不自动播放；等用户手动按下播放。
-                this.load_song(song, cache.position, false, cx);
+                this.load_song(song, position, false, cx);
             }
         }
         let covers = Arc::new(CoverArtCache::new(this.persistence.cover_cache_directory()));
@@ -126,7 +152,6 @@ impl PlaybackController {
             MediaControlEvent::Next => self.next(cx),
             MediaControlEvent::Stop => {
                 self.stop();
-                self.sync_preloaded_covers(None, cx);
                 cx.notify();
             }
             MediaControlEvent::SetPosition(position) => self.seek_to(position.0, cx),
@@ -182,6 +207,11 @@ impl PlaybackController {
         self.queue_source
     }
 
+    /// 已实际提交音频预加载的候选；UI 自行决定封面尺寸及图片预取。
+    pub(crate) fn preloading_song(&self) -> Option<Song> {
+        self.preload.as_ref().map(|preload| preload.song.clone())
+    }
+
     /// 把页面上选中的歌曲换成一份新的播放列表并开始播放。
     /// 列表进来之后就是独立数据：页面再排序、切走或刷新都不影响它。
     pub fn play_list(
@@ -192,11 +222,11 @@ impl PlaybackController {
         cx: &mut Context<Self>,
     ) {
         let Some(song) = self.set_list(Some(source), songs, Some(song_id)) else {
+            cx.notify();
             return;
         };
         // 新列表也要服从当前的播放方式：随机模式下当场洗一遍。
         self.apply_mode_to_list(self.state.mode);
-        self.sync_preloaded_covers(None, cx);
         if self
             .state
             .current_song
@@ -223,6 +253,22 @@ impl PlaybackController {
         self.queue_cursor =
             song_id.and_then(|song_id| self.queue.iter().position(|song| song.id == song_id));
         self.current_list_song()
+    }
+
+    fn restore_list(&mut self, cache: PlaybackState) {
+        // 保存的队列已经是当时的播放顺序，无需再洗牌。
+        let cursor = cache.queue_cursor.filter(|&cursor| {
+            cache
+                .queue
+                .get(cursor)
+                .is_some_and(|song| song.id == cache.song_id)
+        });
+        self.set_list(Some(cache.playlist_id), cache.queue, Some(cache.song_id));
+        if cursor.is_some() {
+            self.queue_cursor = cursor;
+        }
+        self.state.mode = cache.mode;
+        self.state.quality = cache.quality;
     }
 
     /// 游标所指的那首歌。
@@ -286,38 +332,6 @@ impl PlaybackController {
         })
     }
 
-    fn sync_preloaded_covers(&mut self, next: Option<&Song>, cx: &mut Context<Self>) {
-        let urls = |song: &Song| {
-            [80, 480].map(|pixels| {
-                crate::ui::assets::track_cover_url(song.al.pic_url.as_deref(), pixels)
-            })
-        };
-        let current = self.state.current_song.as_ref().map(urls);
-        let next = next.map(urls);
-        let _ = cx.fetch_asset::<ImgResourceLoader>(&crate::ui::assets::cover_resource(
-            crate::ui::assets::DEFAULT_TRACK_COVER,
-        ));
-        // 只保留本控制器预取的当前/下一首封面，避免沿队列一直积累解码图片。
-        self.preloaded_covers.retain(|url| {
-            let keep = current.as_ref().is_some_and(|urls| urls.contains(url))
-                || next.as_ref().is_some_and(|urls| urls.contains(url));
-            if !keep && url != crate::ui::assets::DEFAULT_TRACK_COVER {
-                cx.remove_asset::<ImgResourceLoader>(&crate::ui::assets::cover_resource(url));
-            }
-            keep
-        });
-        for url in next.into_iter().flatten() {
-            let resource = crate::ui::assets::cover_resource(&url);
-            if let Some(Err(_)) = cx.fetch_asset::<ImgResourceLoader>(&resource) {
-                cx.remove_asset::<ImgResourceLoader>(&resource);
-                let _ = cx.fetch_asset::<ImgResourceLoader>(&resource);
-            }
-            if !self.preloaded_covers.contains(&url) {
-                self.preloaded_covers.push(url);
-            }
-        }
-    }
-
     /// 系统媒体控件的封面必须是本地文件：先下载，落盘后再通知一次让元数据带上它。
     fn sync_media_cover(&mut self, cx: &mut Context<Self>) {
         let Some(request) = self
@@ -346,11 +360,10 @@ impl PlaybackController {
     fn maybe_preload(&mut self, cx: &mut Context<Self>) {
         let next = self.next_song();
         if self.preload.as_ref().is_some_and(|preload| {
-            next.as_ref().is_none_or(|song| song.id != preload.song_id)
+            next.as_ref().is_none_or(|song| song.id != preload.song.id)
                 || preload.quality != self.state.quality
         }) {
             self.cancel_preload();
-            self.sync_preloaded_covers(None, cx);
         }
         // 当前歌曲先下载完，避免下一首抢占当前播放的网络带宽。
         if self.preload.is_some()
@@ -371,11 +384,10 @@ impl PlaybackController {
         {
             return;
         }
-        self.sync_preloaded_covers(Some(&next), cx);
         self.preload = Some(Preload {
-            song_id: next.id,
             quality: self.state.quality,
             request: self.audio_request(next.id, None, cx),
+            song: next,
         });
     }
 
@@ -402,19 +414,7 @@ impl PlaybackController {
     /// 播完一首后前进一格；返回 None 表示整个列表播完。
     /// 单曲循环不在这里处理：那是「不前进」，由控制器决定。
     fn advance_list(&mut self) -> Option<Song> {
-        let len = self.queue.len();
-        if len == 0 {
-            return None;
-        }
-        let next = self.queue_cursor? + 1;
-        if next < len {
-            self.queue_cursor = Some(next);
-        } else if self.state.mode.wraps() {
-            self.queue_cursor = Some(0);
-        } else {
-            return None;
-        }
-        self.current_list_song()
+        self.step_list(1)
     }
 
     /// 就地洗牌：列表此刻的顺序就是之后的播放顺序，不需要另存一份原始顺序。
@@ -426,28 +426,30 @@ impl PlaybackController {
         if len < 2 {
             return;
         }
-        // 正在播放的歌不能变，记下它，洗完牌让游标跟着走到新位置。
-        let current = self
-            .queue_cursor
-            .and_then(|cursor| self.queue.get(cursor).map(|song| song.id));
-        // shuffle 内部就是 Fisher–Yates，随机源交给 rand 的线程随机数发生器。
-        self.queue.shuffle(&mut rand::rng());
-        self.queue_cursor = current.and_then(|id| self.queue.iter().position(|song| song.id == id));
+        let mut rng = rand::rng();
+        if let Some(current) = self.queue_cursor.filter(|&cursor| cursor < len) {
+            // 先单独保留当前具体队列项，再随机放回，重复 id 的元数据也不会串位。
+            self.queue.swap(0, current);
+            self.queue[1..].shuffle(&mut rng);
+            let cursor = rng.random_range(0..len);
+            self.queue.swap(0, cursor);
+            self.queue_cursor = Some(cursor);
+        } else {
+            self.queue.shuffle(&mut rng);
+            self.queue_cursor = None;
+        }
     }
 
     /// 下一首插入：插到当前歌曲之后。「播完这首就听它」和心动模式穿插推荐都走这里。
     #[allow(dead_code, reason = "下一首插入与心动模式尚未接入 UI")]
     pub fn insert_next(&mut self, song: Song, cx: &mut Context<Self>) {
         self.cancel_preload();
-        self.sync_preloaded_covers(None, cx);
         match self.queue_cursor {
-            Some(cursor) => {
-                self.queue.insert(cursor + 1, song);
-                self.save_cache();
-                cx.notify();
-            }
+            Some(cursor) => self.queue.insert(cursor + 1, song),
             None => self.queue.insert(0, song),
         }
+        self.save_cache();
+        cx.notify();
     }
 
     fn select_song(&mut self, song: Song, cx: &mut Context<Self>) {
@@ -464,7 +466,6 @@ impl PlaybackController {
         self.engine.stop();
         self.state.duration = song.duration();
         self.state.current_song = Some(song.clone());
-        self.sync_preloaded_covers(Some(&song), cx);
         self.state.position = position.min(self.state.duration);
         self.state.is_playing = false;
         self.state.loading = false;
@@ -474,7 +475,7 @@ impl PlaybackController {
         self.play_when_ready = play;
         self.state.loading = true;
         let request = if let Some(preload) = self.preload.take() {
-            if preload.song_id == song.id && preload.quality == self.state.quality {
+            if preload.song.id == song.id && preload.quality == self.state.quality {
                 self.audio_request(song.id, Some(preload.request), cx)
             } else {
                 preload.request.abort();
@@ -583,7 +584,6 @@ impl PlaybackController {
         }
     }
 
-    #[allow(dead_code, reason = "音质菜单已按要求回退，保留播放控制接口")]
     pub fn set_quality(&mut self, quality: AudioQualityLevel, cx: &mut Context<Self>) {
         if self.state.quality == quality {
             return;
@@ -660,7 +660,6 @@ impl PlaybackController {
         }
         self.state.mode = mode;
         self.cancel_preload();
-        self.sync_preloaded_covers(None, cx);
         // 只在进入随机模式的那一刻洗牌；离开随机不再还原，洗好的顺序就是列表顺序。
         self.apply_mode_to_list(mode);
         self.save_cache();
@@ -683,7 +682,6 @@ impl PlaybackController {
     }
 
     /// 0..=1；修改当前播放音量，并在后续切歌或重试时保留。
-    #[allow(dead_code, reason = "本轮提供音量接口，后续音量 UI 接入时移除此标记")]
     pub fn set_volume(&mut self, volume: f32, cx: &mut Context<Self>) {
         if self.engine.set_volume(volume) {
             self.state.volume = self.engine.volume();
@@ -740,6 +738,7 @@ impl PlaybackController {
             playlist_id,
             queue: self.queue.clone(),
             song_id: song.id,
+            queue_cursor: self.queue_cursor,
             position: self.state.position,
             mode: self.state.mode,
             quality: self.state.quality,
@@ -778,8 +777,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_storage_outlives_controller_drop_and_is_then_removed() {
+        let mut controller = controller_with(&[1], 1, PlayMode::Sequential);
+        let path = controller
+            .test_directory
+            .as_ref()
+            .unwrap()
+            .path()
+            .to_owned();
+        assert!(path.exists());
+        controller.save_cache();
+        drop(controller);
+        assert!(!path.exists());
+    }
+
+    #[test]
     fn system_stop_invalidates_pending_load_and_resets_position() {
-        let mut controller = PlaybackController::default();
+        let mut controller = PlaybackController::for_test();
         controller.state.revision = 3;
         controller.play_when_ready = true;
         controller.state.loading = true;
@@ -798,7 +812,7 @@ mod tests {
 
     /// 造一份播放列表，选中 `song_id`，并把当前歌曲同步到快照上。
     fn controller_with(ids: &[u64], song_id: u64, mode: PlayMode) -> PlaybackController {
-        let mut controller = PlaybackController::default();
+        let mut controller = PlaybackController::for_test();
         let songs: Vec<Song> = ids
             .iter()
             .map(|&id| Song {
@@ -874,8 +888,75 @@ mod tests {
     }
 
     #[test]
+    fn shuffle_preserves_the_specific_duplicate_queue_entry() {
+        let mut controller = controller_with(&[1; 8], 1, PlayMode::Shuffle);
+        for (index, song) in controller.queue.iter_mut().enumerate() {
+            song.name = format!("版本 {index}");
+            song.al.pic_url = Some(format!("https://example.com/{index}.png"));
+        }
+        controller.queue_cursor = Some(5);
+        let current = serde_json::to_value(controller.current_list_song()).unwrap();
+        for _ in 0..32 {
+            controller.apply_mode_to_list(PlayMode::Shuffle);
+            assert_eq!(
+                serde_json::to_value(controller.current_list_song()).unwrap(),
+                current
+            );
+            let mut names: Vec<_> = controller
+                .queue
+                .iter()
+                .map(|song| song.name.clone())
+                .collect();
+            names.sort();
+            assert_eq!(
+                names,
+                (0..8)
+                    .map(|index| format!("版本 {index}"))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn restoring_duplicate_songs_validates_cursor_and_falls_back_to_id() {
+        let mut controller = controller_with(&[1, 2, 1, 3], 1, PlayMode::Shuffle);
+        controller.queue[0].name = "第一个版本".into();
+        controller.queue[2].name = "第二个版本".into();
+        controller.queue_cursor = Some(2);
+        controller.state.position = Duration::from_secs(9);
+        controller.save_cache();
+        controller.persistence.flush();
+        for (saved_cursor, expected_cursor) in [
+            (Some(2), Some(2)),
+            (None, Some(0)),
+            (Some(1), Some(0)),
+            (Some(99), Some(0)),
+        ] {
+            let mut cache = controller.persistence.load_playback().unwrap();
+            assert_eq!(cache.queue_cursor, Some(2));
+            assert_eq!(cache.position, Duration::from_secs(9));
+            cache.queue_cursor = saved_cursor;
+            let mut restored = PlaybackController::for_test();
+            restored.restore_list(cache);
+            assert_eq!(restored.queue_cursor, expected_cursor);
+            assert_eq!(restored.state.mode, PlayMode::Shuffle);
+            if saved_cursor == Some(2) {
+                assert_eq!(restored.current_list_song().unwrap().name, "第二个版本");
+                assert_eq!(restored.advance_list().unwrap().id, 3);
+            } else {
+                assert_eq!(restored.current_list_song().unwrap().name, "第一个版本");
+            }
+        }
+        let mut cache = controller.persistence.load_playback().unwrap();
+        cache.song_id = 99;
+        let mut restored = PlaybackController::for_test();
+        restored.restore_list(cache);
+        assert!(restored.current_list_song().is_none());
+    }
+
+    #[test]
     fn obsolete_load_cannot_replace_current_snapshot() {
-        let mut controller = PlaybackController::default();
+        let mut controller = PlaybackController::for_test();
         controller.state.revision = 3;
         controller.state.loading = true;
         assert!(!controller.finish(1, Err("旧请求失败".into())));
@@ -888,12 +969,7 @@ mod tests {
 
     #[test]
     fn cache_round_trips_through_the_background_writer() {
-        let directory = std::env::temp_dir().join(format!(
-            "netease-music-gpui-controller-cache-{}",
-            std::process::id()
-        ));
-        let mut controller = PlaybackController::default();
-        controller.persistence = Persistence::at(directory.clone());
+        let mut controller = PlaybackController::for_test();
         controller.set_list(
             Some(5),
             vec![Song {
@@ -912,11 +988,10 @@ mod tests {
         let loaded = controller.persistence.load_playback().unwrap();
         assert_eq!(loaded.playlist_id, 5);
         assert_eq!(loaded.song_id, 9);
+        assert_eq!(loaded.queue_cursor, Some(0));
         assert_eq!(loaded.position, Duration::from_secs(7));
         assert_eq!(loaded.mode, PlayMode::RepeatAll);
         assert_eq!(loaded.quality, AudioQualityLevel::Lossless);
-        drop(controller);
-        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -953,13 +1028,23 @@ mod tests {
     #[tokio::test]
     async fn replacing_queue_and_stopping_cancel_speculative_audio() {
         let mut controller = controller_with(&[1, 2], 1, PlayMode::Sequential);
+        assert!(controller.preloading_song().is_none());
         let request = tokio::spawn(std::future::pending());
         let aborted = request.abort_handle();
         controller.preload = Some(Preload {
-            song_id: 2,
+            song: Song {
+                id: 2,
+                name: "真正预加载的版本".into(),
+                ..Default::default()
+            },
             quality: AudioQualityLevel::Standard,
             request,
         });
+        assert_eq!(
+            controller.preloading_song().unwrap().name,
+            "真正预加载的版本"
+        );
+        assert_eq!(controller.queue_cursor, Some(0));
         controller.set_list(
             None,
             vec![Song {
@@ -969,99 +1054,23 @@ mod tests {
             Some(3),
         );
         assert!(controller.preload.is_none());
+        assert!(controller.preloading_song().is_none());
         tokio::task::yield_now().await;
         assert!(aborted.is_finished());
         let request = tokio::spawn(std::future::pending());
         let aborted = request.abort_handle();
         controller.preload = Some(Preload {
-            song_id: 4,
+            song: Song {
+                id: 4,
+                ..Default::default()
+            },
             quality: AudioQualityLevel::Standard,
             request,
         });
         controller.stop();
         assert!(controller.preload.is_none());
+        assert!(controller.preloading_song().is_none());
         tokio::task::yield_now().await;
         assert!(aborted.is_finished());
-    }
-
-    #[cfg(target_os = "macos")]
-    #[gpui::test]
-    fn preloaded_covers_reuse_exact_ui_sizes_and_retire_old_candidates(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        use gpui::{AppContext, Resource};
-        use std::sync::Mutex;
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let client = gpui::http_client::FakeHttpClient::create({
-            let requests = requests.clone();
-            move |request| {
-                requests.lock().unwrap().push(request.uri().to_string());
-                async {
-                    Ok(gpui::http_client::Response::builder()
-                        .status(200)
-                        .body(gpui::http_client::AsyncBody::from(
-                            include_bytes!("../../assets/images/miniVinyl.png").as_slice(),
-                        ))
-                        .unwrap())
-                }
-            }
-        });
-        let controller = cx.update(|cx| {
-            cx.set_http_client(client);
-            cx.new(|_| PlaybackController::default())
-        });
-        let mut next = Song {
-            id: 2,
-            ..Default::default()
-        };
-        next.al.pic_url = Some("http://p1.music.126.net/next.png".into());
-        cx.update(|cx| {
-            controller.update(cx, |this, cx| this.sync_preloaded_covers(Some(&next), cx))
-        });
-        cx.run_until_parked();
-        cx.update(|cx| {
-            for size in [80, 480] {
-                let source = Resource::Uri(
-                    crate::ui::assets::thumbnail_url(next.al.pic_url.as_deref().unwrap(), size)
-                        .into(),
-                );
-                assert!(
-                    cx.fetch_asset::<ImgResourceLoader>(&source)
-                        .unwrap()
-                        .is_ok()
-                );
-            }
-            controller.update(cx, |this, cx| this.sync_preloaded_covers(Some(&next), cx));
-        });
-        cx.run_until_parked();
-        let fetched = requests.lock().unwrap().clone();
-        assert_eq!(fetched.len(), 2);
-        for pixels in [80, 480] {
-            assert!(fetched.contains(&format!(
-                "https://p1.music.126.net/next.png?param={pixels}y{pixels}"
-            )));
-        }
-        for id in [3, 4] {
-            let previous = next.clone();
-            next.id = id;
-            next.al.pic_url = Some(format!("https://p1.music.126.net/{id}.png"));
-            cx.update(|cx| {
-                controller.update(cx, |this, cx| {
-                    this.state.current_song = Some(previous);
-                    this.sync_preloaded_covers(Some(&next), cx);
-                    assert!(this.preloaded_covers.len() <= 4);
-                })
-            });
-            cx.run_until_parked();
-        }
-        cx.update(|cx| {
-            assert!(
-                controller
-                    .read(cx)
-                    .preloaded_covers
-                    .iter()
-                    .all(|url| !url.contains("next.png"))
-            );
-        });
     }
 }

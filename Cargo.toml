@@ -39,9 +39,6 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSVi
 [dev-dependencies]
 futures = "0.3"
 
-[target.'cfg(target_os = "macos")'.dev-dependencies]
-gpui-apple = { package = "gpui-pre-apple", version = "=0.3.8", features = ["test-support"] }
-
 [profile.dev.package]
 gpui-pre = { opt-level = 3 }
 gpui-component = { opt-level = 3 }

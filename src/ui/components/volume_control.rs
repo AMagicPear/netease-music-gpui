@@ -142,11 +142,15 @@ impl VolumeControl {
             }))
             // 捕获阶段接按下/抬起：滑块自己会在冒泡阶段 stop_propagation，
             // 冒泡监听收不到按在滑块上的那一下，拖到气泡外就会被收起。
-            .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
-                this.set_pressed(true, cx);
+            .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                if event.button == MouseButton::Left {
+                    this.set_pressed(true, cx);
+                }
             }))
-            .capture_any_mouse_up(cx.listener(|this, _, _, cx| {
-                this.set_pressed(false, cx);
+            .capture_any_mouse_up(cx.listener(|this, event: &MouseUpEvent, _, cx| {
+                if event.button == MouseButton::Left {
+                    this.set_pressed(false, cx);
+                }
             }))
             // 在气泡外松手时只有这个回调会到。
             .on_mouse_up_out(

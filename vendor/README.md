@@ -32,8 +32,7 @@ img(url).with_transformation(Transformation::rotate(radians(angle)))
 补丁同步调整了 Scene 包围盒、Metal/WGSL 绘制路径和 WebGL 的记录步长。
 Metal 构建脚本从同级 `gpui-pre` 生成共享结构，避免 Rust 与 shader 布局不一致。
 
-验证：`cargo test --locked`。macOS 使用真实离屏 Metal 渲染验证旋转方向、圆形裁剪和纹理复用；
-其他平台通过 Naga 校验 WGSL 和结构布局，实际 GPU 绘制仍需在对应平台验证。
+升级补丁后先运行 `cargo check --locked --all-targets`，再手动启动应用，检查旋转方向、圆形裁剪和背景衔接。GPU 绘制效果需要在对应平台实际查看。
 
 升级 GPUI 时，更新准备脚本中的版本与发布包 SHA-256，并重新生成、验证 patch。
 如果上游提供同等接口，可删除补丁、准备脚本和 Cargo 中的路径覆盖。

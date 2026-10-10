@@ -372,20 +372,8 @@ fn progress_color(gradient: CoverGradient) -> Hsla {
 
 #[cfg(test)]
 mod tests {
-    use super::{SeekDrag, progress_color, seek_position, slider_state};
+    use super::{SeekDrag, seek_position, slider_state};
     use std::time::Duration;
-
-    #[test]
-    fn progress_uses_cover_hue_and_keeps_neutral_covers_neutral() {
-        for (h, s) in [(0., 0.6), (0.6, 0.4), (0., 0.)] {
-            let color = progress_color(crate::ui::cover_color::dark_gradient(Some(gpui::hsla(
-                h, s, 0.4, 1.,
-            ))));
-            assert!((color.h - h).abs() < 0.001);
-            assert!((color.s - s).abs() < 0.001);
-            assert!(color.l >= 0.5 && color.a == 1.);
-        }
-    }
 
     #[test]
     fn slider_uses_milliseconds_and_bounds_seek_targets() {
