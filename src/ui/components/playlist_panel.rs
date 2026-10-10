@@ -287,6 +287,21 @@ impl ListDelegate for QueueDelegate {
             },
         ));
 
+        let library = self.library.clone();
+        let like_song = song.clone();
+        let on_like_click: RowCallback<ClickEvent> = Box::new(cx.listener(
+            move |_: &mut ListState<QueueDelegate>,
+                  event: &ClickEvent,
+                  _: &mut Window,
+                  cx: &mut Context<ListState<QueueDelegate>>| {
+                cx.stop_propagation();
+                if event.click_count() != 1 {
+                    return;
+                }
+                library.update(cx, |library, cx| library.toggle_like(like_song.clone(), cx));
+            },
+        ));
+
         let playback = self.playback.clone();
         let on_double_click: RowCallback<ClickEvent> = Box::new(cx.listener(
             move |_: &mut ListState<QueueDelegate>,
@@ -327,7 +342,7 @@ impl ListDelegate for QueueDelegate {
             round_bottom_left: index + 1 == count,
             on_double_click: Some(on_double_click),
             on_hover: Some(on_hover),
-            children: row_content(&song, index, state, colors, on_cover_click),
+            children: row_content(&song, index, state, colors, on_cover_click, on_like_click),
         })
     }
 
@@ -377,6 +392,7 @@ fn row_content(
     state: RowState,
     colors: ColorTokens,
     on_cover_click: RowCallback<ClickEvent>,
+    on_like_click: RowCallback<ClickEvent>,
 ) -> Vec<AnyElement> {
     let RowState {
         is_current,
@@ -485,7 +501,7 @@ fn row_content(
     // 而组悬停状态要到 paint 阶段才登记进 `GroupHitboxes`——prepaint 与 paint
     // 一旦判断不一致，就会踩到 "must call prepaint before paint"。
     if hovered {
-        vec![cover, text, row_actions(index, liked, colors)]
+        vec![cover, text, row_actions(index, liked, colors, on_like_click)]
     } else {
         // 时长是辅助信息：比 muted_foreground 再淡一档，和歌单行一致。
         let duration = div()
@@ -501,7 +517,12 @@ fn row_content(
 /// 悬停整行时替换时长的三个图标：爱心 / 收藏 / 更多。
 ///
 /// 尺寸和间距对齐歌单页那排操作图标（`IconSize::Small`，图标之间 10px）。
-fn row_actions(index: usize, liked: bool, colors: ColorTokens) -> AnyElement {
+fn row_actions(
+    index: usize,
+    liked: bool,
+    colors: ColorTokens,
+    on_like_click: RowCallback<ClickEvent>,
+) -> AnyElement {
     let plain = |id: (&'static str, usize), path: &'static str, label: &'static str| {
         svg()
             .path(path)
@@ -544,7 +565,7 @@ fn row_actions(index: usize, liked: bool, colors: ColorTokens) -> AnyElement {
                 .id(("playlist-panel-like", index))
                 .role(Role::Button)
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(|_, _, cx| cx.stop_propagation())
+                .on_click(on_like_click)
                 .aria_label(if liked { "已喜欢" } else { "未喜欢" }),
         )
         .child(plain(

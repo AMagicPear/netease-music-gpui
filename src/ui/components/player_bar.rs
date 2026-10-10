@@ -255,6 +255,8 @@ impl PlayerBar {
         id: &'static str,
         path: &'static str,
         count: Option<u64>,
+        // 红心按钮传 true：点击时自己去取当时正在播放的那首歌，避免每帧克隆整首。
+        like_button: bool,
         color: Hsla,
         hover_color: Hsla,
         pressed_color: Hsla,
@@ -276,6 +278,15 @@ impl PlayerBar {
             .on_hover(cx.listener(move |this, hovered, _, cx| {
                 this.set_interaction_hover((id, INTERACTION_AREA), *hovered, cx);
             }))
+            .when(like_button, |element| {
+                element.on_click(cx.listener(|this, _, _, cx| {
+                    let Some(song) = this.playback.read(cx).snapshot().current_song.clone() else {
+                        return;
+                    };
+                    this.library
+                        .update(cx, |library, cx| library.toggle_like(song, cx));
+                }))
+            })
             .child(
                 div().absolute().left_0().bottom_0().child(
                     svg()
@@ -838,6 +849,7 @@ impl Render for PlayerBar {
                                 "player-like-button",
                                 like_icon_path(liked),
                                 self.counts[0],
+                                song_id.is_some(),
                                 if liked {
                                     theme_colors.primary
                                 } else {
@@ -860,6 +872,7 @@ impl Render for PlayerBar {
                                 "player-comment-button",
                                 "icons/comment.svg",
                                 self.counts[1],
+                                false,
                                 colors.muted_foreground,
                                 icon_hover_color(colors.muted_foreground, colors),
                                 colors.foreground,

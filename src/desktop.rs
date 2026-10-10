@@ -5,7 +5,27 @@ use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem},
 };
 
+use crate::models::PlayMode;
+use crate::playback::PlaybackController;
+use crate::state::library::MusicLibrary;
 use crate::ui::shell::MainWindow;
+
+/// Dock 右键菜单里可触发的动作。它们只转发到播放控制器 / 音乐库。
+#[cfg(target_os = "macos")]
+mod dock_actions {
+    use gpui::actions;
+
+    actions!(netease_music, [
+        TogglePlayback,
+        NextTrack,
+        PreviousTrack,
+        ToggleLike,
+        RepeatOff,
+        RepeatOneTrack,
+        RepeatAllTracks,
+        ShufflePlayback,
+    ]);
+}
 
 /// 应用持有视图和托盘；窗口不可见时，播放 Entity 和页面状态仍然存活。
 struct Desktop {
@@ -13,11 +33,19 @@ struct Desktop {
     view: Entity<MainWindow>,
     bounds: WindowBounds,
     _tray: Option<TrayIcon>,
+    #[cfg(target_os = "macos")]
+    _dock_subscriptions: Vec<Subscription>,
 }
 
 impl Global for Desktop {}
 
-pub fn init(window: AnyWindowHandle, view: Entity<MainWindow>, cx: &mut App) {
+pub fn init(
+    window: AnyWindowHandle,
+    view: Entity<MainWindow>,
+    playback: Entity<PlaybackController>,
+    library: Entity<MusicLibrary>,
+    cx: &mut App,
+) {
     let bounds = window
         .update(cx, |_, window, _| window.window_bounds())
         .unwrap();
@@ -26,7 +54,13 @@ pub fn init(window: AnyWindowHandle, view: Entity<MainWindow>, cx: &mut App) {
         view,
         bounds,
         _tray: None,
+        #[cfg(target_os = "macos")]
+        _dock_subscriptions: Vec::new(),
     });
+    #[cfg(target_os = "macos")]
+    {
+        cx.global_mut::<Desktop>()._dock_subscriptions = install_dock_menu(playback, library, cx);
+    }
     // 托盘需要在原生事件循环启动后、GPUI 主线程上创建。
     cx.spawn(async |cx| {
         cx.update(|cx| match create_tray(cx) {
@@ -35,6 +69,148 @@ pub fn init(window: AnyWindowHandle, view: Entity<MainWindow>, cx: &mut App) {
         });
     })
     .detach();
+}
+
+/// macOS Dock 右键菜单：播放控制、喜欢开关、播放方式。
+///
+/// Dock 菜单是原生 NSMenu，内容在创建时固定，无法像 GPUI 元素那样自动重绘。
+/// 所以这里在播放状态变化时重建整份菜单，让“播放/暂停”“喜欢/取消喜欢”
+/// 和循环方式的勾选跟着当前状态走。
+#[cfg(target_os = "macos")]
+fn install_dock_menu(
+    playback: Entity<PlaybackController>,
+    library: Entity<MusicLibrary>,
+    cx: &mut App,
+) -> Vec<Subscription> {
+    use dock_actions::*;
+
+    // 所有处理器只把动作转发给 Entity；窗口 / 菜单状态由控制器自己维护。
+    cx.on_action({
+        let playback = playback.clone();
+        move |_: &TogglePlayback, cx: &mut App| playback.update(cx, |p, cx| p.toggle(cx))
+    });
+    cx.on_action({
+        let playback = playback.clone();
+        move |_: &NextTrack, cx: &mut App| playback.update(cx, |p, cx| p.next(cx))
+    });
+    cx.on_action({
+        let playback = playback.clone();
+        move |_: &PreviousTrack, cx: &mut App| playback.update(cx, |p, cx| p.previous(cx))
+    });
+    cx.on_action({
+        let playback = playback.clone();
+        let library = library.clone();
+        move |_: &ToggleLike, cx: &mut App| {
+            let Some(song) = playback.read(cx).snapshot().current_song.clone() else {
+                return;
+            };
+            library.update(cx, |library, cx| library.toggle_like(song, cx));
+        }
+    });
+    cx.on_action({
+        let playback = playback.clone();
+        move |_: &RepeatOff, cx: &mut App| {
+            playback.update(cx, |p, cx| p.set_mode(PlayMode::Sequential, cx))
+        }
+    });
+    cx.on_action({
+        let playback = playback.clone();
+        move |_: &RepeatOneTrack, cx: &mut App| {
+            playback.update(cx, |p, cx| p.set_mode(PlayMode::RepeatOne, cx))
+        }
+    });
+    cx.on_action({
+        let playback = playback.clone();
+        move |_: &RepeatAllTracks, cx: &mut App| {
+            playback.update(cx, |p, cx| p.set_mode(PlayMode::RepeatAll, cx))
+        }
+    });
+    cx.on_action({
+        let playback = playback.clone();
+        move |_: &ShufflePlayback, cx: &mut App| {
+            playback.update(cx, |p, cx| p.set_mode(PlayMode::Shuffle, cx))
+        }
+    });
+
+    // 播放控制器每 100 ms 就 notify 一次，菜单内容只有在这三个字段变化时才需要重建。
+    let last_state = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let apply = {
+        let playback = playback.clone();
+        let library = library.clone();
+        let last_state = last_state.clone();
+        move |cx: &mut App| {
+            let state = dock_menu_state(&playback, &library, cx);
+            if last_state.replace(Some(state)) != Some(state) {
+                cx.set_dock_menu(build_dock_menu(state));
+            }
+        }
+    };
+    apply(cx);
+    vec![
+        cx.observe(&playback, {
+            let apply = apply.clone();
+            move |_, cx| apply(cx)
+        }),
+        cx.observe(&library, move |_, cx| apply(cx)),
+    ]
+}
+
+/// Dock 菜单上会随状态变化的字段；这三个字段都不变时菜单不必重建。
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, PartialEq)]
+struct DockMenuState {
+    playing: bool,
+    mode: PlayMode,
+    liked: bool,
+}
+
+#[cfg(target_os = "macos")]
+fn dock_menu_state(
+    playback: &Entity<PlaybackController>,
+    library: &Entity<MusicLibrary>,
+    cx: &App,
+) -> DockMenuState {
+    let player = playback.read(cx);
+    DockMenuState {
+        playing: player.is_play_requested(),
+        mode: player.snapshot().mode,
+        liked: player
+            .snapshot()
+            .current_song
+            .as_ref()
+            .is_some_and(|song| library.read(cx).liked_song_ids.contains(&song.id)),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn build_dock_menu(state: DockMenuState) -> Vec<gpui::MenuItem> {
+    let DockMenuState {
+        playing,
+        mode,
+        liked,
+    } = state;
+    vec![
+        gpui::MenuItem::action(
+            if playing { "暂停" } else { "播放" },
+            dock_actions::TogglePlayback,
+        ),
+        gpui::MenuItem::action("下一个", dock_actions::NextTrack),
+        gpui::MenuItem::action("上一个", dock_actions::PreviousTrack),
+        gpui::MenuItem::action(
+            if liked { "取消喜欢" } else { "喜欢" },
+            dock_actions::ToggleLike,
+        ),
+        gpui::MenuItem::submenu(gpui::Menu::new("循环播放").items([
+            gpui::MenuItem::action("关", dock_actions::RepeatOff)
+                .checked(mode == PlayMode::Sequential),
+            gpui::MenuItem::action("单曲", dock_actions::RepeatOneTrack)
+                .checked(mode == PlayMode::RepeatOne),
+            gpui::MenuItem::action("全部", dock_actions::RepeatAllTracks)
+                .checked(mode == PlayMode::RepeatAll),
+        ])),
+        gpui::MenuItem::action("随机播放", dock_actions::ShufflePlayback)
+            .checked(mode == PlayMode::Shuffle),
+    ]
 }
 
 pub fn configure_window(window: &Window, cx: &App) {

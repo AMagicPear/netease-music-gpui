@@ -1,15 +1,17 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use gpui::{Context, Entity, ReadGlobal, Subscription};
 
 use super::account::AccountState;
 use crate::api::MusicApi;
-use crate::models::Playlist;
+use crate::models::{Playlist, Song};
 
 #[derive(Default)]
 pub struct MusicLibrary {
     pub playlists: Vec<Playlist>,
     pub liked_song_ids: HashSet<u64>,
+    /// 本次会话里点亮过的歌曲。喜欢的音乐歌单靠它不用重新拉取就能把新歌插进列表。
+    pub liked_song_cache: HashMap<u64, Song>,
     pub user_id: u64,
     pub loading: bool,
     pub error: Option<String>,
@@ -45,6 +47,7 @@ impl MusicLibrary {
         if self.user_id != user_id {
             self.playlists.clear();
             self.liked_song_ids.clear();
+            self.liked_song_cache.clear();
         }
         self.user_id = user_id;
         self.generation = self.generation.wrapping_add(1);
@@ -96,6 +99,54 @@ impl MusicLibrary {
         self.playlists
             .iter()
             .find(|playlist| playlist.special_type == 5)
+    }
+
+    /// 喜欢 / 取消喜欢。先改本地状态让界面立即响应，请求失败再回滚。
+    ///
+    /// 需要整个 [`Song`] 而不只是 id：点亮时把它存进 [`Self::liked_song_cache`]，
+    /// 喜欢的音乐歌单就能立刻把这首歌插进去，不必等重新拉取。
+    pub fn toggle_like(&mut self, song: Song, cx: &mut Context<Self>) {
+        let song_id = song.id;
+        if song_id == 0 {
+            return;
+        }
+        let liked = !self.liked_song_ids.contains(&song_id);
+        self.set_liked_locally(song_id, liked);
+        if liked {
+            self.liked_song_cache.insert(song_id, song.clone());
+        } else {
+            self.liked_song_cache.remove(&song_id);
+        }
+        let api = MusicApi::global(cx);
+        let client = api.client.clone();
+        let request = api
+            .runtime
+            .spawn(MusicApi::set_song_liked(client, song_id, liked));
+        cx.spawn(async move |this, cx| {
+            if let Ok(Err(message)) = request.await {
+                eprintln!("{message}");
+                let _ = this.update(cx, |library, cx| {
+                    library.set_liked_locally(song_id, !liked);
+                    // 回滚时缓存也要跟着退回：重新喜欢则补回歌曲，取消喜欢则清掉。
+                    if liked {
+                        library.liked_song_cache.remove(&song_id);
+                    } else {
+                        library.liked_song_cache.insert(song_id, song);
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn set_liked_locally(&mut self, song_id: u64, liked: bool) {
+        if liked {
+            self.liked_song_ids.insert(song_id);
+        } else {
+            self.liked_song_ids.remove(&song_id);
+        }
     }
 
     pub fn retry(&mut self, cx: &mut Context<Self>) {

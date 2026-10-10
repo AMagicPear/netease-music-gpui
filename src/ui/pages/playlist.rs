@@ -327,8 +327,27 @@ impl PlaylistPage {
             this.measured_size.set(None);
             cx.notify();
         });
-        let library_subscription = cx.observe(&library, |this, _, cx| {
+        let library_subscription = cx.observe(&library, |this, library, cx| {
             this.measured_size.set(None);
+            // 喜欢的音乐歌单的内容由 liked_song_ids 决定：任何入口取消 / 点亮红心后，
+            // 这里要把已加载的行也同步掉，否则列表不会“刷新”。
+            // 但只有喜欢列表成功加载后这个集合才是可信的：加载中或请求失败时
+            // 它可能是空的，拿它去过滤会把整个歌单误删。
+            let (liked, cache, ready) = {
+                let library = library.read(cx);
+                (
+                    library.liked_song_ids.clone(),
+                    library.liked_song_cache.clone(),
+                    !library.loading && library.likes_error.is_none(),
+                )
+            };
+            if ready {
+                this.detail.update(cx, |detail, cx| {
+                    if detail.reconcile_liked(&liked, &cache) {
+                        cx.notify();
+                    }
+                });
+            }
             cx.notify();
         });
         let mut playback_state = playlist_playback_state(playback.read(cx));
@@ -955,6 +974,7 @@ impl PlaylistPage {
         let song = &detail.songs[self.display_order[index]];
         let display = &self.song_display[self.display_order[index]];
         let song_id = song.id;
+        let like_song = song.clone();
         let playback = self.playback.read(cx);
         let is_current_song = playback
             .snapshot()
@@ -1071,6 +1091,10 @@ impl PlaylistPage {
                 })
                 .id(("playlist-song-like", song_id))
                 .aria_label(if liked { "已喜欢" } else { "未喜欢" })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.library
+                        .update(cx, |library, cx| library.toggle_like(like_song.clone(), cx));
+                }))
                 .into_any_element(),
             div()
                 // 时长是辅助信息：比 `muted_foreground`(60%) 再淡一档（45%），字重也细一档。

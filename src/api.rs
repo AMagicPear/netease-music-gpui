@@ -187,6 +187,21 @@ impl MusicApi {
             .map_err(|_| "喜欢的歌曲列表格式无效".to_string())
     }
 
+    /// 喜欢 / 取消喜欢一首歌。成功时接口只回 code，不返回新状态。
+    pub async fn set_song_liked(
+        client: ApiClient,
+        song_id: u64,
+        liked: bool,
+    ) -> Result<(), String> {
+        Self::request(client.like(
+            &Query::new()
+                .param("id", &song_id.to_string())
+                .param("like", if liked { "true" } else { "false" }),
+        ))
+        .await?;
+        Ok(())
+    }
+
     pub async fn playlist(
         client: ApiClient,
         playlist_id: u64,
