@@ -523,6 +523,7 @@ fn row_actions(
     colors: ColorTokens,
     on_like_click: RowCallback<ClickEvent>,
 ) -> AnyElement {
+    // 返回 `Stateful<Svg>`，收藏 / 更多各自再挂自己的点击处理。
     let plain = |id: (&'static str, usize), path: &'static str, label: &'static str| {
         svg()
             .path(path)
@@ -534,7 +535,6 @@ fn row_actions(
             .role(Role::Button)
             .aria_label(label)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_click(|_, _, cx| cx.stop_propagation())
             // active 属于 StatefulInteractiveElement，必须跟在 `.id()` 之后。
             .active(|style| style.text_color(colors.foreground.alpha(PRESSED_ICON_ALPHA)))
     };
@@ -568,16 +568,27 @@ fn row_actions(
                 .on_click(on_like_click)
                 .aria_label(if liked { "已喜欢" } else { "未喜欢" }),
         )
-        .child(plain(
-            ("playlist-panel-collect", index),
-            "icons/collect.svg",
-            "收藏",
-        ))
-        .child(plain(
-            ("playlist-panel-more", index),
-            "icons/xpoint.svg",
-            "更多",
-        ))
+        // 收藏：弹「收藏到歌单」弹窗。先停传播，避免双击时落到整行的播放处理上。
+        .child(
+            plain(
+                ("playlist-panel-collect", index),
+                "icons/collect.svg",
+                "收藏",
+            )
+            .on_click(|_, window, cx| {
+                cx.stop_propagation();
+                crate::ui::components::open_collect_window(window, cx);
+            }),
+        )
+        // 更多：弹出原生菜单。
+        .child(
+            plain(("playlist-panel-more", index), "icons/xpoint.svg", "更多").on_click(
+                |event, window, cx| {
+                    cx.stop_propagation();
+                    crate::ui::components::show_song_menu(event.position(), window, cx);
+                },
+            ),
+        )
         .into_any_element()
 }
 

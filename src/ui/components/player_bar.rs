@@ -1038,14 +1038,18 @@ impl Render for PlayerBar {
                                 colors,
                                 cx,
                             ))
-                            .child(hover_icon(
-                                "player-collect-button",
-                                "收藏",
-                                "icons/collect.svg",
-                                IconSize::Middle.pixels(),
-                                colors.muted_foreground,
-                                colors,
-                            ))
+                            .child(
+                                hover_icon(
+                                    "player-collect-button",
+                                    "收藏",
+                                    "icons/collect.svg",
+                                    IconSize::Middle.pixels(),
+                                    colors.muted_foreground,
+                                    colors,
+                                )
+                                // 右侧第二个图标就是收藏入口：弹出「收藏到歌单」弹窗。
+                                .on_click(|_, window, cx| super::open_collect_window(window, cx)),
+                            )
                             .child(self.volume.clone())
                             .child(hover_icon(
                                 "player-more-button",

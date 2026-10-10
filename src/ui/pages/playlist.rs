@@ -226,9 +226,19 @@ fn row_hover_icon(
 /// 行 hover 时贴在标题右侧的那排操作图标：下载 / 收藏 / 评论 / 更多。
 fn row_actions(index: u64, colors: ColorTokens) -> AnyElement {
     // 四个图标只有 id / 路径 / 无障碍名不同，其余全都一样：尺寸用 header 那排的
-    // `IconSize::Small`，灰度和三态交互由 `row_hover_icon` 统一给。
-    let icon = |id: &'static str, path: &'static str, label: &'static str| {
-        row_hover_icon((id, index), path, label, IconSize::Small.pixels(), colors)
+    // `IconSize::Small`，灰度和三态交互在这里统一给。
+    // 返回 `Stateful<Svg>`，需要交互的图标（收藏 / 更多）还能继续挂 `.on_click`。
+    let action_icon = |id: &'static str, path: &'static str, label: &'static str| {
+        svg()
+            .path(path)
+            .size(IconSize::Small.pixels())
+            .flex_none()
+            .text_color(colors.foreground.alpha(0.6))
+            .hover(|style| style.text_color(colors.foreground))
+            .id((id, index))
+            .role(Role::Button)
+            .aria_label(label)
+            .active(|style| style.text_color(colors.foreground.alpha(PRESSED_ICON_ALPHA)))
     };
     div()
         .flex_none()
@@ -237,14 +247,29 @@ fn row_actions(index: u64, colors: ColorTokens) -> AnyElement {
         // 间距抄 header 那排图标（图标之间 10px），左侧再加 10px，免得贴着标题文字。
         .gap(px(10.))
         .ml(px(10.))
-        .child(icon(
+        .child(action_icon(
             "playlist-song-download",
             "icons/download_outline.svg",
             "下载",
         ))
-        .child(icon("playlist-song-collect", "icons/collect.svg", "收藏"))
-        .child(icon("playlist-song-comment", "icons/comment.svg", "评论"))
-        .child(icon("playlist-song-more", "icons/xpoint.svg", "更多"))
+        // 从左往右第二个图标就是收藏入口。
+        .child(
+            action_icon("playlist-song-collect", "icons/collect.svg", "收藏")
+                .on_click(|_, window, cx| crate::ui::components::open_collect_window(window, cx)),
+        )
+        .child(action_icon(
+            "playlist-song-comment",
+            "icons/comment.svg",
+            "评论",
+        ))
+        // 最右侧的「更多」弹出原生菜单。
+        .child(
+            action_icon("playlist-song-more", "icons/xpoint.svg", "更多").on_click(
+                |event, window, cx| {
+                    crate::ui::components::show_song_menu(event.position(), window, cx)
+                },
+            ),
+        )
         .into_any_element()
 }
 

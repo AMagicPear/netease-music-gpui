@@ -31,7 +31,11 @@ mod dock_actions {
 struct Desktop {
     window: AnyWindowHandle,
     view: Entity<MainWindow>,
+    /// 音乐库；收藏弹窗要显示歌单列表，需要读它。
+    library: Entity<MusicLibrary>,
     bounds: WindowBounds,
+    /// 「收藏到歌单」弹窗的句柄；为空表示当前没有打开。同一时刻只允许存在一个。
+    collect_window: Option<AnyWindowHandle>,
     _tray: Option<TrayIcon>,
     #[cfg(target_os = "macos")]
     _dock_subscriptions: Vec<Subscription>,
@@ -52,7 +56,9 @@ pub fn init(
     cx.set_global(Desktop {
         window,
         view,
+        library: library.clone(),
         bounds,
+        collect_window: None,
         _tray: None,
         #[cfg(target_os = "macos")]
         _dock_subscriptions: Vec::new(),
@@ -69,6 +75,21 @@ pub fn init(
         });
     })
     .detach();
+}
+
+/// 音乐库 Entity；窗口创建后一直存在，收藏弹窗用它读歌单列表。
+pub(crate) fn library(cx: &App) -> Option<Entity<MusicLibrary>> {
+    Some(cx.try_global::<Desktop>()?.library.clone())
+}
+
+/// 当前打开的收藏弹窗句柄；`None` 表示没有打开。
+pub(crate) fn collect_window(cx: &App) -> Option<AnyWindowHandle> {
+    cx.try_global::<Desktop>()?.collect_window
+}
+
+/// 记录 / 清除收藏弹窗句柄。窗口关闭后必须清掉，否则会留下一个失效句柄。
+pub(crate) fn set_collect_window(window: Option<AnyWindowHandle>, cx: &mut App) {
+    cx.global_mut::<Desktop>().collect_window = window;
 }
 
 /// macOS Dock 右键菜单：播放控制、喜欢开关、播放方式。
