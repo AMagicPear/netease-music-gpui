@@ -4,6 +4,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_kit::base::{Button, ColorTokens, Theme, Transition, transition};
 
+use super::playlist_panel::PlaylistPanel;
 use super::progress_bar::ProgressBar;
 use super::volume_control::VolumeControl;
 use super::{
@@ -43,6 +44,9 @@ pub struct PlayerBar {
     album_expanded: bool,
     album_backdrop: Backdrop,
     backdrop_gradient: Option<CoverGradient>,
+    /// 播放列表面板。它自己管开合、动画、滚动和队列展示，播放栏只负责挂载和触发。
+    playlist_panel: Entity<PlaylistPanel>,
+    _playlist_subscription: Subscription,
     _playback_subscription: Subscription,
     _progress_subscription: Subscription,
     _library_subscription: Subscription,
@@ -72,6 +76,10 @@ impl PlayerBar {
                 cx,
             )
         });
+        let playlist =
+            cx.new(|cx| PlaylistPanel::new(playback.clone(), library.clone(), window, cx));
+        // 面板自己管开合；播放栏要跟着重绘，触发按钮才能拿到最新的状态。
+        let playlist_subscription = cx.observe(&playlist, |_, _, cx| cx.notify());
         let mut playback_state = {
             let controller = playback.read(cx);
             let state = controller.snapshot();
@@ -124,6 +132,8 @@ impl PlayerBar {
             album_expanded: false,
             album_backdrop,
             backdrop_gradient: None,
+            playlist_panel: playlist,
+            _playlist_subscription: playlist_subscription,
             _playback_subscription: playback_subscription,
             _progress_subscription: progress_subscription,
             _library_subscription: library_subscription,
@@ -707,6 +717,8 @@ impl Render for PlayerBar {
             .size(play_pause_icon_size)
             .text_color(colors.primary_foreground)
             .into_any_element();
+        // 触发按钮要拿"渲染这一刻"的开合状态比对，见下面按钮上的说明。
+        let playlist_open_at_render = self.playlist_panel.read(cx).is_open();
 
         div()
             .w_full()
@@ -968,14 +980,28 @@ impl Render for PlayerBar {
                                     },
                                 )),
                             )
-                            .child(hover_icon(
-                                "player-playlist-button",
-                                "播放列表",
-                                "icons/playlist.svg",
-                                IconSize::Large.pixels(),
-                                colors.muted_foreground,
-                                colors,
-                            )),
+                            .child(
+                                hover_icon(
+                                    "player-playlist-button",
+                                    "播放列表",
+                                    "icons/playlist.svg",
+                                    IconSize::Large.pixels(),
+                                    colors.muted_foreground,
+                                    colors,
+                                )
+                                // 按下即开合。面板自己在"面板外按下"时会先一步收起，
+                                // 所以这里要跟渲染时的状态比对：值已经不相等就说明这一下
+                                // 刚刚才被面板关掉，不能再翻回来（否则点图标永远关不上）。
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, _, cx| {
+                                        let panel = this.playlist_panel.clone();
+                                        if panel.read(cx).is_open() == playlist_open_at_render {
+                                            panel.update(cx, |panel, cx| panel.toggle(cx));
+                                        }
+                                    }),
+                                ),
+                            ),
                     )
                     // 右侧：收藏、音量等工具
                     .child(
@@ -1009,7 +1035,9 @@ impl Render for PlayerBar {
                                 colors.muted_foreground,
                                 colors,
                             )),
-                    ),
+                    )
+                    // 面板自己绝对定位并延后绘制，不参与这一栏的布局。
+                    .child(self.playlist_panel.clone()),
             )
     }
 }

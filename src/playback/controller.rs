@@ -43,6 +43,10 @@ pub struct PlaybackController {
     queue_cursor: Option<usize>,
     /// 列表的来源歌单，只用来显示「来自哪个歌单」。
     queue_source: Option<u64>,
+    /// 队列内容每变一次（换列表、洗牌、插歌、移游标）就自增。UI 靠它判断
+    /// 播放列表面板是否需要重绘：不能只盯 `state.revision`，因为重播同一首
+    /// 已加载的歌时列表可以整体换掉而不重新加载。
+    queue_revision: u64,
     play_when_ready: bool,
     request: Option<tokio::task::AbortHandle>,
     pending_position: Duration,
@@ -70,6 +74,7 @@ impl PlaybackController {
             queue: Vec::new(),
             queue_cursor: None,
             queue_source: None,
+            queue_revision: 0,
             play_when_ready: false,
             request: None,
             pending_position: Duration::ZERO,
@@ -212,6 +217,33 @@ impl PlaybackController {
         self.preload.as_ref().map(|preload| preload.song.clone())
     }
 
+    /// 播放列表当前的顺序。界面直接读这份数据展示，不再复制一份。
+    pub fn queue(&self) -> &[Song] {
+        &self.queue
+    }
+
+    /// 当前播放的是哪个队列项；重复歌曲也只对应一个位置。
+    pub fn queue_cursor(&self) -> Option<usize> {
+        self.queue_cursor
+    }
+
+    /// 队列内容的版本号：换列表、洗牌、插歌、移游标都会让它变化。
+    /// 界面把它并进「需要重绘」的比对里，队列一变面板就刷新。
+    pub fn queue_revision(&self) -> u64 {
+        self.queue_revision
+    }
+
+    /// 播放列表面板双击某一项：游标移到这一项并立即播放。
+    /// 队列项是按位置引用的，不按歌曲 id 反查，列表里有重复歌曲也不会选错。
+    pub fn play_queue_index(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(song) = self.queue.get(index).cloned() else {
+            return;
+        };
+        self.queue_cursor = Some(index);
+        self.queue_revision = self.queue_revision.wrapping_add(1);
+        self.select_song(song, cx);
+    }
+
     /// 把页面上选中的歌曲换成一份新的播放列表并开始播放。
     /// 列表进来之后就是独立数据：页面再排序、切走或刷新都不影响它。
     pub fn play_list(
@@ -252,6 +284,7 @@ impl PlaybackController {
         self.queue = songs;
         self.queue_cursor =
             song_id.and_then(|song_id| self.queue.iter().position(|song| song.id == song_id));
+        self.queue_revision = self.queue_revision.wrapping_add(1);
         self.current_list_song()
     }
 
@@ -408,6 +441,7 @@ impl PlaybackController {
             return None;
         };
         self.queue_cursor = Some(cursor as usize);
+        self.queue_revision = self.queue_revision.wrapping_add(1);
         self.current_list_song()
     }
 
@@ -438,6 +472,7 @@ impl PlaybackController {
             self.queue.shuffle(&mut rng);
             self.queue_cursor = None;
         }
+        self.queue_revision = self.queue_revision.wrapping_add(1);
     }
 
     /// 下一首插入：插到当前歌曲之后。「播完这首就听它」和心动模式穿插推荐都走这里。
@@ -448,6 +483,7 @@ impl PlaybackController {
             Some(cursor) => self.queue.insert(cursor + 1, song),
             None => self.queue.insert(0, song),
         }
+        self.queue_revision = self.queue_revision.wrapping_add(1);
         self.save_cache();
         cx.notify();
     }
@@ -838,6 +874,25 @@ mod tests {
         assert_eq!(controller.advance_list().unwrap().id, 2);
         assert_eq!(controller.advance_list().unwrap().id, 1);
         assert_eq!(controller.queue_cursor, Some(2));
+    }
+
+    #[test]
+    fn queue_revision_tracks_replacement_cursor_and_shuffle() {
+        let mut controller = controller_with(&[1, 2, 1, 3], 1, PlayMode::Sequential);
+        let revision = controller.queue_revision();
+        controller.step_list(1);
+        controller.step_list(1);
+        assert_eq!(controller.queue_cursor(), Some(2));
+        assert_eq!(controller.queue_revision(), revision + 2);
+        controller.apply_mode_to_list(PlayMode::Shuffle);
+        assert_eq!(controller.queue_revision(), revision + 3);
+        assert_eq!(controller.queue()[controller.queue_cursor().unwrap()].id, 1);
+        controller.set_list(Some(7), vec![], None);
+        assert!(controller.queue().is_empty());
+        assert_eq!(controller.queue_cursor(), None);
+        assert_eq!(controller.queue_revision(), revision + 4);
+        assert!(controller.step_list(1).is_none());
+        assert_eq!(controller.queue_revision(), revision + 4);
     }
 
     #[test]

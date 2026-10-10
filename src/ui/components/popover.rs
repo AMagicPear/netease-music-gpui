@@ -3,7 +3,7 @@ use gpui::{
     MouseDownEvent, ParentElement, Pixels, RenderOnce, StyleRefinement, Styled, Window, anchored,
     deferred, div, px, relative,
 };
-use gpui_kit::base::{StyledExt as _, Theme};
+use gpui_kit::base::{ColorTokens, StyledExt as _, Theme};
 
 use super::LAYER_POPOVER;
 
@@ -12,8 +12,13 @@ use super::LAYER_POPOVER;
 /// 这是自己实现弹层的主要理由：gpui-kit 的 Popup 把限位写死成 8px
 /// （crates/base/src/popup.rs 的 WINDOW_MARGIN），没有对外开关。
 const EDGE_MARGIN: Pixels = px(28.);
-/// 弹层圆角。
-const SURFACE_RADIUS: Pixels = px(10.);
+/// 浮层统一圆角。播放列表面板复用它（只取左侧两角），两种浮层的圆角量始终一致。
+pub(super) const SURFACE_RADIUS: Pixels = px(10.);
+
+/// 浮层统一投影。集中在这里，改一次音质弹窗和播放列表面板一起生效。
+pub(super) fn surface_shadow(colors: ColorTokens) -> BoxShadow {
+    BoxShadow::new(px(0.), px(2.), colors.foreground.alpha(0.1)).blur_radius(px(6.))
+}
 
 /// 点击触发、点外面关闭的轻量弹层。
 ///
@@ -129,14 +134,7 @@ impl RenderOnce for Popover {
                                     // 弹层的外观固定在这里，调用方给的元素只撑尺寸。
                                     .bg(colors.surface)
                                     .rounded(SURFACE_RADIUS)
-                                    .shadow(vec![
-                                        BoxShadow::new(
-                                            px(0.),
-                                            px(2.),
-                                            colors.foreground.alpha(0.1),
-                                        )
-                                        .blur_radius(px(6.)),
-                                    ])
+                                    .shadow(vec![surface_shadow(colors)])
                                     // 弹层最后画，冒泡阶段最先拿到事件：在这里掐断，
                                     // 点面板就不会穿透到下面的进度条或歌曲列表。
                                     .on_mouse_down(

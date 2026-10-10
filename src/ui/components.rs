@@ -6,6 +6,7 @@ use std::{cell::Cell, rc::Rc};
 mod comment_row;
 mod drag_preview;
 mod player_bar;
+mod playlist_panel;
 mod popover;
 mod progress_bar;
 mod spinner;
@@ -19,6 +20,8 @@ pub use comment_row::comment_row;
 pub use drag_preview::ResizeDragPreview;
 pub use player_bar::{ALBUM_REVEAL_DURATION, OpenAlbumLyrics, PLAYER_BAR_HEIGHT, PlayerBar};
 pub use popover::Popover;
+// 播放列表面板和音质浮窗共用同一份圆角与投影；子模块通过 `super::` 取名。
+use popover::{SURFACE_RADIUS, surface_shadow};
 pub use spinner::spinner;
 pub use tab_bar::{TabBar, TabChanged, TabItem};
 pub(in crate::ui) use vinyl::{RotationClock, Vinyl};
