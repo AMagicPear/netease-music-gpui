@@ -537,7 +537,6 @@ impl MainContent {
                 .anchor(Anchor::TopRight)
                 .offset(px(8.))
                 .w(px(240.))
-                .py(px(6.))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                     this.profile_menu_open = false;
                     cx.notify();
@@ -582,7 +581,7 @@ impl MainContent {
                                 }),
                         ),
                 )
-                .child(div().h(px(1.)).bg(colors.border))
+                .child(div().h(px(1.)).mx(px(12.)).bg(colors.border))
                 .child(
                     div()
                         .id("header-profile-logout")
@@ -596,8 +595,10 @@ impl MainContent {
                         .px(px(12.))
                         .py(px(8.))
                         .text_size(px(13.))
+                        .font_weight(FontWeight::MEDIUM)
+                        // hover 只把文字与图标变红（主题红），不铺底色。
                         .text_color(colors.foreground.alpha(0.8))
-                        .hover(|style| style.bg(colors.muted).text_color(colors.foreground))
+                        .hover(|style| style.text_color(colors.primary))
                         .child(
                             svg()
                                 .path("icons/logout.svg")
@@ -605,7 +606,7 @@ impl MainContent {
                                 .flex_none()
                                 .text_color(colors.foreground.alpha(0.8))
                                 .group_hover("header-profile-logout", |style| {
-                                    style.text_color(colors.foreground)
+                                    style.text_color(colors.primary)
                                 }),
                         )
                         .child("退出登录")
