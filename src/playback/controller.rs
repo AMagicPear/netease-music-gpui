@@ -501,6 +501,36 @@ impl PlaybackController {
         cx.notify();
     }
 
+    /// 清空播放队列：停止播放并移除全部队列项。
+    pub fn clear_queue(&mut self, cx: &mut Context<Self>) {
+        if self.queue.is_empty() {
+            return;
+        }
+        self.stop();
+        self.queue.clear();
+        self.queue_cursor = None;
+        self.queue_source = None;
+        self.state.current_song = None;
+        self.state.duration = Duration::ZERO;
+        if let Some(media) = self.system_media.as_mut() {
+            media.clear();
+        }
+        self.queue_revision = self.queue_revision.wrapping_add(1);
+        self.ticks_since_save = 0;
+        // save_cache 遇到空队列会跳过，这里手动写一份空状态覆盖磁盘上的旧缓存，
+        // 否则下次启动会把刚清掉的队列又恢复回来。
+        self.persistence.request_playback(PlaybackState {
+            playlist_id: 0,
+            queue: Vec::new(),
+            song_id: 0,
+            queue_cursor: None,
+            position: Duration::ZERO,
+            mode: self.state.mode,
+            quality: self.state.quality,
+        });
+        cx.notify();
+    }
+
     fn select_song(&mut self, song: Song, cx: &mut Context<Self>) {
         self.load_song(song, Duration::ZERO, true, cx);
     }

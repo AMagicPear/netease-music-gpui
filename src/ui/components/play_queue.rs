@@ -63,6 +63,42 @@ fn panel_playback_state(playback: &PlaybackController) -> (u64, Option<usize>, b
     )
 }
 
+/// 头部右侧的文字按钮（「收藏全部」「清空」）：灰字，悬停加深，字号和计数一致。
+fn header_text_button(
+    id: &'static str,
+    icon: &'static str,
+    label: &'static str,
+    colors: ColorTokens,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    // SVG 不继承父级的 text_color，颜色必须直接设在 svg 上；想跟文字同步变色
+    // 就得借组悬停：组名用按钮 id 派生，`group_hover` 按名字全局查，同名会互相点亮。
+    let group = SharedString::from(format!("playlist-header-{id}"));
+    div()
+        .id(id)
+        .group(group.clone())
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(4.))
+        .cursor_pointer()
+        .text_size(px(13.))
+        .text_color(colors.muted_foreground)
+        .hover(|style| style.text_color(colors.foreground))
+        .role(Role::Button)
+        .aria_label(label)
+        .on_click(on_click)
+        .child(
+            svg()
+                .path(icon)
+                .size(px(14.))
+                .flex_none()
+                .text_color(colors.muted_foreground)
+                .group_hover(group, move |style| style.text_color(colors.foreground)),
+        )
+        .child(label)
+}
+
 pub struct PlayQueue {
     playback: Entity<PlaybackController>,
     list: Entity<ListState<QueueDelegate>>,
@@ -203,6 +239,7 @@ impl Render for PlayQueue {
                         .flex()
                         .items_center()
                         .pl(ROW_PADDING)
+                        .pr(ROW_PADDING)
                         // 标题在本面板里放大一档；计数的字号、字重仍和页面 tab 同一套。
                         .child(
                             div()
@@ -217,6 +254,34 @@ impl Render for PlayQueue {
                                 .font_weight(FontWeight::BOLD)
                                 .font_family(DOLPHIN_FAMILY)
                                 .child(count.to_string()),
+                        )
+                        // 右侧操作区：收藏全部弹「收藏到歌单」窗口，清空移除整个队列。
+                        .child(
+                            div()
+                                .flex_1()
+                                .flex()
+                                .items_center()
+                                .justify_end()
+                                .gap(px(12.))
+                                .child(header_text_button(
+                                    "player-playlist-collect-all",
+                                    "icons/add_all.svg",
+                                    "收藏全部",
+                                    colors,
+                                    |_, window, cx| {
+                                        crate::ui::components::open_collect_window(window, cx);
+                                    },
+                                ))
+                                .child(header_text_button(
+                                    "player-playlist-clear",
+                                    "icons/delete.svg",
+                                    "清空",
+                                    colors,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.playback
+                                            .update(cx, |playback, cx| playback.clear_queue(cx));
+                                    }),
+                                )),
                         ),
                 )
                 .child(

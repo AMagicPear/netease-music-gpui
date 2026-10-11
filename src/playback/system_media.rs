@@ -123,6 +123,19 @@ impl SystemMedia {
         Ok(())
     }
 
+    /// 清掉原生控件上的歌曲信息：系统「现在播放」不再显示本应用的条目。
+    ///
+    /// 清空队列和退出时用；同时重置内部记账，下一首歌会强制重新发布元数据。
+    pub(super) fn clear(&mut self) {
+        if self.metadata_key.is_some() {
+            let _ = self.controls.set_playback(MediaPlayback::Stopped);
+            let _ = self.controls.set_metadata(MediaMetadata::default());
+            self.metadata_key = None;
+            self.published_cover = None;
+            self.playback = None;
+        }
+    }
+
     /// 原生控件只读本地文件：远程封面没落盘时回落到打包的默认图。
     fn local_cover(&self, song: &Song) -> String {
         remote_cover_url(Some(song))
@@ -172,10 +185,7 @@ fn playback_status(state: &PlaybackSnapshot, has_source: bool) -> MediaPlayback 
 
 impl Drop for SystemMedia {
     fn drop(&mut self) {
-        if self.metadata_key.is_some() {
-            let _ = self.controls.set_playback(MediaPlayback::Stopped);
-            let _ = self.controls.set_metadata(MediaMetadata::default());
-        }
+        self.clear();
         // MediaControls::drop 自动移除命令处理器。
     }
 }

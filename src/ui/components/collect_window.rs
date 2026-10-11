@@ -317,7 +317,7 @@ fn playlist_cover(url: Option<&str>, colors: ColorTokens) -> AnyElement {
 fn close_button(colors: ColorTokens) -> impl IntoElement {
     svg()
         .path("icons/window/close.svg")
-        .size(px(16.))
+        .size(px(20.))
         .text_color(colors.foreground.alpha(0.6))
         .hover(|style| style.text_color(colors.foreground))
         .absolute()

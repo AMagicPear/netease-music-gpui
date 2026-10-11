@@ -621,7 +621,7 @@ impl Render for LoginWindow {
                                 .child(
                                     svg()
                                         .path("icons/window/close.svg")
-                                        .size(px(16.))
+                                        .size(px(20.))
                                         .text_color(colors.foreground.alpha(0.6))
                                         .hover(|style| style.text_color(colors.foreground)),
                                 )

@@ -448,10 +448,6 @@ impl MainContent {
         let vip_badge = profile.vip.as_ref().and_then(|vip| {
             vip.badge_path(time::OffsetDateTime::now_utc().unix_timestamp() as u64 * 1000)
         });
-        // 弹层与触发器各自渲染一份（同一账号数据），克隆两份避免移动冲突。
-        let popover_nickname = nickname.clone();
-        let popover_avatar_url = avatar_url.clone();
-        let popover_vip_badge = vip_badge.clone();
 
         let trigger = div()
             .id("header-profile-trigger")
@@ -536,52 +532,10 @@ impl MainContent {
             SurfacePopover::new("header-profile-popover", logged_in && was_open, trigger)
                 .anchor(Anchor::TopRight)
                 .offset(px(8.))
-                .w(px(240.))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                     this.profile_menu_open = false;
                     cx.notify();
                 }))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(10.))
-                        .px(px(12.))
-                        .py(px(8.))
-                        .child(
-                            // 弹层里的头像展示更大一号，取 72px 缩略图。
-                            if popover_avatar_url.is_empty() {
-                                Avatar::new()
-                                    .with_size(px(36.))
-                                    .flex_none()
-                                    .src("images/default_avatar.png")
-                                    .into_any_element()
-                            } else {
-                                Avatar::new()
-                                    .with_size(px(36.))
-                                    .flex_none()
-                                    .src(thumbnail_url(&popover_avatar_url, 72))
-                                    .into_any_element()
-                            },
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(2.))
-                                .min_w(px(0.))
-                                .child(
-                                    div()
-                                        .text_size(px(13.))
-                                        .line_clamp(1)
-                                        .child(popover_nickname),
-                                )
-                                .when_some(popover_vip_badge, |col, badge| {
-                                    col.child(img(badge).h(px(14.)).w_auto())
-                                }),
-                        ),
-                )
-                .child(div().h(px(1.)).mx(px(12.)).bg(colors.border))
                 .child(
                     div()
                         .id("header-profile-logout")
@@ -594,7 +548,7 @@ impl MainContent {
                         .gap(px(8.))
                         .px(px(12.))
                         .py(px(8.))
-                        .text_size(px(13.))
+                        .text_size(px(14.))
                         .font_weight(FontWeight::MEDIUM)
                         // hover 只把文字与图标变红（主题红），不铺底色。
                         .text_color(colors.foreground.alpha(0.8))
@@ -602,7 +556,7 @@ impl MainContent {
                         .child(
                             svg()
                                 .path("icons/logout.svg")
-                                .size(px(15.))
+                                .size(px(20.))
                                 .flex_none()
                                 .text_color(colors.foreground.alpha(0.8))
                                 .group_hover("header-profile-logout", |style| {
