@@ -515,7 +515,6 @@ impl PlayerBar {
                                 },
                                 0usize,
                             ))
-                            .w_full()
                             .h(px(52.))
                             .flex_none()
                             .flex()
