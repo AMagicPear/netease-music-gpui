@@ -5,8 +5,8 @@ use gpui::*;
 
 use super::assets::{CoverPrefetch, thumbnail_url, track_cover_url};
 use super::components::{
-    PLAYER_BAR_HEIGHT, PlayerBar, ResizeDragPreview, SURFACE_RADIUS, icon_hover_color,
-    surface_shadow, window_drag_area,
+    PLAYER_BAR_HEIGHT, PlayerBar, ResizeDragPreview, SurfacePopover, icon_hover_color,
+    window_drag_area,
 };
 use super::cover_color::{Backdrop, CoverColor, CoverGradient, gradient_layer};
 use super::now_playing::{NowPlaying, NowPlayingPage};
@@ -17,7 +17,7 @@ use crate::playback::PlaybackController;
 use crate::state::account::AccountState;
 use crate::state::library::MusicLibrary;
 use gpui_kit::base::input::{Input, InputState};
-use gpui_kit::base::{Button, ColorTokens, Popup, Scrollbar, ScrollbarMode, Theme};
+use gpui_kit::base::{Button, ColorTokens, Scrollbar, ScrollbarMode, Theme};
 use gpui_kit::component::Sizable;
 use gpui_kit::component::avatar::Avatar;
 
@@ -448,6 +448,10 @@ impl MainContent {
         let vip_badge = profile.vip.as_ref().and_then(|vip| {
             vip.badge_path(time::OffsetDateTime::now_utc().unix_timestamp() as u64 * 1000)
         });
+        // 弹层与触发器各自渲染一份（同一账号数据），克隆两份避免移动冲突。
+        let popover_nickname = nickname.clone();
+        let popover_avatar_url = avatar_url.clone();
+        let popover_vip_badge = vip_badge.clone();
 
         let trigger = div()
             .id("header-profile-trigger")
@@ -527,99 +531,80 @@ impl MainContent {
                     ),
             );
 
-        Popup::new("header-profile-popover", trigger)
-            // 弹层 wrapper 才是 header flex 行的直接子元素，
-            // 靠右对齐要挂在这层（trigger 已被包进 wrapper 内部）。
-            .ml_auto()
-            .anchor(Anchor::TopRight)
-            .offset(px(8.))
-            .flex_none()
-            .when(logged_in && was_open, |popup| {
-                popup.content(self.profile_menu_content(colors, cx))
-            })
-    }
-
-    /// 账号弹层内容：用户信息行 + 退出登录。
-    fn profile_menu_content(&self, colors: ColorTokens, cx: &Context<Self>) -> impl IntoElement {
-        let profile = self.user_profile.read(cx);
-        let nickname = profile.profile.nickname.clone();
-        let avatar_url = profile.profile.avatar_url.clone();
-        let vip_badge = profile.vip.as_ref().and_then(|vip| {
-            vip.badge_path(time::OffsetDateTime::now_utc().unix_timestamp() as u64 * 1000)
-        });
-
-        div()
-            .id("header-profile-surface")
-            .w(px(240.))
-            .bg(colors.surface)
-            .rounded(SURFACE_RADIUS)
-            .shadow(vec![surface_shadow(colors)])
-            .py(px(6.))
-            .text_color(colors.foreground)
-            // 点弹层外面收起（捕获阶段触发，点在弹层内不会到这）；
-            // 点在弹层内不冒泡，避免误触页面其它交互。
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                this.profile_menu_open = false;
-                cx.notify();
-            }))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .px(px(12.))
-                    .py(px(8.))
-                    .child(
-                        // 弹层里的头像展示更大一号，取 72px 缩略图。
-                        if avatar_url.is_empty() {
-                            Avatar::new()
-                                .with_size(px(36.))
-                                .flex_none()
-                                .src("images/default_avatar.png")
-                                .into_any_element()
-                        } else {
-                            Avatar::new()
-                                .with_size(px(36.))
-                                .flex_none()
-                                .src(thumbnail_url(&avatar_url, 72))
-                                .into_any_element()
-                        },
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.))
-                            .min_w(px(0.))
-                            .child(div().text_size(px(13.)).line_clamp(1).child(nickname))
-                            .when_some(vip_badge, |col, badge| {
-                                col.child(img(badge).h(px(14.)).w_auto())
-                            }),
-                    ),
-            )
-            .child(div().h(px(1.)).bg(colors.border))
-            .child(
-                div()
-                    .id("header-profile-logout")
-                    .cursor_pointer()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .px(px(12.))
-                    .py(px(8.))
-                    .text_size(px(13.))
-                    .text_color(colors.foreground.alpha(0.8))
-                    .hover(|style| style.bg(colors.muted).text_color(colors.foreground))
-                    .child(svg().path("icons/logout.svg").size(px(15.)).flex_none())
-                    .child("退出登录")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.profile_menu_open = false;
-                        this.user_profile
-                            .update(cx, |account, cx| account.logout(cx));
-                        cx.notify();
-                    })),
-            )
+        // ml_auto 是 header flex 行里的布局属性（wrapper 层），组件只管浮层本体。
+        div().ml_auto().flex_none().child(
+            SurfacePopover::new("header-profile-popover", logged_in && was_open, trigger)
+                .anchor(Anchor::TopRight)
+                .offset(px(8.))
+                .w(px(240.))
+                .py(px(6.))
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.profile_menu_open = false;
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .px(px(12.))
+                        .py(px(8.))
+                        .child(
+                            // 弹层里的头像展示更大一号，取 72px 缩略图。
+                            if popover_avatar_url.is_empty() {
+                                Avatar::new()
+                                    .with_size(px(36.))
+                                    .flex_none()
+                                    .src("images/default_avatar.png")
+                                    .into_any_element()
+                            } else {
+                                Avatar::new()
+                                    .with_size(px(36.))
+                                    .flex_none()
+                                    .src(thumbnail_url(&popover_avatar_url, 72))
+                                    .into_any_element()
+                            },
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.))
+                                .min_w(px(0.))
+                                .child(
+                                    div()
+                                        .text_size(px(13.))
+                                        .line_clamp(1)
+                                        .child(popover_nickname),
+                                )
+                                .when_some(popover_vip_badge, |col, badge| {
+                                    col.child(img(badge).h(px(14.)).w_auto())
+                                }),
+                        ),
+                )
+                .child(div().h(px(1.)).bg(colors.border))
+                .child(
+                    div()
+                        .id("header-profile-logout")
+                        .cursor_pointer()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .px(px(12.))
+                        .py(px(8.))
+                        .text_size(px(13.))
+                        .text_color(colors.foreground.alpha(0.8))
+                        .hover(|style| style.bg(colors.muted).text_color(colors.foreground))
+                        .child(svg().path("icons/logout.svg").size(px(15.)).flex_none())
+                        .child("退出登录")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.profile_menu_open = false;
+                            this.user_profile
+                                .update(cx, |account, cx| account.logout(cx));
+                            cx.notify();
+                        })),
+                ),
+        )
     }
 
     /// 页头空白处拖动窗口，交互控件阻止拖动。

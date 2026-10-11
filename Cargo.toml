@@ -38,6 +38,7 @@ windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 raw-window-handle = "0.6"
 objc2 = "0.6"
+smallvec = "1"
 objc2-foundation = "0.3.2"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSView", "NSWindow", "NSControl", "NSButton", "NSBitmapImageRep", "NSImage", "NSImageRep", "NSGraphics", "NSStatusItem", "NSStatusBarButton"] }
 

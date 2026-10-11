@@ -25,7 +25,7 @@ pub use player_bar::{PLAYER_BAR_HEIGHT, PlayerBar};
 pub use song_menu::show_song_menu;
 // 播放队列浮层、音质弹窗、账号弹层共用同一份圆角与投影；
 // 子模块与 ui 模块（shell）都通过这里取名。
-pub(in crate::ui) use popover::{SURFACE_RADIUS, surface_shadow};
+pub(in crate::ui) use popover::{SURFACE_RADIUS, SurfacePopover, surface_shadow};
 pub use spinner::spinner;
 pub use tab_bar::{TabBar, TabChanged, TabItem};
 pub(in crate::ui) use vinyl::{RotationClock, Vinyl};
