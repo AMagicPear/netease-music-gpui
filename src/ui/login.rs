@@ -618,7 +618,13 @@ impl Render for LoginWindow {
                                 .absolute()
                                 .right(px(12.))
                                 .aria_label("关闭登录窗口")
-                                .child(svg().path("icons/window/close.svg").size(px(16.)))
+                                .child(
+                                    svg()
+                                        .path("icons/window/close.svg")
+                                        .size(px(16.))
+                                        .text_color(colors.foreground.alpha(0.6))
+                                        .hover(|style| style.text_color(colors.foreground)),
+                                )
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                 .on_click(|_, window, _| window.remove_window()),
                         )

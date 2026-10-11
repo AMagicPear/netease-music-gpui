@@ -586,6 +586,9 @@ impl MainContent {
                 .child(
                     div()
                         .id("header-profile-logout")
+                        // 行声明成 group，图标才能跟着行的 hover 一起变色
+                        //（gpui 的 svg() 不继承父级 text_color，必须显式上色）。
+                        .group("header-profile-logout")
                         .cursor_pointer()
                         .flex()
                         .items_center()
@@ -595,7 +598,16 @@ impl MainContent {
                         .text_size(px(13.))
                         .text_color(colors.foreground.alpha(0.8))
                         .hover(|style| style.bg(colors.muted).text_color(colors.foreground))
-                        .child(svg().path("icons/logout.svg").size(px(15.)).flex_none())
+                        .child(
+                            svg()
+                                .path("icons/logout.svg")
+                                .size(px(15.))
+                                .flex_none()
+                                .text_color(colors.foreground.alpha(0.8))
+                                .group_hover("header-profile-logout", |style| {
+                                    style.text_color(colors.foreground)
+                                }),
+                        )
                         .child("退出登录")
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.profile_menu_open = false;

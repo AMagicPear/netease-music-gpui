@@ -318,6 +318,8 @@ fn close_button(colors: ColorTokens) -> impl IntoElement {
     svg()
         .path("icons/window/close.svg")
         .size(px(16.))
+        .text_color(colors.foreground.alpha(0.6))
+        .hover(|style| style.text_color(colors.foreground))
         .absolute()
         // 与截图里叉号的位置对齐：略高于居中的标题。
         .top(px(24.))
