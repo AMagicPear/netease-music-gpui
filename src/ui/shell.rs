@@ -196,6 +196,8 @@ pub struct MainContent {
     sidebar: Entity<SidebarPage>,
     search_input: Entity<InputState>,
     user_profile: Entity<AccountState>,
+    login_window: Option<AnyWindowHandle>,
+    account_id: u64,
     /// 每个导航项对应一个页面 View，一次创建后长期持有。
     pages: HashMap<ContentPage, AnyView>,
     playlist_page: Entity<PlaylistPage>,
@@ -238,7 +240,16 @@ impl MainContent {
         let pages = ContentPage::all()
             .filter_map(|page| page.build(cx).map(|view| (page, view)))
             .collect();
-        let user_profile_subscription = cx.observe(&user_profile, |_, _, cx| cx.notify());
+        let user_profile_subscription = cx.observe(&user_profile, |this, account, cx| {
+            let user_id = account.read(cx).profile.user_id;
+            if this.account_id != user_id {
+                this.account_id = user_id;
+                this.playlist_page
+                    .update(cx, |page, cx| page.open(None, cx));
+                this.navigate(ContentPage::Recommend, cx);
+            }
+            cx.notify();
+        });
 
         Self {
             active_page: ContentPage::Recommend,
@@ -246,6 +257,8 @@ impl MainContent {
             sidebar,
             search_input,
             user_profile,
+            login_window: None,
+            account_id: 0,
             pages,
             playlist_page,
             library,
@@ -401,15 +414,14 @@ fn profile_menu(
     avatar_url: String,
     vip_badge: Option<String>,
     colors: ColorTokens,
-) -> [AnyElement; 2] {
+) -> [Stateful<Div>; 2] {
     let avatar = div()
         .id("header-avatar")
         .ml_auto()
         .flex_none()
         .occlude()
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(Avatar::new().with_size(px(28.)).flex_none().src(avatar_url))
-        .into_any_element();
+        .child(Avatar::new().with_size(px(28.)).flex_none().src(avatar_url));
     let menu = div()
         .id("header-profile-menu")
         // 把整块（昵称 + VIP + 箭头）声明成一个 group，
@@ -441,14 +453,18 @@ fn profile_menu(
                 .group_hover("header-profile-menu", |style| {
                     style.text_color(colors.foreground)
                 }),
-        )
-        .into_any_element();
+        );
     [avatar, menu]
 }
 
 impl MainContent {
     /// 页头空白处拖动窗口，交互控件阻止拖动。
-    fn page_header(&self, window: &Window, colors: ColorTokens, cx: &App) -> impl IntoElement {
+    fn page_header(
+        &self,
+        window: &Window,
+        colors: ColorTokens,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let profile = self.user_profile.read(cx);
         window_drag_area("page-header")
             .h(px(HEADER_HEIGHT))
@@ -478,14 +494,32 @@ impl MainContent {
                     ),
             )
             .child(search_box(self.search_input.clone(), colors))
-            .children(profile_menu(
-                profile.profile.nickname.clone(),
-                thumbnail_url(&profile.profile.avatar_url, 56),
-                profile.vip.as_ref().and_then(|vip| {
-                    vip.badge_path(time::OffsetDateTime::now_utc().unix_timestamp() as u64 * 1000)
+            .children(
+                profile_menu(
+                    profile.profile.nickname.clone(),
+                    thumbnail_url(&profile.profile.avatar_url, 56),
+                    profile.vip.as_ref().and_then(|vip| {
+                        vip.badge_path(
+                            time::OffsetDateTime::now_utc().unix_timestamp() as u64 * 1000,
+                        )
+                    }),
+                    colors,
+                )
+                .map(|item| {
+                    item.cursor_pointer()
+                        .focusable()
+                        .role(Role::Button)
+                        .aria_label("账号与登录")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.login_window = super::login::open(
+                                window,
+                                this.user_profile.clone(),
+                                this.login_window,
+                                cx,
+                            );
+                        }))
                 }),
-                colors,
-            ))
+            )
             .child(hover_icon(
                 "header-message-button",
                 "消息",

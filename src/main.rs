@@ -1,4 +1,5 @@
 mod api;
+mod auth;
 mod desktop;
 mod models;
 mod persistence;
@@ -21,7 +22,19 @@ use ui::{
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let assets = Assets::new()?;
     let persistence = Persistence::new()?;
-    let api = api::MusicApi::from_env()?;
+    let cookie = persistence
+        .load_session()
+        .unwrap_or_else(|error| {
+            eprintln!("读取登录凭据失败：{error}");
+            None
+        })
+        .or_else(|| {
+            std::env::var("COOKIE")
+                .ok()
+                .filter(|cookie| !cookie.trim().is_empty())
+        });
+    let has_session = cookie.is_some();
+    let api = api::MusicApi::new(cookie)?;
     let application = gpui_kit::application()
         .with_http_client(api.http_client())
         .with_assets(assets)
@@ -50,7 +63,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 desktop::configure_window(window, cx);
                 let playback =
                     cx.new(|cx| PlaybackController::new(window, persistence.clone(), cx));
-                let user_profile = cx.new(AccountState::new);
+                let user_profile =
+                    cx.new(|cx| AccountState::new(persistence.clone(), has_session, cx));
                 let library = cx.new(|cx| MusicLibrary::new(user_profile.clone(), cx));
                 desktop_handles = Some((playback.clone(), library.clone()));
                 let main_content = cx.new(|cx| {

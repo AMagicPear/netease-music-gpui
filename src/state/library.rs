@@ -26,12 +26,12 @@ impl MusicLibrary {
             this.load(user.read(cx).profile.user_id, cx);
         });
         let mut this = Self {
-            loading: true,
+            loading: user.read(cx).loading,
             _user_subscription: Some(subscription),
             ..Default::default()
         };
         let user_id = user.read(cx).profile.user_id;
-        if user_id != 0 {
+        if user_id != 0 || !user.read(cx).loading {
             this.load(user_id, cx);
         }
         this
@@ -56,7 +56,7 @@ impl MusicLibrary {
         self.likes_error = None;
         self.loading = user_id != 0;
         if user_id == 0 {
-            self.error = Some("请检查 COOKIE 登录状态".into());
+            self.error = Some("请点击顶部头像扫码登录".into());
             cx.notify();
             return;
         }
@@ -107,7 +107,7 @@ impl MusicLibrary {
     /// 喜欢的音乐歌单就能立刻把这首歌插进去，不必等重新拉取。
     pub fn toggle_like(&mut self, song: Song, cx: &mut Context<Self>) {
         let song_id = song.id;
-        if song_id == 0 {
+        if song_id == 0 || self.user_id == 0 {
             return;
         }
         let liked = !self.liked_song_ids.contains(&song_id);
@@ -118,6 +118,7 @@ impl MusicLibrary {
             self.liked_song_cache.remove(&song_id);
         }
         let api = MusicApi::global(cx);
+        let generation = self.generation;
         let client = api.client.clone();
         let request = api
             .runtime
@@ -126,6 +127,9 @@ impl MusicLibrary {
             if let Ok(Err(message)) = request.await {
                 eprintln!("{message}");
                 let _ = this.update(cx, |library, cx| {
+                    if library.generation != generation {
+                        return;
+                    }
                     library.set_liked_locally(song_id, !liked);
                     // 回滚时缓存也要跟着退回：重新喜欢则补回歌曲，取消喜欢则清掉。
                     if liked {

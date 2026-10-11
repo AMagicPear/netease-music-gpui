@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    io,
     sync::Arc,
     time::Duration,
 };
@@ -33,12 +32,21 @@ impl MusicApi {
         self.audio_http.clone()
     }
 
+    #[cfg(test)]
     pub fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
         let cookie = std::env::var("COOKIE")?;
         if cookie.trim().is_empty() {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "COOKIE 环境变量为空").into());
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "COOKIE 环境变量为空",
+            )
+            .into());
         }
 
+        Self::new(Some(cookie))
+    }
+
+    pub fn new(cookie: Option<String>) -> Result<Self, Box<dyn std::error::Error>> {
         let runtime = Runtime::new()?;
         let audio_http = reqwest::Client::builder()
             .use_rustls_tls()
@@ -52,7 +60,7 @@ impl MusicApi {
             Arc::new(reqwest_client::ReqwestClient::new())
         };
         Ok(Self {
-            client: create_client(Some(cookie)),
+            client: create_client(cookie),
             runtime,
             http,
             audio_http,

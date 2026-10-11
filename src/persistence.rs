@@ -1,7 +1,8 @@
 use crate::models::{AudioQualityLevel, PlayMode, Song};
 use serde::{Deserialize, Serialize};
 use std::{
-    fs, io,
+    fs,
+    io::{self, Write},
     path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex},
     time::Duration,
@@ -126,6 +127,48 @@ impl Persistence {
         self.cache_directory.join("cover-v1")
     }
 
+    pub fn load_session(&self) -> io::Result<Option<String>> {
+        match fs::read_to_string(self.directory.join("session.cookie")) {
+            Ok(cookie) => Ok((!cookie.is_empty()).then_some(cookie)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn save_session(&self, cookie: &str) -> io::Result<()> {
+        if cookie.trim().is_empty() || cookie.contains(['\r', '\n']) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Cookie 不能为空或包含 CR/LF",
+            ));
+        }
+        fs::create_dir_all(&self.directory)?;
+        let mut temporary = tempfile::NamedTempFile::new_in(&self.directory)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            temporary
+                .as_file()
+                .set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
+        temporary.write_all(cookie.as_bytes())?;
+        temporary.as_file().sync_all()?;
+        temporary
+            .persist(self.directory.join("session.cookie"))
+            .map_err(|error| error.error)?;
+        #[cfg(unix)]
+        fs::File::open(&self.directory)?.sync_all()?;
+        Ok(())
+    }
+
+    pub fn clear_session(&self) -> io::Result<()> {
+        match fs::remove_file(self.directory.join("session.cookie")) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn load_playback(&self) -> Option<PlaybackState> {
         let bytes = fs::read(self.directory.join("playback.json")).ok()?;
         serde_json::from_slice(&bytes).ok()
@@ -185,6 +228,90 @@ fn write_playback(directory: &Path, state: &PlaybackState) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_round_trips_replaces_and_clears() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Persistence::at(directory.path().join("data"));
+        assert_eq!(store.load_session().unwrap(), None);
+        store.clear_session().unwrap();
+
+        store.save_session("MUSIC_U=first; token=value").unwrap();
+        assert_eq!(
+            store.load_session().unwrap().as_deref(),
+            Some("MUSIC_U=first; token=value")
+        );
+        store.save_session("MUSIC_U=second").unwrap();
+        assert_eq!(
+            store.load_session().unwrap().as_deref(),
+            Some("MUSIC_U=second")
+        );
+        store.clear_session().unwrap();
+        assert_eq!(store.load_session().unwrap(), None);
+        store.clear_session().unwrap();
+
+        fs::write(store.directory.join("session.cookie"), "").unwrap();
+        assert_eq!(store.load_session().unwrap(), None);
+    }
+
+    #[test]
+    fn invalid_session_does_not_replace_saved_cookie() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Persistence::at(directory.path().to_owned());
+        store.save_session("MUSIC_U=valid").unwrap();
+        for cookie in [
+            "",
+            " \t",
+            "token=value\rInjected: value",
+            "token=value\nInjected: value",
+        ] {
+            assert_eq!(
+                store.save_session(cookie).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+            assert_eq!(
+                store.load_session().unwrap().as_deref(),
+                Some("MUSIC_U=valid")
+            );
+        }
+    }
+
+    #[test]
+    fn session_propagates_read_and_remove_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Persistence::at(directory.path().to_owned());
+        let path = directory.path().join("session.cookie");
+        fs::write(&path, [0xff]).unwrap();
+        assert_eq!(
+            store.load_session().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(store.load_session().is_err());
+        assert!(store.clear_session().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_permissions_are_private_after_replacement() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let store = Persistence::at(directory.path().to_owned());
+        let path = directory.path().join("session.cookie");
+        store.save_session("MUSIC_U=first").unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        store.save_session("MUSIC_U=second").unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
 
     #[test]
     fn playback_state_round_trips_through_its_store() {

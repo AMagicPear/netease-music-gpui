@@ -25,6 +25,8 @@ anyhow = "1"
 rand = "0.9"
 sha2 = "0.10"
 tempfile = "3"
+# 二维码编码；SVG 直接交给 GPUI 渲染，不需要图像编码依赖。
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 raw-window-handle = "0.6"

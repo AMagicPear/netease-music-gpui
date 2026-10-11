@@ -13,7 +13,7 @@
 
 ## 当前功能
 
-- 通过网易云登录 COOKIE 获取账号资料、头像和会员信息。
+- 点击顶部头像或昵称，用网易云音乐 App 扫码登录；保存会话并恢复账号资料、头像和会员信息，支持退出登录。
 - 加载个人歌单与「我喜欢的音乐」，展示真实歌曲、封面、创建者和喜欢状态。
 - 虚拟化歌曲列表，支持排序和拖动标题／专辑列分界线。
 - 歌单列表的音质徽章取 `song_detail` 的 `privileges.playMaxBrLevel`，标出平台为这首歌提供的最高档位（含超清母带、臻音、沉浸声、全景声）；该字段不随登录态变化，实际能否播放仍取决于账号权限。
@@ -29,20 +29,23 @@
 
 ## 运行
 
-需要较新的 Rust stable 工具链、Python 3.9+、Git、网络连接及可用的网易云登录 COOKIE。macOS 编译环境还需要 Xcode Command Line Tools。
+需要较新的 Rust stable 工具链、Python 3.9+、Git 和网络连接。macOS 编译环境还需要 Xcode Command Line Tools。
 
 在项目根目录运行：
 
 ```bash
 python3 scripts/prepare_gpui.py
-export COOKIE='你的网易云登录 Cookie'
 cargo run --locked
 ```
 
 准备脚本下载固定版本的 GPUI 并应用本地补丁（图片 GPU 旋转、背景模糊）；首次构建和补丁更新后运行即可。
 仓库只保存补丁，生成的依赖源码不进入 Git。详情见 [GPUI 补丁说明](vendor/README.md)。
 
-`COOKIE` 应填写登录后请求中的 Cookie 字符串，不包含 `Cookie:` 请求头名称。应用启动时直接读取环境变量，缺失或为空会退出；播放权限取决于账号及接口返回的资源。
+启动后点击顶部头像或昵称，使用网易云音乐 App 扫描二维码并在手机上确认。二维码过期或请求失败时可以刷新；关闭扫码窗口会停止轮询。登录成功后自动加载个人歌单，下次启动恢复登录。再次点击头像可退出登录，删除本地会话并清空账号和个人歌单状态；播放队列与播放记录保留。
+
+扫码凭据原子保存到应用数据目录的 `session.cookie`：macOS 为 `~/Library/Application Support/NeteaseMusicGpui/`，Windows 为 `%APPDATA%/NeteaseMusicGpui/`，Linux 为 `$XDG_DATA_HOME/netease-music-gpui/`（默认 `~/.local/share/netease-music-gpui/`）。Unix 文件权限为 `0600`，内容是未加密的登录 Cookie，请勿分享该文件。
+
+仍支持 `COOKIE` 环境变量作为没有已保存会话时的启动凭据，不包含 `Cookie:` 请求头名称。退出后若环境变量仍设置，下次启动会再次使用它；使用扫码登录时建议取消该变量。播放权限取决于账号及接口返回的资源。
 
 应用不会自动加载 `.env`。如果已经安装支持 `dotenv run` 的工具，可以在根目录的 `.env` 中配置：
 
@@ -58,6 +61,12 @@ dotenv run cargo run --locked
 
 `.env` 已加入 `.gitignore`。Cookie 属于登录凭据，请勿提交到仓库。
 
+二维码接口可以单独检查（需要网络，只请求未授权二维码，不使用账号凭据）：
+
+```bash
+cargo test --locked qr_endpoint_returns_pending_login -- --ignored
+```
+
 ## 打包
 
 在 macOS 或 Windows 上安装 Python 3.9+，运行以下命令构建当前平台的 release 并复制资源（Windows 也可以使用 `py -3`）：
@@ -70,11 +79,7 @@ macOS 生成 `target/bundle/NetEase Music.app`，可执行文件位于 `Contents
 
 所有项目资源都从外部目录读取。单独执行 `cargo build --release` 不会复制资源，应使用上述脚本生成可分发目录。
 
-macOS 包使用本地 ad-hoc 签名，没有 Developer ID 签名和公证。当前应用仍要求 `COOKIE` 环境变量，Finder 双击通常不会继承终端里设置的变量；现阶段可以从终端运行：
-
-```bash
-COOKIE='你的网易云登录 Cookie' 'target/bundle/NetEase Music.app/Contents/MacOS/netease-music-gpui'
-```
+macOS 包使用本地 ad-hoc 签名，没有 Developer ID 签名和公证。可以双击应用并扫码登录，无需配置环境变量。
 
 ## 技术栈
 
@@ -95,6 +100,7 @@ COOKIE='你的网易云登录 Cookie' 'target/bundle/NetEase Music.app/Contents/
 src/
 ├── main.rs                  初始化与应用组装
 ├── api.rs                   网易云接口、网络客户端与 Tokio 运行时
+├── auth.rs                  二维码登录请求、扫码状态和凭据解析
 ├── models/                  歌曲、歌单、用户及播放资源的数据模型
 ├── state/                   账号、音乐库和歌单详情的共享状态
 ├── playback/
@@ -108,6 +114,7 @@ src/
 │       └── tests.rs         本地 HTTP 与音频回归测试
 └── ui/
     ├── shell.rs             主窗口布局和导航协调
+    ├── login.rs             扫码登录与退出账号窗口
     ├── sidebar.rs           侧栏
     ├── pages/               页面
     ├── components/          播放栏、进度条、标签栏和虚拟表格
