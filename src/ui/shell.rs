@@ -451,7 +451,6 @@ impl MainContent {
 
         let trigger = div()
             .id("header-profile-trigger")
-            .ml_auto()
             .flex_none()
             .flex()
             .items_center()
@@ -529,6 +528,9 @@ impl MainContent {
             );
 
         Popup::new("header-profile-popover", trigger)
+            // 弹层 wrapper 才是 header flex 行的直接子元素，
+            // 靠右对齐要挂在这层（trigger 已被包进 wrapper 内部）。
+            .ml_auto()
             .anchor(Anchor::TopRight)
             .offset(px(8.))
             .flex_none()
