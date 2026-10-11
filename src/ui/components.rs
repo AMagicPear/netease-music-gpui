@@ -6,10 +6,12 @@ use gpui_kit::base::ColorTokens;
 mod collect_window;
 mod comment_row;
 mod drag_preview;
+mod message_panel;
 mod play_queue;
 mod player_bar;
 mod popover;
 mod progress_bar;
+mod side_panel;
 mod song_menu;
 mod spinner;
 mod tab_bar;
@@ -22,6 +24,7 @@ pub use collect_window::open_collect_window;
 pub use comment_row::comment_row;
 pub use drag_preview::ResizeDragPreview;
 pub use player_bar::{PLAYER_BAR_HEIGHT, PlayerBar};
+pub use side_panel::{SidePanel, SidePanelContent};
 pub use song_menu::show_song_menu;
 // 播放队列浮层、音质弹窗、账号弹层共用同一份圆角与投影；
 // 子模块与 ui 模块（shell）都通过这里取名。

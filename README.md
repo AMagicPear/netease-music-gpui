@@ -45,21 +45,9 @@ cargo run --locked
 
 扫码凭据原子保存到应用数据目录的 `session.cookie`：macOS 为 `~/Library/Application Support/NeteaseMusicGpui/`，Windows 为 `%APPDATA%/NeteaseMusicGpui/`，Linux 为 `$XDG_DATA_HOME/netease-music-gpui/`（默认 `~/.local/share/netease-music-gpui/`）。Unix 文件权限为 `0600`，内容是未加密的登录 Cookie，请勿分享该文件。
 
-仍支持 `COOKIE` 环境变量作为没有已保存会话时的启动凭据，不包含 `Cookie:` 请求头名称。退出后若环境变量仍设置，下次启动会再次使用它；使用扫码登录时建议取消该变量。播放权限取决于账号及接口返回的资源。
+早先的 `COOKIE` 环境变量启动凭据已移除：未保存会话时启动会直接进入登录窗。
 
-应用不会自动加载 `.env`。如果已经安装支持 `dotenv run` 的工具，可以在根目录的 `.env` 中配置：
-
-```dotenv
-COOKIE=你的网易云登录 Cookie
-```
-
-然后运行：
-
-```bash
-dotenv run cargo run --locked
-```
-
-`.env` 已加入 `.gitignore`。Cookie 属于登录凭据，请勿提交到仓库。
+应用不会读取 `.env`。Cookie 属于登录凭据，请勿提交到仓库。
 
 二维码接口可以单独检查（需要网络，只请求未授权二维码，不使用账号凭据）：
 

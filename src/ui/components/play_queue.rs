@@ -1,38 +1,31 @@
-//! 播放队列浮层（界面文案沿用它自己的「播放列表」）：贴窗口右缘滑出，展示当前播放队列。
+//! 播放队列内容（界面文案沿用它自己的「播放列表」）：挂在全局 [`super::side_panel::SidePanel`]
+//! 里的一页内容，外壳的定位、动画、开合都在那边。
 //!
 //! 别和 [`crate::ui::pages::playlist`] 的"歌单"混了——那个是用户/编辑歌单的详情页，
 //! 这个是当前会话的**播放队列**，所以代码里叫 `PlayQueue`。
 //!
-//! 面板本身是独立实体，由播放栏作为子元素挂载（见 `player_bar`）。它用绝对定位向上
-//! 越出播放栏、盖住页面内容，收起时完全不参与布局。列表交给 gpui-kit 的 [`List`]：
-//! 队列可能上千首，而滑入/滑出的每一帧都会重绘整个面板，必须只渲染可见的十几行。
-
-use std::time::Duration;
+//! 列表交给 gpui-kit 的 [`List`]：队列可能上千首，而滑入/滑出的每一帧都会重绘
+//! 整个面板，必须只渲染可见的十几行。
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_kit::base::{
-    ColorTokens, IndexPath, InteractiveElementExt as _, Presence, Selectable, Theme, Transition,
+    ColorTokens, IndexPath, InteractiveElementExt as _, Selectable, Theme,
 };
 use gpui_kit::component::list::{List, ListDelegate, ListState};
 
 use super::{
-    LAYER_POPOVER, PLAYER_BAR_HEIGHT, SURFACE_RADIUS, artist_label, format_duration,
-    like_icon_path, quality_badge_path, surface_shadow,
+    SURFACE_RADIUS, artist_label, format_duration, like_icon_path, quality_badge_path,
+    side_panel::panel_height,
 };
 use crate::models::Song;
 use crate::playback::PlaybackController;
 use crate::state::library::MusicLibrary;
 use crate::ui::assets::{track_cover_image, track_cover_url};
-use crate::ui::shell::HEADER_HEIGHT;
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA};
 
-/// 面板固定宽度。
-const PANEL_WIDTH: Pixels = px(386.);
-/// 面板与上方头部、下方播放栏之间留出的间隔。
-const PANEL_GAP: Pixels = px(12.);
 /// 面板自己的头部高度；「播放列表」和计数排在这一行里。
-const PANEL_HEADER_HEIGHT: Pixels = px(58.);
+pub(in crate::ui) const PANEL_HEADER_HEIGHT: Pixels = px(58.);
 /// 每一首歌占的高度。
 const ROW_HEIGHT: Pixels = px(64.);
 /// 头部与每一行的左右留白。面板本身不再额外加 padding。
@@ -43,8 +36,6 @@ const COVER_SIZE: Pixels = px(48.);
 const COVER_RADIUS: Pixels = px(8.);
 /// 封面上播放键的宽度。
 const PLAY_BUTTON_SIZE: Pixels = px(20.);
-/// 滑入/滑出时长。
-const REVEAL_DURATION: Duration = Duration::from_millis(260);
 
 /// `group_hover` 按名字全局查分组，同名会互相点亮，所以每行要一个不同的组名。
 fn row_group(index: usize) -> SharedString {
@@ -63,8 +54,9 @@ fn panel_playback_state(playback: &PlaybackController) -> (u64, Option<usize>, b
     )
 }
 
-/// 头部右侧的文字按钮（「收藏全部」「清空」）：灰字，悬停加深，字号和计数一致。
-fn header_text_button(
+/// 头部右侧的文字按钮（「收藏全部」「清空」「一键全读」共用）：
+/// 灰字，悬停加深，字号和计数一致。图标在左、文字在右。
+pub(in crate::ui) fn header_text_button(
     id: &'static str,
     icon: &'static str,
     label: &'static str,
@@ -102,8 +94,10 @@ fn header_text_button(
 pub struct PlayQueue {
     playback: Entity<PlaybackController>,
     list: Entity<ListState<QueueDelegate>>,
-    /// 期望的开合状态。画面上的位置由 `Presence` 采样出的进度决定，收起后还要滑出去。
-    open: bool,
+    /// 面板当前是否展示本内容（由 [`super::side_panel::SidePanel`] 维护）。
+    /// 订阅刷新只在可见时做；不可见时列表根本不渲染。
+    visible: bool,
+    /// 下次渲染时把列表滚到当前歌（面板展开/换内容进来时置位）。
     scroll_to_current: bool,
     _playback_subscription: Subscription,
     _library_subscription: Subscription,
@@ -131,16 +125,16 @@ impl PlayQueue {
                 return;
             }
             playback_state = next;
-            if this.open {
+            if this.visible {
                 this.list.update(cx, |_, cx| cx.notify());
                 cx.notify();
             }
         });
 
         // 喜欢状态由音乐库维护：别处（歌单页、播放栏红心）改动后，可见行的爱心要跟着变。
-        // 收起时不渲染，等展开时 `set_open` 会统一刷新一次。
+        // 不可见时不渲染，等展开时 `set_visible` 会统一刷新一次。
         let _library_subscription = cx.observe(&library, |this, _, cx| {
-            if this.open {
+            if this.visible {
                 this.list.update(cx, |_, cx| cx.notify());
                 cx.notify();
             }
@@ -149,25 +143,21 @@ impl PlayQueue {
         Self {
             playback,
             list,
-            open: false,
+            visible: false,
             scroll_to_current: false,
             _playback_subscription,
             _library_subscription,
         }
     }
 
-    pub fn is_open(&self) -> bool {
-        self.open
-    }
-
-    pub fn set_open(&mut self, open: bool, cx: &mut Context<Self>) {
-        if self.open == open {
+    pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.visible == visible {
             return;
         }
-        self.open = open;
-        self.scroll_to_current = open;
-        if open {
-            // 收起期间队列可能已经换了，展开前先让列表重新量一遍；
+        self.visible = visible;
+        if visible {
+            self.scroll_to_current = true;
+            // 不可见期间队列可能已经换了，展开前先让列表重新量一遍；
             // 悬停行也一并清掉，免得展开时顶着一行过期的操作图标。
             self.list.update(cx, |list, cx| {
                 list.delegate_mut().hovered = None;
@@ -176,29 +166,10 @@ impl PlayQueue {
         }
         cx.notify();
     }
-
-    pub fn toggle(&mut self, cx: &mut Context<Self>) {
-        let open = !self.open;
-        self.set_open(open, cx);
-    }
 }
 
 impl Render for PlayQueue {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 进出场都靠这一个采样：收起后仍会继续渲染到进度归零，才滑得出去。
-        let presence = Presence::new("player-playlist-panel", self.open)
-            .transition(Transition::new(REVEAL_DURATION))
-            .sample(window, cx);
-        if !presence.should_render() {
-            return div().into_any_element();
-        }
-        let width = PANEL_WIDTH.min(window.viewport_size().width);
-        let offset = -(1. - presence.progress) * f32::from(width);
-        let height = (window.viewport_size().height
-            - px(HEADER_HEIGHT)
-            - px(PLAYER_BAR_HEIGHT)
-            - PANEL_GAP * 2.)
-            .max(px(0.));
         let colors = Theme::global(cx).tokens.colors;
         let count = self.playback.read(cx).queue().len();
         if self.scroll_to_current {
@@ -209,91 +180,71 @@ impl Render for PlayQueue {
             });
         }
 
-        // 与其它浮层一样延后绘制，避免被页面和进度条的 deferred 元素盖住。
-        deferred(
-            div()
-                .id("player-playlist-panel")
-                .absolute()
-                // 右缘对齐窗口；被滑出时整体挪到窗口右侧之外，由窗口边界裁掉。
-                .right(px(offset))
-                .bottom(px(PLAYER_BAR_HEIGHT) + PANEL_GAP)
-                .w(width)
-                .h(height)
-                .flex()
-                .flex_col()
-                .text_color(colors.foreground)
-                .bg(colors.surface)
-                // 贴着窗口右缘，只需要把左侧两角磨圆；圆角量取自音质浮窗。
-                .rounded_l(SURFACE_RADIUS)
-                .shadow(vec![surface_shadow(colors)])
-                // 遮住后方命中区：面板上的悬停和点击都不穿透到底下的页面。
-                .occlude()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                // 面板外的任何按下都收起。再点一次列表图标时，这里会先一步关掉它，
-                // 图标那边的监听比对着渲染时的值，于是不会再翻回来（见播放栏触发按钮）。
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| this.set_open(false, cx)))
-                .child(
-                    div()
-                        .h(PANEL_HEADER_HEIGHT.min(height))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .pl(ROW_PADDING)
-                        .pr(ROW_PADDING)
-                        // 标题在本面板里放大一档；计数的字号、字重仍和页面 tab 同一套。
-                        .child(
-                            div()
-                                .text_size(px(18.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child("播放列表"),
-                        )
-                        .child(
-                            div()
-                                .ml(px(1.))
-                                .text_size(px(13.))
-                                .font_weight(FontWeight::BOLD)
-                                .font_family(DOLPHIN_FAMILY)
-                                .child(count.to_string()),
-                        )
-                        // 右侧操作区：收藏全部弹「收藏到歌单」窗口，清空移除整个队列。
-                        .child(
-                            div()
-                                .flex_1()
-                                .flex()
-                                .items_center()
-                                .justify_end()
-                                .gap(px(12.))
-                                .child(header_text_button(
-                                    "player-playlist-collect-all",
-                                    "icons/add_all.svg",
-                                    "收藏全部",
-                                    colors,
-                                    |_, window, cx| {
-                                        crate::ui::components::open_collect_window(window, cx);
-                                    },
-                                ))
-                                .child(header_text_button(
-                                    "player-playlist-clear",
-                                    "icons/delete.svg",
-                                    "清空",
-                                    colors,
-                                    cx.listener(|this, _, _, cx| {
-                                        this.playback
-                                            .update(cx, |playback, cx| playback.clear_queue(cx));
-                                    }),
-                                )),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_h(px(0.))
-                        // 滚动与滚动条都由 List 自己管。
-                        .child(List::new(&self.list)),
-                ),
-        )
-        .with_priority(LAYER_POPOVER)
-        .into_any_element()
+        // 内容填满 side_panel 的外壳；这里只管排版，不管定位与动画。
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(PANEL_HEADER_HEIGHT.min(panel_height(window)))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .pl(ROW_PADDING)
+                    .pr(ROW_PADDING)
+                    // 标题在本面板里放大一档；计数的字号、字重仍和页面 tab 同一套。
+                    .child(
+                        div()
+                            .text_size(px(18.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("播放列表"),
+                    )
+                    .child(
+                        div()
+                            .ml(px(1.))
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::BOLD)
+                            .font_family(DOLPHIN_FAMILY)
+                            .child(count.to_string()),
+                    )
+                    // 右侧操作区：收藏全部弹「收藏到歌单」窗口，清空移除整个队列。
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .gap(px(12.))
+                            .child(header_text_button(
+                                "player-playlist-collect-all",
+                                "icons/add_all.svg",
+                                "收藏全部",
+                                colors,
+                                |_, window, cx| {
+                                    crate::ui::components::open_collect_window(window, cx);
+                                },
+                            ))
+                            .child(header_text_button(
+                                "player-playlist-clear",
+                                "icons/delete.svg",
+                                "清空",
+                                colors,
+                                cx.listener(|this, _, _, cx| {
+                                    this.playback
+                                        .update(cx, |playback, cx| playback.clear_queue(cx));
+                                }),
+                            )),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    // 滚动与滚动条都由 List 自己管。
+                    .child(List::new(&self.list)),
+            )
+            .into_any_element()
     }
 }
 

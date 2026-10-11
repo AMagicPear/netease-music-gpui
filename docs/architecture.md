@@ -2,8 +2,8 @@
 
 ## 运行和验证
 
-应用通过 `COOKIE` 环境变量读取登录凭据，不自行读取 `.env`。
-开发时可使用 `dotenv run cargo run`。`cargo check`、`cargo test` 不启动界面；真实接口验证使用 `dotenv run cargo test -- --include-ignored`。
+登录凭据保存在应用数据目录的 `session.cookie`，由应用内扫码登录写入。
+`cargo check`、`cargo test` 不启动界面；真实接口验证使用 `cargo test -- --include-ignored`，其凭据优先取 `COOKIE` 环境变量，缺省时自动使用已保存的登录会话。
 
 播放控制器显式接收 `Persistence`；测试使用持有临时目录的构造入口，退出保存也只写入该目录。默认构造不再隐式选择应用数据目录。
 

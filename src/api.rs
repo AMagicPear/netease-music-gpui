@@ -5,12 +5,15 @@ use std::{
 };
 
 use gpui::Global;
-use ncm_api_rs::{ApiClient, ApiResponse, NcmError, Query, create_client};
+// 供消息面板等外部调用方给 `MusicApi::message_*` 传参时命名客户端类型。
+pub use ncm_api_rs::ApiClient;
+use ncm_api_rs::{ApiResponse, NcmError, Query, create_client};
 use tokio::runtime::Runtime;
 
 use crate::models::{
-    AudioQualityLevel, AudioSourceInfo, LyricLine, Playlist, Privilege, Song, SongComment,
-    SongComments, TrackId, UserProfile, VipInfo,
+    parse_comments, parse_forwards, parse_notices, parse_private, AudioQualityLevel,
+    AudioSourceInfo, LyricLine, MessageItem, Playlist, Privilege, Song, SongComment, SongComments,
+    TrackId, UserProfile, VipInfo,
 };
 
 /// GPUI 负责界面，Tokio 负责 SDK 的网络请求。客户端和运行时在应用内复用。
@@ -32,16 +35,25 @@ impl MusicApi {
         self.audio_http.clone()
     }
 
+    /// 真实接口测试的入口：优先 `COOKIE` 环境变量，缺省时回落到应用已保存的
+    /// 登录会话 —— 登录过一次本机应用后，`cargo test --ignored` 即可零配置运行。
     #[cfg(test)]
     pub fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
-        let cookie = std::env::var("COOKIE")?;
-        if cookie.trim().is_empty() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "COOKIE 环境变量为空",
-            )
-            .into());
-        }
+        let cookie = std::env::var("COOKIE")
+            .ok()
+            .filter(|cookie| !cookie.trim().is_empty())
+            .or_else(|| {
+                crate::persistence::Persistence::new()
+                    .ok()
+                    .and_then(|persistence| persistence.load_session().ok())
+                    .flatten()
+            })
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "没有 COOKIE 环境变量，也没有已保存的登录会话",
+                )
+            })?;
 
         Self::new(Some(cookie))
     }
@@ -193,6 +205,58 @@ impl MusicApi {
         let mut likes = Self::request(client.likelist(&like_query)).await?;
         serde_json::from_value(likes.body["ids"].take())
             .map_err(|_| "喜欢的歌曲列表格式无效".to_string())
+    }
+
+    /// 私信会话列表（消息面板·私信 tab）。同时带回账号总未读数，用于 tab 角标。
+    pub async fn private_messages(
+        client: &ApiClient,
+        user_id: u64,
+    ) -> Result<(Vec<MessageItem>, u32), String> {
+        let mut response = Self::request(
+            client.msg_private(&Query::new().param("limit", "30")),
+        )
+        .await?;
+        let unread = response.body["newMsgCount"].as_u64().unwrap_or(0) as u32;
+        let msgs = response.body["msgs"].take();
+        Ok((parse_private(&msgs, user_id), unread))
+    }
+
+    /// 收到的评论（消息面板·评论 tab）。
+    pub async fn comment_messages(client: &ApiClient, user_id: u64) -> Result<Vec<MessageItem>, String> {
+        let mut response = Self::request(
+            client.msg_comments(&Query::new().param("uid", &user_id.to_string())),
+        )
+        .await?;
+        let comments = response.body["comments"].take();
+        Ok(parse_comments(&comments))
+    }
+
+    /// @我（消息面板·@我 tab）。同时带回总未读数。
+    pub async fn mention_messages(client: &ApiClient) -> Result<(Vec<MessageItem>, u32), String> {
+        let mut response = Self::request(
+            client.msg_forwards(&Query::new().param("limit", "30")),
+        )
+        .await?;
+        let unread = response.body["newCount"].as_u64().unwrap_or(0) as u32;
+        let forwards = response.body["forwards"].take();
+        Ok((parse_forwards(&forwards), unread))
+    }
+
+    /// 系统通知（消息面板·通知 tab）。
+    pub async fn notice_messages(client: &ApiClient) -> Result<Vec<MessageItem>, String> {
+        let mut response = Self::request(
+            client.msg_notices(&Query::new().param("limit", "30")),
+        )
+        .await?;
+        let notices = response.body["notices"].take();
+        Ok(parse_notices(&notices))
+    }
+
+    /// 清空全部消息的未读计数（消息面板·一键全读）。
+    ///
+    /// 官方 web 客户端「清空全部新消息提醒」用的接口，无参数，四类计数一并清零。
+    pub async fn clear_message_counts(client: &ApiClient) -> Result<(), String> {
+        Self::request(client.msg_count_clear()).await.map(|_| ())
     }
 
     /// 喜欢 / 取消喜欢一首歌。成功时接口只回 code，不返回新状态。
@@ -599,6 +663,49 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "需要登录会话（或 COOKIE 环境变量）和网络连接"]
+    fn messages_can_load_from_real_api() {
+        let api = MusicApi::from_env().expect("无法获取登录会话");
+        let uid = api
+            .runtime
+            .block_on(MusicApi::user_profile(api.client.clone()))
+            .expect("无法获取登录账号")
+            .user_id;
+        // 四个消息接口都能返回（空列表也算成功），条目字段可解析。
+        let check = |name: &str, items: Vec<MessageItem>| {
+            for message in &items {
+                assert!(!message.nickname.is_empty(), "{name} 消息缺少发送者昵称");
+            }
+        };
+        check(
+            "私信",
+            api.runtime
+                .block_on(MusicApi::private_messages(&api.client, uid))
+                .expect("私信")
+                .0,
+        );
+        check(
+            "评论",
+            api.runtime
+                .block_on(MusicApi::comment_messages(&api.client, uid))
+                .expect("评论"),
+        );
+        check(
+            "@我",
+            api.runtime
+                .block_on(MusicApi::mention_messages(&api.client))
+                .expect("@我")
+                .0,
+        );
+        check(
+            "通知",
+            api.runtime
+                .block_on(MusicApi::notice_messages(&api.client))
+                .expect("通知"),
+        );
+    }
+
+    #[test]
     #[ignore = "需要 COOKIE 环境变量和网络连接"]
     fn cookie_can_load_real_library() {
         let api = MusicApi::from_env().expect("无法读取 COOKIE 环境变量");
@@ -723,5 +830,38 @@ mod tests {
             "歌曲封面：原图 {} 字节，72px 缩略图 {} 字节",
             downloaded_sizes[2], downloaded_sizes[3]
         );
+    }
+}
+
+#[cfg(test)]
+mod temp_probe {
+    use super::*;
+
+    #[test]
+    #[ignore = "临时探针"]
+    fn probe_notices_raw() {
+        let api = MusicApi::from_env().expect("会话");
+        let response = api
+            .runtime
+            .block_on(api.client.msg_notices(&Query::new().param("limit", "30")))
+            .unwrap();
+        for (i, item) in response.body["notices"].as_array().unwrap().iter().enumerate() {
+            let payload = item["notice"].as_str().unwrap_or("");
+            let value: serde_json::Value = serde_json::from_str(payload).unwrap_or_default();
+            // 只看 type != 6 的，找「赞评论」以外的类型。
+            if value["type"].as_i64() == Some(6) { continue; }
+            println!("=== notices[{i}] type={} ===\n{}", value["type"], serde_json::to_string_pretty(item).unwrap());
+        }
+    }
+
+    #[test]
+    #[ignore = "临时探针：会真的清空服务端未读计数"]
+    fn probe_msg_count_clear() {
+        let api = MusicApi::from_env().expect("会话");
+        let response = api
+            .runtime
+            .block_on(api.client.msg_count_clear())
+            .expect("清空未读计数失败");
+        println!("{}", serde_json::to_string_pretty(&response.body).unwrap());
     }
 }

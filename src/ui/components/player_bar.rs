@@ -4,8 +4,8 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_kit::base::{Button, ColorTokens, Theme, Transition, transition};
 
-use super::play_queue::PlayQueue;
 use super::progress_bar::ProgressBar;
+use super::side_panel::{SidePanel, SidePanelContent};
 use super::volume_control::VolumeControl;
 use super::{
     LAYER_PROGRESS_BAR, SurfacePopover, Vinyl, artist_label, icon_hover_color, like_icon_path,
@@ -44,9 +44,9 @@ pub struct PlayerBar {
     /// 「整页展开/收起」的单一状态源。展开状态、共享渐变底、动效节拍都从这里读，
     /// 播放栏不再自己存 `album_expanded` 镜像。
     now_playing: Entity<NowPlaying>,
-    /// 播放队列浮层。它自己管开合、动画、滚动和队列展示，播放栏只负责挂载和触发。
-    play_queue: Entity<PlayQueue>,
-    _play_queue_subscription: Subscription,
+    /// 全局侧面板（内含播放队列/消息两页内容）。由组合根创建后传入；
+    /// 播放栏只负责挂载和触发播放队列页。
+    side_panel: Entity<SidePanel>,
     _playback_subscription: Subscription,
     _progress_subscription: Subscription,
     _library_subscription: Subscription,
@@ -58,6 +58,7 @@ impl PlayerBar {
         playback: Entity<PlaybackController>,
         library: Entity<MusicLibrary>,
         now_playing: Entity<NowPlaying>,
+        side_panel: Entity<SidePanel>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -74,9 +75,6 @@ impl PlayerBar {
                 cx,
             )
         });
-        let play_queue = cx.new(|cx| PlayQueue::new(playback.clone(), library.clone(), window, cx));
-        // 面板自己管开合；播放栏要跟着重绘，触发按钮才能拿到最新的状态。
-        let play_queue_subscription = cx.observe(&play_queue, |_, _, cx| cx.notify());
         let mut playback_state = {
             let controller = playback.read(cx);
             let state = controller.snapshot();
@@ -129,8 +127,7 @@ impl PlayerBar {
             mini_vinyl,
             quality_open: false,
             now_playing,
-            play_queue,
-            _play_queue_subscription: play_queue_subscription,
+            side_panel,
             _playback_subscription: playback_subscription,
             _progress_subscription: progress_subscription,
             _library_subscription: library_subscription,
@@ -707,8 +704,8 @@ impl Render for PlayerBar {
             .size(play_pause_icon_size)
             .text_color(colors.primary_foreground)
             .into_any_element();
-        // 触发按钮要拿"渲染这一刻"的开合状态比对，见下面按钮上的说明。
-        let play_queue_open_at_render = self.play_queue.read(cx).is_open();
+        // 触发按钮的按下/松开职责：capture 阶段申请抑制（见 SidePanel），
+        // click 再决定开合或原地换内容；不再需要渲染时快照守卫。
 
         div()
             // 整条栏是一个点击区：收起态点任意空白处展开歌词页，展开态再点收起，
@@ -997,20 +994,24 @@ impl Render for PlayerBar {
                                     colors.muted_foreground,
                                     colors,
                                 )
-                                // 按下即开合。面板自己在"面板外按下"时会先一步收起，
-                                // 所以这里要跟渲染时的状态比对：值已经不相等就说明这一下
-                                // 刚刚才被面板关掉，不能再翻回来（否则点图标永远关不上）。
-                                // 这个按钮没有 click 处理，靠按下就停传播来挡住栏根的整栏点击。
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |this, _, _, cx| {
-                                        let panel = this.play_queue.clone();
-                                        if panel.read(cx).is_open() == play_queue_open_at_render {
-                                            panel.update(cx, |panel, cx| panel.toggle(cx));
+                                // 按下（capture 阶段，先于面板的 out 监听）时若面板开着，
+                                // 拦住「面板外按下收起」，让松开后的 click 自己决定开合。
+                                .capture_any_mouse_down(cx.listener(
+                                    |this, event: &MouseDownEvent, _, cx| {
+                                        if event.button == MouseButton::Left {
+                                            this.side_panel
+                                                .update(cx, |panel, _| panel.suppress_out_close());
                                         }
-                                        cx.stop_propagation();
-                                    }),
-                                ),
+                                    },
+                                ))
+                                // 松开时才开合，和其它浮层触发一致；点击不冒泡到
+                                // 播放栏根部的歌词页开合。
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.side_panel.update(cx, |panel, cx| {
+                                        panel.toggle(SidePanelContent::PlayQueue, cx)
+                                    });
+                                })),
                             ),
                     )
                     // 右侧：收藏、音量等工具
@@ -1062,8 +1063,8 @@ impl Render for PlayerBar {
                                 colors,
                             )),
                     )
-                    // 面板自己绝对定位并延后绘制，不参与这一栏的布局。
-                    .child(self.play_queue.clone()),
+                    // 侧面板自己绝对定位并延后绘制，不参与这一栏的布局。
+                    .child(self.side_panel.clone()),
             )
     }
 }

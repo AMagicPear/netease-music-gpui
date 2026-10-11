@@ -13,7 +13,7 @@ use playback::PlaybackController;
 use state::{account::AccountState, library::MusicLibrary};
 use ui::{
     assets::Assets,
-    components::PlayerBar,
+    components::{PlayerBar, SidePanel},
     now_playing::NowPlaying,
     shell::{MainContent, MainWindow},
     theme,
@@ -22,17 +22,11 @@ use ui::{
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let assets = Assets::new()?;
     let persistence = Persistence::new()?;
-    let cookie = persistence
-        .load_session()
-        .unwrap_or_else(|error| {
-            eprintln!("读取登录凭据失败：{error}");
-            None
-        })
-        .or_else(|| {
-            std::env::var("COOKIE")
-                .ok()
-                .filter(|cookie| !cookie.trim().is_empty())
-        });
+    // 登录凭据只来自本地保存的会话；没有就进登录窗扫码。
+    let cookie = persistence.load_session().unwrap_or_else(|error| {
+        eprintln!("读取登录凭据失败：{error}");
+        None
+    });
     let has_session = cookie.is_some();
     let api = api::MusicApi::new(cookie)?;
     let application = gpui_kit::application()
@@ -66,9 +60,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let user_profile =
                     cx.new(|cx| AccountState::new(persistence.clone(), has_session, cx));
                 let library = cx.new(|cx| MusicLibrary::new(user_profile.clone(), cx));
+                // 全局侧面板：播放栏（播放队列页）与页头（消息页）共用同一个开合外壳。
+                let side_panel = cx.new(|cx| {
+                    SidePanel::new(
+                        playback.clone(),
+                        library.clone(),
+                        user_profile.clone(),
+                        window,
+                        cx,
+                    )
+                });
                 desktop_handles = Some((playback.clone(), library.clone()));
                 let main_content = cx.new(|cx| {
-                    MainContent::new(window, user_profile, library.clone(), playback.clone(), cx)
+                    MainContent::new(
+                        window,
+                        user_profile,
+                        library.clone(),
+                        playback.clone(),
+                        side_panel.clone(),
+                        cx,
+                    )
                 });
                 let now_playing = cx.new(|_| NowPlaying::new());
                 let player_bar = cx.new(|cx| {
@@ -76,6 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         playback.clone(),
                         library.clone(),
                         now_playing.clone(),
+                        side_panel,
                         window,
                         cx,
                     )

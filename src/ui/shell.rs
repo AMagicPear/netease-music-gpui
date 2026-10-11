@@ -5,8 +5,8 @@ use gpui::*;
 
 use super::assets::{CoverPrefetch, thumbnail_url, track_cover_url};
 use super::components::{
-    PLAYER_BAR_HEIGHT, PlayerBar, ResizeDragPreview, SurfacePopover, icon_hover_color,
-    window_drag_area,
+    PLAYER_BAR_HEIGHT, PlayerBar, ResizeDragPreview, SidePanel, SidePanelContent, SurfacePopover,
+    icon_hover_color, window_drag_area,
 };
 use super::cover_color::{Backdrop, CoverColor, CoverGradient, gradient_layer};
 use super::now_playing::{NowPlaying, NowPlayingPage};
@@ -205,6 +205,8 @@ pub struct MainContent {
     pages: HashMap<ContentPage, AnyView>,
     playlist_page: Entity<PlaylistPage>,
     library: Entity<MusicLibrary>,
+    /// 全局侧面板；页头的消息图标触发它的消息页。
+    side_panel: Entity<SidePanel>,
     page_scroll: HashMap<ContentPage, ScrollHandle>,
     playlist_backdrop: Backdrop,
     _sidebar_subscription: Subscription,
@@ -219,6 +221,7 @@ impl MainContent {
         user_profile: Entity<AccountState>,
         library: Entity<MusicLibrary>,
         playback: Entity<PlaybackController>,
+        side_panel: Entity<SidePanel>,
         cx: &mut Context<Self>,
     ) -> Self {
         let sidebar = cx.new(|cx| SidebarPage::new(library.clone(), cx));
@@ -276,6 +279,7 @@ impl MainContent {
             pages,
             playlist_page,
             library,
+            side_panel,
             playlist_backdrop: Backdrop::default(),
             page_scroll: ContentPage::all()
                 .map(|page| (page, ScrollHandle::default()))
@@ -610,12 +614,22 @@ impl MainContent {
             )
             .child(search_box(self.search_input.clone(), colors))
             .child(self.profile_menu(colors, cx))
-            .child(hover_icon(
-                "header-message-button",
-                "消息",
-                "icons/message.svg",
-                colors,
-            ))
+            .child(
+                hover_icon("header-message-button", "消息", "icons/message.svg", colors)
+                    // 按下时若面板开着，先拦下「面板外按下收起」，让 click 自己决定。
+                    .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                        if event.button == MouseButton::Left {
+                            this.side_panel
+                                .update(cx, |panel, _| panel.suppress_out_close());
+                        }
+                    }))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.side_panel.update(cx, |panel, cx| {
+                            panel.toggle(SidePanelContent::Messages, cx)
+                        });
+                    })),
+            )
             .child(hover_icon(
                 "header-setting-button",
                 "设置",
