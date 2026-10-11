@@ -224,6 +224,9 @@ impl PlayerBar {
     /// 图标和计数是两块独立的 hitbox，而且计数常常比 28px 的格子宽、会伸出格子，
     /// 没法用一个 `group` 的形状同时罩住它们。所以改用 view 里的悬停状态把两者绑在一起：
     /// 谁被悬停都算这块互动区被悬停，两边都按同一份状态取色。
+    ///
+    /// 只有红心接了动作，它会在点击处理里停传播；评论还没接面板，那一下会照常冒到
+    /// 栏根，跟着整栏一起展开 / 收起。
     fn interaction_count(
         &self,
         id: &'static str,
@@ -254,6 +257,9 @@ impl PlayerBar {
             }))
             .when(like_button, |element| {
                 element.on_click(cx.listener(|this, _, _, cx| {
+                    // 整条栏现在是一个"展开/收起"的点击区（见 render 里栏根的 on_click），
+                    // 自带行为的部件都要先停传播，否则点红心会顺手把歌词页也收起。
+                    cx.stop_propagation();
                     let Some(song) = this.playback.read(cx).snapshot().current_song.clone() else {
                         return;
                     };
@@ -315,6 +321,8 @@ impl PlayerBar {
             .sample(window, cx);
         // 触发按钮：点自己开/关。守卫比较的是**本次渲染时**的开合值——
         // "点外面"的捕获监听可能已经先把状态关掉了，那时不能再翻回去。
+        // 末尾的 `stop_propagation` 还兼一件事：按下不冒到栏根，
+        // 点音质按钮不会顺手把歌词页收起来。
         let was_open = self.quality_open;
         let popup = Popup::new(
             "player-quality-popover",
@@ -383,6 +391,10 @@ impl PlayerBar {
                 .on_mouse_down_out(cx.listener(|this, _, window, cx| {
                     this.set_quality_popover(false, window, cx);
                 }))
+                // 弹层是栏根的延迟绘制后代，命中区还压在栏上方；不吞掉这一次按下，
+                // 里面选音质的那一下会继续冒到栏根，变成"选音质顺手收起歌词页"。
+                // 和播放队列面板用的是同一招。
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(
                     div()
                         .px_4()
@@ -771,6 +783,19 @@ impl Render for PlayerBar {
         let play_queue_open_at_render = self.play_queue.read(cx).is_open();
 
         div()
+            // 整条栏是一个点击区：收起态点任意空白处展开歌词页，展开态再点收起，
+            // 统一 toggle 单一状态源（和页头的收起按钮殊途同归）。
+            //
+            // 冒泡规则：自带行为的部件在各自处理器里 `stop_propagation`
+            // （播放控制、红心、音量、进度条、两个浮层和队列面板），
+            // 所以那些控件上的点击不会走到这里；冒到这里的就是"点了栏本身"。
+            // 反过来，评论数、更多这些还没接行为的图标暂时就归到这里管，
+            // 等它们接上自己的动作时，再在各自处理器里补一句停传播。
+            .id("player-bar")
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.now_playing
+                    .update(cx, |now_playing, cx| now_playing.toggle(cx));
+            }))
             .w_full()
             .h(px(PLAYER_BAR_HEIGHT))
             .flex_none()
@@ -832,11 +857,8 @@ impl Render for PlayerBar {
                             .child(
                                 div()
                                     .id("player-album-cover")
+                                    // 指针只留在封面和按钮上：整栏可点不代表整栏都长得像按钮。
                                     .cursor_pointer()
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.now_playing
-                                            .update(cx, |now_playing, cx| now_playing.expand(cx));
-                                    }))
                                     .size(px(60.))
                                     .flex_none()
                                     .ml(px(-70. * expand))
@@ -858,11 +880,9 @@ impl Render for PlayerBar {
                                     .overflow_hidden()
                                     .child(
                                         div()
-                                            .id("player-song-title")
-                                            .cursor_pointer()
-                                            // 命中区贴合歌名本身：列布局默认把子项拉到整列宽，
-                                            // 歌名比歌手短时右侧空白也会被算进点击区。`self_start`
-                                            // 取消拉伸让宽度收缩到文字，`max_w_full` 再把上限卡在
+                                            // 命中区跟着栏走，这里不再需要为了点击区收窄宽度：
+                                            // 整栏都是点击区，歌名被拉满一列也不会多拦住什么。
+                                            // `self_start` 让宽度收缩到文字，`max_w_full` 把上限卡在
                                             // 本列宽度内，歌名过长时仍能省略号截断而不是溢出。
                                             .self_start()
                                             .max_w_full()
@@ -870,13 +890,6 @@ impl Render for PlayerBar {
                                             .text_size(px(16.))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .truncate()
-                                            // 标题常驻播放栏：收起态点它展开、展开态点它收起，
-                                            // 直接 toggle 单一状态源，和页头收起按钮殊途同归。
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.now_playing.update(cx, |now_playing, cx| {
-                                                    now_playing.toggle(cx)
-                                                });
-                                            }))
                                             .child(title),
                                     )
                                     .child(
@@ -942,6 +955,7 @@ impl Render for PlayerBar {
                                 )
                                 .on_click(cx.listener(
                                     |this, _, _, cx| {
+                                        cx.stop_propagation();
                                         this.playback
                                             .update(cx, |playback, cx| playback.cycle_mode(cx));
                                     },
@@ -958,6 +972,7 @@ impl Render for PlayerBar {
                                 )
                                 .on_click(cx.listener(
                                     |this, _, _, cx| {
+                                        cx.stop_propagation();
                                         this.playback
                                             .update(cx, |playback, cx| playback.previous(cx));
                                     },
@@ -1021,6 +1036,7 @@ impl Render for PlayerBar {
                                             })
                                             .active(|style| style.opacity(PRESSED_OPACITY))
                                             .on_click(cx.listener(|this, _, _, cx| {
+                                                cx.stop_propagation();
                                                 this.playback.update(cx, |playback, cx| {
                                                     playback.toggle(cx);
                                                 });
@@ -1039,6 +1055,7 @@ impl Render for PlayerBar {
                                 )
                                 .on_click(cx.listener(
                                     |this, _, _, cx| {
+                                        cx.stop_propagation();
                                         this.playback.update(cx, |playback, cx| playback.next(cx));
                                     },
                                 )),
@@ -1055,6 +1072,7 @@ impl Render for PlayerBar {
                                 // 按下即开合。面板自己在"面板外按下"时会先一步收起，
                                 // 所以这里要跟渲染时的状态比对：值已经不相等就说明这一下
                                 // 刚刚才被面板关掉，不能再翻回来（否则点图标永远关不上）。
+                                // 这个按钮没有 click 处理，靠按下就停传播来挡住栏根的整栏点击。
                                 .on_mouse_down(
                                     MouseButton::Left,
                                     cx.listener(move |this, _, _, cx| {
@@ -1062,6 +1080,7 @@ impl Render for PlayerBar {
                                         if panel.read(cx).is_open() == play_queue_open_at_render {
                                             panel.update(cx, |panel, cx| panel.toggle(cx));
                                         }
+                                        cx.stop_propagation();
                                     }),
                                 ),
                             ),
@@ -1092,9 +1111,21 @@ impl Render for PlayerBar {
                                     colors,
                                 )
                                 // 右侧第二个图标就是收藏入口：弹出「收藏到歌单」弹窗。
-                                .on_click(|_, window, cx| super::open_collect_window(window, cx)),
+                                .on_click(|_, window, cx| {
+                                    cx.stop_propagation();
+                                    super::open_collect_window(window, cx);
+                                }),
                             )
-                            .child(self.volume.clone())
+                            .child(
+                                // 音量是独立控件（还带自己的 hover 气泡），整栏可点之后必须由
+                                // 这里吞掉按下，否则点音量图标会顺带收起歌词页。
+                                div()
+                                    .flex_none()
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    })
+                                    .child(self.volume.clone()),
+                            )
                             .child(hover_icon(
                                 "player-more-button",
                                 "更多",

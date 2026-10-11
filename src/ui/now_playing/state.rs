@@ -9,7 +9,7 @@
 //! - [`NowPlaying::backdrop`] 是共享的封面渐变底；
 //! - [`NowPlaying::rotation_clock`] 是共享的黑胶旋转时钟（迷你碟与整页大碟同一份）；
 //! - [`NowPlaying::reveal`] 是全应用唯一一处展开 / 收起动效定义（时长、曲线、通道 id）；
-//! - 想改状态就 `update` 本实体调 `expand` / `collapse` / `toggle`，想跟随就 `observe`，
+//! - 想改状态就 `update` 本实体调 `toggle` / `collapse`，想跟随就 `observe`，
 //!   事件回环与镜像 bool 一并消失。
 
 use std::{cell::Cell, rc::Rc, time::Duration};
@@ -62,14 +62,11 @@ impl NowPlaying {
         self.rotation_clock.clone()
     }
 
-    pub(in crate::ui) fn expand(&mut self, cx: &mut Context<Self>) {
-        self.set_expanded(true, cx);
-    }
-
     pub(in crate::ui) fn collapse(&mut self, cx: &mut Context<Self>) {
         self.set_expanded(false, cx);
     }
 
+    /// 展开 / 收起的翻转。播放栏整栏可点，收起态点它展开、展开态再点收起，走的就是这里。
     pub(in crate::ui) fn toggle(&mut self, cx: &mut Context<Self>) {
         self.set_expanded(!self.expanded, cx);
     }
