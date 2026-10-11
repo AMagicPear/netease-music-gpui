@@ -276,6 +276,28 @@ impl MusicApi {
         Ok(())
     }
 
+    /// 搜索单曲（type=1）。走 cloudsearch 接口：它返回的 songs 与 song_detail
+    /// 同构（ar / al / dt），可以直接反序列化成 `Song`；老版 /search 用的是
+    /// artists / album / duration，字段对不上。
+    pub async fn search_songs(client: ApiClient, keywords: &str) -> Result<Vec<Song>, String> {
+        let mut response = Self::request(
+            client.cloudsearch(
+                &Query::new()
+                    .param("keywords", keywords)
+                    .param("type", "1")
+                    .param("limit", "30"),
+            ),
+        )
+        .await?;
+        let mut songs: Vec<Song> = serde_json::from_value(response.body["result"]["songs"].take())
+            .map_err(|error| format!("搜索结果格式无效：{error}"))?;
+        // 权益拿不到不影响列表本身，音质判断会退回歌曲自带的变体字段。
+        let privileges: Vec<Privilege> =
+            serde_json::from_value(response.body["result"]["privileges"].take()).unwrap_or_default();
+        attach_privileges(&mut songs, privileges);
+        Ok(songs)
+    }
+
     pub async fn playlist(
         client: ApiClient,
         playlist_id: u64,

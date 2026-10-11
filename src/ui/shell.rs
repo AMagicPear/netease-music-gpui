@@ -10,14 +10,15 @@ use super::components::{
 };
 use super::cover_color::{Backdrop, CoverColor, CoverGradient, gradient_layer};
 use super::now_playing::{NowPlaying, NowPlayingPage};
-use super::pages::{ContentPage, playlist::PlaylistPage};
+use super::pages::{playlist::PlaylistPage, search::SearchPage, ContentPage};
 use super::sidebar::{LoginRequested, SidebarChanged, SidebarPage};
 use super::theme::{IconSize, PRESSED_ICON_ALPHA};
 use crate::playback::PlaybackController;
 use crate::state::account::AccountState;
 use crate::state::library::MusicLibrary;
-use gpui_kit::base::input::{Input, InputState};
-use gpui_kit::base::{Button, ColorTokens, Scrollbar, ScrollbarMode, Theme};
+use crate::state::search_results::SearchResults;
+use gpui_kit::base::input::{Input, InputEvent, InputState};
+use gpui_kit::base::{Button, ColorTokens, History, Scrollbar, ScrollbarMode, Theme};
 use gpui_kit::component::Sizable;
 use gpui_kit::component::avatar::Avatar;
 
@@ -59,9 +60,11 @@ impl MainWindow {
             this.sync_cover_prefetch(&playback, cx);
         });
         let playlist_page = main_content.read(cx).playlist_page.clone();
+        let search_page = main_content.read(cx).search_page.clone();
         let background_subscriptions = vec![
             cx.observe(&main_content, |_, _, cx| cx.notify()),
             cx.observe(&playlist_page, |_, _, cx| cx.notify()),
+            cx.observe(&search_page, |_, _, cx| cx.notify()),
         ];
         let mut this = Self {
             main_content,
@@ -193,6 +196,9 @@ impl Render for MainWindow {
 
 pub struct MainContent {
     active_page: ContentPage,
+    /// 浏览器式导航轨迹：侧栏点击、搜索跳转都 push 进来，返回键沿轨迹回退。
+    /// `ContentPage` 是 Copy 的"位置"，正符合 History 而非 UndoHistory 的语义。
+    history: History<ContentPage>,
     sidebar_width: Pixels,
     sidebar: Entity<SidebarPage>,
     search_input: Entity<InputState>,
@@ -204,6 +210,9 @@ pub struct MainContent {
     /// 每个导航项对应一个页面 View，一次创建后长期持有。
     pages: HashMap<ContentPage, AnyView>,
     playlist_page: Entity<PlaylistPage>,
+    /// 搜索结果页：没有侧栏入口，只在搜索框提交后展示。
+    search_page: Entity<SearchPage>,
+    search_results: Entity<SearchResults>,
     library: Entity<MusicLibrary>,
     /// 全局侧面板；页头的消息图标触发它的消息页。
     side_panel: Entity<SidePanel>,
@@ -213,6 +222,7 @@ pub struct MainContent {
     _sidebar_login_subscription: Subscription,
     _user_profile_subscription: Subscription,
     _library_subscription: Subscription,
+    _search_subscription: Subscription,
 }
 
 impl MainContent {
@@ -237,7 +247,7 @@ impl MainContent {
                     super::login::open(window, this.user_profile.clone(), this.login_window, cx);
             },
         );
-        let playlist_page = cx.new(|cx| PlaylistPage::new(library.clone(), playback, cx));
+        let playlist_page = cx.new(|cx| PlaylistPage::new(library.clone(), playback.clone(), cx));
         let library_subscription = cx.observe(&library, |this, _, cx| {
             // 收藏歌单的 ID 要等账号索引返回后才能解析。
             this.open_playlist(this.active_page, cx);
@@ -251,11 +261,25 @@ impl MainContent {
             });
             state
         });
+        // 回车提交搜索：先发请求，再把右侧切到搜索结果页。
+        // InputState 是 EventEmitter<InputEvent>，PressEnter 即回车（含 IME 确认后的回车）。
+        let search_results = cx.new(|_| SearchResults::default());
+        let search_page = cx.new(|cx| {
+            SearchPage::new(library.clone(), playback.clone(), search_results.clone(), cx)
+        });
+        let search_subscription = cx.subscribe(&search_input, |this, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.submit_current_input(cx);
+            }
+        });
 
         // 页面在这里全部建好；切走再切回仍是同一个 View 实例。
         let pages = ContentPage::all()
             .filter_map(|page| page.build(cx).map(|view| (page, view)))
             .collect();
+        // 导航轨迹以初始页为根：back() 在根上返回 None，返回键据此呈禁用态。
+        let mut history = History::new();
+        history.push(ContentPage::Recommend);
         let user_profile_subscription = cx.observe(&user_profile, |this, account, cx| {
             let user_id = account.read(cx).profile.user_id;
             if this.account_id != user_id {
@@ -269,6 +293,7 @@ impl MainContent {
 
         Self {
             active_page: ContentPage::Recommend,
+            history,
             sidebar_width: MIN_SIDEBAR_WIDTH,
             sidebar,
             search_input,
@@ -278,6 +303,8 @@ impl MainContent {
             account_id: 0,
             pages,
             playlist_page,
+            search_page,
+            search_results,
             library,
             side_panel,
             playlist_backdrop: Backdrop::default(),
@@ -288,11 +315,43 @@ impl MainContent {
             _sidebar_login_subscription: login_subscription,
             _user_profile_subscription: user_profile_subscription,
             _library_subscription: library_subscription,
+            _search_subscription: search_subscription,
+        }
+    }
+
+    /// 提交搜索：请求发出后立刻切页，加载中 / 出错 / 空结果都由搜索页自己表达。
+    fn submit_search(&mut self, keywords: String, cx: &mut Context<Self>) {
+        self.search_results
+            .update(cx, |results, cx| results.search(keywords, cx));
+        self.navigate(ContentPage::Search, cx);
+    }
+
+    /// 读取搜索框当前内容并提交；两个入口（回车、放大镜点击）共用。
+    fn submit_current_input(&mut self, cx: &mut Context<Self>) {
+        let keywords = self.search_input.read(cx).value().trim().to_owned();
+        if !keywords.is_empty() {
+            self.submit_search(keywords, cx);
         }
     }
 
     /// 所有入口统一提交导航，侧栏负责显示选中项和发出请求。
     pub(super) fn navigate(&mut self, page: ContentPage, cx: &mut Context<Self>) {
+        // 重复点同一个导航项不产生新轨迹节点，返回键也就不会"原地踏步"。
+        if self.active_page != page {
+            self.history.push(page);
+        }
+        self.show_page(page, cx);
+    }
+
+    /// 页头返回键：沿导航轨迹回退一格，回到根页面时按键呈禁用态。
+    pub(super) fn go_back(&mut self, cx: &mut Context<Self>) {
+        if let Some(page) = self.history.back() {
+            self.show_page(page, cx);
+        }
+    }
+
+    /// 导航的实际生效路径：历史记录、页面切换各自独立，返回时只走这里不再入栈。
+    fn show_page(&mut self, page: ContentPage, cx: &mut Context<Self>) {
         self.active_page = page;
         self.sidebar
             .update(cx, |sidebar, cx| sidebar.set_active_page(page, cx));
@@ -328,8 +387,13 @@ impl MainContent {
     }
 }
 
-/// 搜索框：左边放大镜图标，右边文本输入框，宽度可被压缩
-fn search_box(input: Entity<InputState>, colors: ColorTokens) -> impl IntoElement {
+/// 搜索框：左边放大镜图标，右边文本输入框，宽度可被压缩。
+/// 放大镜是第二个提交入口，与输入框回车走同一份提交逻辑。
+fn search_box(
+    input: Entity<InputState>,
+    on_submit: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    colors: ColorTokens,
+) -> impl IntoElement {
     div()
         .occlude()
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -356,6 +420,7 @@ fn search_box(input: Entity<InputState>, colors: ColorTokens) -> impl IntoElemen
                 .text_color(colors.muted_foreground)
                 .hover(|style| style.text_color(colors.foreground))
                 .id("search-box-icon")
+                .on_click(on_submit)
                 // 同上：按下换用更浅的「按下色」，避免按住拖出时叠加 opacity 造成双重变淡
                 .active(|style| style.text_color(colors.foreground.alpha(PRESSED_ICON_ALPHA))),
         )
@@ -605,6 +670,8 @@ impl MainContent {
                     .border_color(colors.border)
                     .rounded_lg()
                     .hover(|style| style.bg(colors.accent))
+                    // 没有可回退的页面时点击静默无效果，不做禁用外观。
+                    .on_click(cx.listener(|this, _, _, cx| this.go_back(cx)))
                     .child(
                         svg()
                             .path("icons/backward.svg")
@@ -612,7 +679,11 @@ impl MainContent {
                             .text_color(colors.secondary_foreground),
                     ),
             )
-            .child(search_box(self.search_input.clone(), colors))
+            .child(search_box(
+                self.search_input.clone(),
+                cx.listener(|this, _, _, cx| this.submit_current_input(cx)),
+                colors,
+            ))
             .child(self.profile_menu(colors, cx))
             .child(
                 hover_icon("header-message-button", "消息", "icons/message.svg", colors)
@@ -661,6 +732,8 @@ impl Render for MainContent {
                 window.viewport_size().width - self.sidebar_width - px(80.),
                 cx,
             )),
+            // 搜索结果页没有侧栏按钮，由搜索框提交时 navigate 进来。
+            ContentPage::Search => Some(self.search_page.clone().into_any_element()),
             _ => self
                 .pages
                 .get(&active_page)

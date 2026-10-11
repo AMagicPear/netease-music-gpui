@@ -7,6 +7,7 @@ mod podcast;
 mod recent;
 mod recommend;
 mod roaming;
+pub(super) mod search;
 
 use gpui::*;
 
@@ -25,6 +26,8 @@ pub(super) enum ContentPage {
     MyCollection,
     DownloadManagement,
     MyCloud,
+    /// 搜索结果页：只在搜索框提交后出现，侧边栏没有对应按钮。
+    Search,
 }
 
 /// 顶部导航分组：推荐、精选、播客、漫游、关注。
@@ -62,6 +65,7 @@ impl ContentPage {
             Self::MyCollection => "my-collection",
             Self::DownloadManagement => "download-management",
             Self::MyCloud => "my-cloud",
+            Self::Search => "search",
         };
         id.into()
     }
@@ -80,6 +84,7 @@ impl ContentPage {
             Self::MyCollection => "我的收藏",
             Self::DownloadManagement => "下载管理",
             Self::MyCloud => "我的音乐云盘",
+            Self::Search => "搜索",
         }
     }
 
@@ -97,6 +102,7 @@ impl ContentPage {
             Self::MyCollection => "icons/sidebar/sidebar_favourite.svg",
             Self::DownloadManagement => "icons/sidebar/sidebar_download.svg",
             Self::MyCloud => "icons/sidebar/sidebar_cloud.svg",
+            Self::Search => "icons/search.svg",
         }
     }
 
@@ -112,7 +118,7 @@ impl ContentPage {
 
     /// 创建该导航项对应的页面 View。
     ///
-    /// 静态页面长期持有；带 ID 的歌单由 MainContent 的单个 PlaylistPage 承接。
+    /// 静态页面长期持有；带 ID 的歌单和搜索结果页由 MainContent 的单个 View 承接。
     pub(super) fn build(self, cx: &mut App) -> Option<AnyView> {
         Some(match self {
             Self::Recommend => cx.new(|_| recommend::RecommendPage).into(),
@@ -120,7 +126,7 @@ impl ContentPage {
             Self::Podcast => cx.new(|_| podcast::PodcastPage).into(),
             Self::Roaming => cx.new(|_| roaming::RoamingPage).into(),
             Self::Following => cx.new(|_| following::FollowingPage).into(),
-            Self::FavoriteMusic | Self::Playlist(_) => return None,
+            Self::FavoriteMusic | Self::Playlist(_) | Self::Search => return None,
             Self::Recent => cx.new(|_| recent::RecentPage).into(),
             Self::MyPodcast => cx.new(|_| my_podcast::MyPodcastPage).into(),
             Self::MyCollection => cx.new(|_| my_collection::MyCollectionPage).into(),

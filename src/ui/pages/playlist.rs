@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 /// 操作按钮的统一高度
-const ACTION_BUTTON_HEIGHT: Pixels = px(36.);
+pub(super) const ACTION_BUTTON_HEIGHT: Pixels = px(36.);
 /// 带文字按钮的左右内边距，宽度靠它 + 内容自适应
 const ACTION_BUTTON_PADDING: Pixels = px(12.);
 
@@ -31,7 +31,7 @@ const ALBUM_SHARE_MIN: f32 = 0.1;
 const ALBUM_SHARE_MAX: f32 = 0.8;
 
 /// 次要文字使用常规字重。
-const SECONDARY_FONT_WEIGHT: FontWeight = FontWeight::NORMAL;
+pub(super) const SECONDARY_FONT_WEIGHT: FontWeight = FontWeight::NORMAL;
 
 /// 「喜欢」「时长」的固定宽度：两列都在分界线右边，反推分界线位置要用到它们。
 const LIKE_COLUMN_WIDTH: Pixels = px(42.);
@@ -103,16 +103,16 @@ pub struct PlaylistPage {
     playing_indicator: Entity<PlayingIndicator>,
 }
 
-struct SongDisplay {
-    cover: Option<ImageSource>,
-    title: SharedString,
-    subtitle: std::ops::Range<usize>,
-    album: SharedString,
-    duration: SharedString,
+pub(super) struct SongDisplay {
+    pub(super) cover: Option<ImageSource>,
+    pub(super) title: SharedString,
+    pub(super) subtitle: std::ops::Range<usize>,
+    pub(super) album: SharedString,
+    pub(super) duration: SharedString,
 }
 
 impl SongDisplay {
-    fn new(song: &Song) -> Self {
+    pub(super) fn new(song: &Song) -> Self {
         let mut title = song.name.clone();
         let start = title.len();
         if let Some(subtitle) = song.tns.first().or_else(|| song.alia.first()) {
@@ -137,7 +137,7 @@ impl SongDisplay {
 }
 
 /// 使用同一段 StyledText，标题和副标题一起截断；颜色随当前主题计算。
-fn title_with_subtitle(display: &SongDisplay, colors: ColorTokens) -> StyledText {
+pub(super) fn title_with_subtitle(display: &SongDisplay, colors: ColorTokens) -> StyledText {
     if display.subtitle.is_empty() {
         return StyledText::new(display.title.clone());
     }
@@ -205,7 +205,7 @@ fn tag_row(tags: &[String], colors: ColorTokens) -> AnyElement {
 }
 
 /// 行 hover 时才出现的图标：序号位置的播放键、标题右侧那排操作按钮，共用这一套样式。
-fn row_hover_icon(
+pub(super) fn row_hover_icon(
     id: (&'static str, u64),
     path: &'static str,
     label: &'static str,
@@ -1268,7 +1268,7 @@ fn icon_action_button(
 }
 
 /// 「播放全部」：主题红实心按钮，白字白图标，无边框。
-fn play_all_button(colors: ColorTokens, compact: bool) -> Button {
+pub(super) fn play_all_button(colors: ColorTokens, compact: bool) -> Button {
     Button::new(if compact {
         "playlist-floating-play"
     } else {
@@ -1302,7 +1302,7 @@ fn play_all_button(colors: ColorTokens, compact: bool) -> Button {
 }
 
 /// 空状态在右侧留白区水平居中，顶部对齐（不另加边距）。
-fn centered_empty(
+pub(super) fn centered_empty(
     image: &'static str,
     tip: &str,
     colors: gpui_kit::base::ColorTokens,
