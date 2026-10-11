@@ -298,6 +298,30 @@ impl MusicApi {
         Ok(songs)
     }
 
+    /// 搜索歌单（type=1000）。和 `search_songs` 同一条 cloudsearch 链路，返回的 `playlists`
+    /// 与歌单摘要同构，可以直接反序列化成 `Playlist` —— 摘要缺的字段由模型兜着。
+    ///
+    /// 一次取 50 条：虚拟表格只渲染可见行，多要几条只为滚动更顺手。
+    /// 分页先不做，需要时按 `result.playlistCount` 接续加载。
+    pub async fn search_playlists(
+        client: ApiClient,
+        keywords: &str,
+    ) -> Result<Vec<Playlist>, String> {
+        let mut response = Self::request(
+            client.cloudsearch(
+                &Query::new()
+                    .param("keywords", keywords)
+                    .param("type", "1000")
+                    .param("limit", "50"),
+            ),
+        )
+        .await?;
+        let playlists: Vec<Playlist> =
+            serde_json::from_value(response.body["result"]["playlists"].take())
+                .map_err(|error| format!("歌单搜索结果格式无效：{error}"))?;
+        Ok(playlists)
+    }
+
     pub async fn playlist(
         client: ApiClient,
         playlist_id: u64,
@@ -725,6 +749,32 @@ mod tests {
                 .block_on(MusicApi::notice_messages(&api.client))
                 .expect("通知"),
         );
+    }
+
+    #[test]
+    #[ignore = "需要登录会话（或 COOKIE 环境变量）和网络连接"]
+    fn search_playlists_can_parse_real_results() {
+        let api = MusicApi::from_env().expect("无法获取登录会话");
+        let playlists = api
+            .runtime
+            .block_on(MusicApi::search_playlists(api.client.clone(), "周杰伦"))
+            .expect("歌单搜索失败");
+        assert!(!playlists.is_empty());
+        for playlist in &playlists {
+            assert!(playlist.id > 0);
+            assert!(!playlist.name.is_empty());
+            assert!(playlist.track_count > 0);
+            // 搜索摘要不带创建时间，缺了要老实留空，而不是解析失败或编一个假日期。
+            assert_eq!(playlist.create_time, None);
+        }
+        // 点进详情后，摘要里的歌单名要能和详情对上。
+        let (detail, songs) = api
+            .runtime
+            .block_on(MusicApi::playlist(api.client.clone(), playlists[0].id))
+            .expect("歌单详情失败");
+        assert_eq!(detail.name, playlists[0].name);
+        assert!(detail.create_time.is_some());
+        assert!(!songs.is_empty());
     }
 
     #[test]

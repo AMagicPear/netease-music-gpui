@@ -2,40 +2,78 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_kit::base::{Button, ColorTokens, Theme};
+use gpui_kit::base::{Button, ColorTokens, Scrollbar, ScrollbarMode, Theme};
 
-use crate::models::Song;
+use crate::models::{Playlist, Song};
 use crate::playback::PlaybackController;
 use crate::state::library::MusicLibrary;
 use crate::state::search_results::SearchResults;
-use crate::ui::assets::track_cover_image;
+use crate::ui::assets::{track_cover_image, track_cover_url};
 use crate::ui::components::{
-    artist_label, like_icon_path, quality_badge_path, spinner, virtual_table, TabBar, TabChanged,
-    TabItem, TableColumn, CELL_PADDING,
+    ACTION_BUTTON_HEIGHT, CELL_PADDING, DURATION_COLUMN_WIDTH, LIKE_COLUMN_WIDTH,
+    PAGE_SIDE_PADDING, ROW_HEIGHT, SECONDARY_FONT_WEIGHT, SongDisplay, TabBar, TabChanged, TabItem,
+    TableColumn, artist_label, centered_empty, hovered_row_after, index_column_width, like_icon_path,
+    play_all_button, play_count_label, quality_badge_path, row_hover_icon, spinner,
+    title_with_subtitle, virtual_table,
 };
-use crate::ui::theme::IconSize;
+use crate::ui::theme::{DOLPHIN_FAMILY, IconSize};
 
-use super::playlist::{
-    centered_empty, play_all_button, row_hover_icon, title_with_subtitle, SongDisplay,
-    ACTION_BUTTON_HEIGHT, SECONDARY_FONT_WEIGHT,
-};
+/// 歌单表「歌曲数」「播放量」的固定宽度。两列内容最长是「1234万」「1163首」
+/// （约 44px），给到 56px 留一点余量；再宽只会挤占标题和创建者的弹性空间，
+/// 不会再产生右缘空洞（两列弹性权重已和为 1，整表铺满）。
+const TRACK_COUNT_COLUMN_WIDTH: Pixels = px(56.);
+const PLAY_COUNT_COLUMN_WIDTH: Pixels = px(56.);
 
-/// 「喜欢」「时长」列的固定宽度，与歌单页保持一致。
-const LIKE_COLUMN_WIDTH: Pixels = px(42.);
-const DURATION_COLUMN_WIDTH: Pixels = px(66.);
-/// 序号列固定宽度：本页不做排序，行数不超过三位数。
-const INDEX_COLUMN_WIDTH: Pixels = px(34.);
+/// 一个分类 tab 的语义。下标只是「第几栏」，不表达「这栏该显示什么」，
+/// 这里补上这份对应关系。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SearchTab {
+    /// 综合 / 单曲：共用同一份单曲结果。
+    Songs,
+    /// 歌单：单独一份结果，切到这栏时才去取。
+    Playlists,
+    /// 还没接的分类，先给占位空状态。
+    Unsupported,
+}
 
 /// 与官方客户端一致的分类 tab 顺序。
-const SEARCH_TABS: [&str; 10] = [
-    "综合", "单曲", "歌单", "播客", "专辑", "歌手", "MV", "用户", "歌词", "声音",
+///
+/// 标签和语义写在同一个数组里：下标就是 `TabBar` 的 `selected_index`，
+/// 两份平行数组迟早会各自加一条、悄悄错位。
+const SEARCH_TABS: [(SearchTab, &str); 10] = [
+    (SearchTab::Songs, "综合"),
+    (SearchTab::Songs, "单曲"),
+    (SearchTab::Playlists, "歌单"),
+    (SearchTab::Unsupported, "播客"),
+    (SearchTab::Unsupported, "专辑"),
+    (SearchTab::Unsupported, "歌手"),
+    (SearchTab::Unsupported, "MV"),
+    (SearchTab::Unsupported, "用户"),
+    (SearchTab::Unsupported, "歌词"),
+    (SearchTab::Unsupported, "声音"),
 ];
-/// 目前只有这两类能展示内容（都是同一份单曲结果）。
-const SONG_TABS: [usize; 2] = [0, 1];
-/// 单曲 tab 的下标。
-const SONG_TAB: usize = 1;
 
-/// 所有搜索共用一个 View；关键词和结果由独立的 Entity 管理。
+/// 单曲 tab 的下标：只有它带「播放全部」。
+const SONG_TAB: usize = 1;
+/// 歌单 tab 的下标：切到它时才发歌单搜索请求。
+const PLAYLIST_TAB: usize = 2;
+
+/// 搜索页请求打开某个歌单。
+///
+/// 页面之间不直接互相调用：搜索页不知道自己被谁显示着，只管发出打开意图，
+/// 由 `MainContent` 统一处理导航和详情加载。
+pub struct OpenPlaylist {
+    pub id: u64,
+    /// 搜索结果里已经拿到的歌单摘要。详情页先用它把页头画出来，不用等详情接口返回。
+    pub summary: Playlist,
+}
+
+impl EventEmitter<OpenPlaylist> for SearchPage {}
+
+/// 搜索结果页。和歌单详情页一样只是「一个用 `virtual_table` 的列表页」，两者互不依赖：
+/// 共用的表格长相和行内零件都在 `components::virtual_table` 里。
+///
+/// 布局上的区别：这里整页不滚动，搜索词标题和分类 tab 常驻，只有表格区域滚动。
 pub struct SearchPage {
     results: Entity<SearchResults>,
     _results_subscription: Subscription,
@@ -47,20 +85,42 @@ pub struct SearchPage {
     playback: Entity<PlaybackController>,
     _playback_subscription: Subscription,
     columns: Rc<Vec<TableColumn>>,
-    /// hover 中的行，用歌曲 id 标记，不随列表刷新错位。
+    playlist_columns: Rc<Vec<TableColumn>>,
+    /// 表格区域自己的滚动位置。只包住表格，不包标题和 tab。
+    table_scroll: ScrollHandle,
+    /// hover 中的行，用 id 标记，不随列表刷新错位。
     hovered_row: Option<u64>,
     /// 播放状态快照：变化时才重绘，播放进度不会频繁刷新整页。
     playback_state: (Option<u64>, bool, bool),
 }
 
-/// 列定义。搜索结果不做排序，表头就是纯文字。
-fn table_columns() -> Rc<Vec<TableColumn>> {
+/// 单曲 / 综合的列定义。搜索结果不做排序，表头就是纯文字。
+/// 序号列宽跟着行数算（和歌单页同一个函数），两边的序号列才一样宽。
+fn table_columns(row_count: usize) -> Rc<Vec<TableColumn>> {
     Rc::new(vec![
-        TableColumn::new("#", Some(INDEX_COLUMN_WIDTH)).align_right(),
+        TableColumn::new("#", Some(index_column_width(row_count))).align_right(),
         TableColumn::new("标题", None).weight(0.65),
         TableColumn::new("专辑", None).weight(0.35),
         TableColumn::new("喜欢", Some(LIKE_COLUMN_WIDTH)),
         TableColumn::new("时长", Some(DURATION_COLUMN_WIDTH)),
+    ])
+}
+
+/// 歌单的列定义，与官方客户端一致。
+///
+/// 「歌曲数」和「播放量」都是短数字，给固定宽度；其余宽度按权重分给标题和创建者，
+/// 标题权重更大 —— 歌单名比创建者更容易长到需要截断。
+///
+/// 两列权重和必须是 1：GPUI 走 taffy 布局，而 taffy 沿用 CSS flexbox 的规矩——
+/// 「权重和小于 1」时不会把剩余宽度分光，漏掉的 `(1 − 和)` 会以空洞堆在最后一列
+/// 「播放量」右侧。和刚好为 1，整表才铺满、播放量紧贴右缘。
+fn playlist_table_columns(row_count: usize) -> Rc<Vec<TableColumn>> {
+    Rc::new(vec![
+        TableColumn::new("#", Some(index_column_width(row_count))).align_right(),
+        TableColumn::new("标题", None).weight(0.7),
+        TableColumn::new("歌曲数", Some(TRACK_COUNT_COLUMN_WIDTH)),
+        TableColumn::new("创建者", None).weight(0.3),
+        TableColumn::new("播放量", Some(PLAY_COUNT_COLUMN_WIDTH)),
     ])
 }
 
@@ -72,10 +132,18 @@ impl SearchPage {
         cx: &mut Context<Self>,
     ) -> Self {
         let tabs = cx.new(|_| {
-            TabBar::new(SEARCH_TABS.iter().map(|label| TabItem::new(*label)).collect())
+            TabBar::new(
+                SEARCH_TABS
+                    .iter()
+                    .map(|(_, label)| TabItem::new(*label))
+                    .collect(),
+            )
         });
-        let tabs_subscription =
-            cx.subscribe(&tabs, |_, _, _: &TabChanged, cx| cx.notify());
+        let tabs_subscription = cx.subscribe(&tabs, |this, _, _: &TabChanged, cx| {
+            // 单曲和歌单是两套编号，留着上一栏的行号会让新栏里同号的行凭空高亮。
+            this.hovered_row = None;
+            this.load_tab_results(cx);
+        });
         // 换了关键词就把 tab 复位到「综合」，避免新结果挂在旧分类下。
         let results_subscription = cx.observe(&results, |this, results, cx| {
             let keywords = results.read(cx).keywords.clone();
@@ -83,6 +151,10 @@ impl SearchPage {
                 this.keywords = keywords;
                 this.tabs.update(cx, |tabs, cx| tabs.select(0, cx));
             }
+            // 序号列宽跟着行数走，结果换了要重新算一遍列定义。
+            let results = results.read(cx);
+            this.columns = table_columns(results.songs.len());
+            this.playlist_columns = playlist_table_columns(results.playlists.len());
             cx.notify();
         });
         let mut playback_state = Self::playback_state(&playback, cx);
@@ -102,7 +174,9 @@ impl SearchPage {
             library,
             playback,
             _playback_subscription: playback_subscription,
-            columns: table_columns(),
+            columns: table_columns(0),
+            playlist_columns: playlist_table_columns(0),
+            table_scroll: ScrollHandle::default(),
             hovered_row: None,
             playback_state,
         }
@@ -126,6 +200,347 @@ impl SearchPage {
         });
     }
 
+    /// 切分类时才去取这一栏的结果。歌单是懒加载的：搜索时顺手多发一次请求，
+    /// 对只看单曲的人是纯浪费往返。
+    fn load_tab_results(&mut self, cx: &mut Context<Self>) {
+        if self.tabs.read(cx).selected_index() == PLAYLIST_TAB {
+            self.results
+                .update(cx, |results, cx| results.search_playlists(cx));
+        }
+        cx.notify();
+    }
+
+    /// 搜索词大标题 + 分类 tab 行。没搜过时整块都不出现。
+    fn result_header(
+        &mut self,
+        kind: SearchTab,
+        tab: usize,
+        colors: ColorTokens,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(keywords) = self.results.read(cx).keywords.clone() else {
+            return div().into_any_element();
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            // 和表格用同一个留白常量，标题、tab、表格左边缘才对得齐。
+            .px(PAGE_SIDE_PADDING)
+            .child(
+                div()
+                    .text_size(px(24.))
+                    .line_clamp(1)
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(colors.foreground)
+                    .child(keywords),
+            )
+            // tab 行：左侧分类，右侧「播放全部」（只在单曲分类显示）。
+            // 按按钮高度定行高，按钮时有时无时不会塌陷。
+            .child(
+                div()
+                    .h(ACTION_BUTTON_HEIGHT)
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(self.tabs.clone())
+                    .when(kind == SearchTab::Songs && tab == SONG_TAB, |row| {
+                        row.child(play_all_button(colors, false).on_click(cx.listener(
+                            |this, _, _, cx| {
+                                let songs = this.results.read(cx).songs.clone();
+                                this.playback.update(cx, |playback, cx| {
+                                    playback.play_list_from_start(0, songs, cx);
+                                });
+                            },
+                        )))
+                    }),
+            )
+            .into_any_element()
+    }
+
+    /// 分类 tab 下面的列表区：加载中 / 出错 / 空结果 / 表格都在这里收敛。
+    /// 状态按分类各存一份，所以切栏不会把另一栏的结果也变成加载中。
+    fn tab_list(
+        &mut self,
+        kind: SearchTab,
+        colors: ColorTokens,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // 还没接的分类直接给占位，和搜没搜过无关。
+        if kind == SearchTab::Unsupported {
+            return centered_empty(
+                "images/empty/cm_empty_wuzuopin.png",
+                "该分类暂未支持，先看看单曲吧",
+                colors,
+            )
+            .into_any_element();
+        }
+        let (loading, error, empty) = {
+            let results = self.results.read(cx);
+            match kind {
+                SearchTab::Songs => (
+                    results.loading,
+                    results.error.clone(),
+                    results.songs.is_empty(),
+                ),
+                _ => (
+                    results.playlists_loading,
+                    results.playlists_error.clone(),
+                    results.playlists.is_empty(),
+                ),
+            }
+        };
+        let searched = self.results.read(cx).keywords.is_some();
+        if loading {
+            return div()
+                .w_full()
+                .py(px(36.))
+                .flex()
+                .justify_center()
+                .child(spinner("search-loading-animation", 20., colors.muted_foreground))
+                .into_any_element();
+        }
+        if let Some(error) = error {
+            return div()
+                .flex()
+                .items_center()
+                .text_color(colors.muted_foreground)
+                .child(error)
+                .child(
+                    Button::new("search-retry")
+                        .ml_2()
+                        .child("重试")
+                        .on_click(cx.listener(move |this, _, _, cx| this.retry(kind, cx))),
+                )
+                .into_any_element();
+        }
+        if !searched || empty {
+            return centered_empty(
+                "images/empty/cm_empty_wuzuopin.png",
+                if searched {
+                    "没有找到相关内容"
+                } else {
+                    "搜索你感兴趣的音乐"
+                },
+                colors,
+            )
+            .into_any_element();
+        }
+        let table = if kind == SearchTab::Songs {
+            self.song_table(cx)
+        } else {
+            self.playlist_table(cx)
+        };
+        // 表格区域自己滚动。留白加在滚动容器自己身上而不是父级：padding 在裁剪框内部，
+        // 行的 hover 投影才有地方画到行外面去；父级不留白，滚动条才落在页面右边缘。
+        div()
+            .relative()
+            .flex_1()
+            .min_h(px(0.))
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .child(
+                div()
+                    .id("search-table-scroll")
+                    .flex_1()
+                    .min_h(px(0.))
+                    .px(PAGE_SIDE_PADDING)
+                    .overflow_y_scroll()
+                    .track_scroll(&self.table_scroll)
+                    .child(table),
+            )
+            .child(Scrollbar::vertical(&self.table_scroll).mode(ScrollbarMode::Always))
+            .into_any_element()
+    }
+
+    /// 出错后的重试。关键词没变，所以只重取当前这一栏，
+    /// 不该把已经拿到手的另一种结果也一起清掉。
+    fn retry(&mut self, kind: SearchTab, cx: &mut Context<Self>) {
+        match kind {
+            SearchTab::Songs => {
+                if let Some(keywords) = self.results.read(cx).keywords.clone() {
+                    self.results
+                        .update(cx, |results, cx| results.search(keywords, cx));
+                }
+            }
+            SearchTab::Playlists => self
+                .results
+                .update(cx, |results, cx| results.search_playlists(cx)),
+            SearchTab::Unsupported => {}
+        }
+    }
+
+    fn song_table(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        virtual_table(
+            cx.entity(),
+            "search-songs",
+            self.columns.clone(),
+            self.results.read(cx).songs.len(),
+            |this, index, _, cx| this.song_cells(index, cx),
+            |this, index, cx| this.results.read(cx).songs[index].id,
+            |column, _| {
+                div()
+                    .px(CELL_PADDING)
+                    .child(column.title.clone())
+                    .into_any_element()
+            },
+            |_| {},
+            |this, key, hovered, cx| this.set_hovered_row(key, hovered, cx),
+            // 行上右键与歌单页一致：弹出同一份歌曲原生菜单。
+            |_, _, position, window, cx| {
+                crate::ui::components::show_song_menu(position, window, cx)
+            },
+            cx,
+        )
+        .into_any_element()
+    }
+
+    fn playlist_table(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        virtual_table(
+            cx.entity(),
+            "search-playlists",
+            self.playlist_columns.clone(),
+            self.results.read(cx).playlists.len(),
+            |this, index, _, cx| this.playlist_cells(index, cx),
+            |this, index, cx| this.results.read(cx).playlists[index].id,
+            |column, _| {
+                div()
+                    .px(CELL_PADDING)
+                    .child(column.title.clone())
+                    .into_any_element()
+            },
+            |_| {},
+            |this, key, hovered, cx| this.set_hovered_row(key, hovered, cx),
+            // 歌单行还没有对应的原生菜单（官方客户端给的是「分享 / 收藏」），
+            // 先不接右键，等菜单真做好了再挂上。
+            |_, _, _, _, _| {},
+            cx,
+        )
+        .into_any_element()
+    }
+
+    /// hover 转移规则和歌单页共用一份，避免两边的表现分叉。
+    fn set_hovered_row(&mut self, id: u64, hovered: bool, cx: &mut Context<Self>) {
+        let next = hovered_row_after(self.hovered_row, id, hovered);
+        if next != self.hovered_row {
+            self.hovered_row = next;
+            cx.notify();
+        }
+    }
+
+    /// 离开本页时把表格滚回顶部，否则下次回来会停在上次滚到的那一行。
+    pub fn reset_scroll(&mut self) {
+        self.table_scroll.set_offset(point(px(0.), px(0.)));
+    }
+
+    fn playlist_cells(&mut self, index: usize, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let colors = Theme::global(cx).tokens.colors;
+        let playlist = self.results.read(cx).playlists[index].clone();
+        vec![
+            div()
+                .w_full()
+                .flex()
+                .justify_end()
+                .whitespace_nowrap()
+                .font_family(DOLPHIN_FAMILY)
+                .text_color(colors.muted_foreground)
+                .child(format!("{:02}", index + 1))
+                .into_any_element(),
+            self.playlist_title_cell(&playlist, colors, cx),
+            // 「歌曲数」和「播放量」都是短数字，用和时长一样的弱化灰。
+            // nowrap：定宽列宁可裁掉也不折行，折行会顶破 56px 的固定行高。
+            div()
+                .whitespace_nowrap()
+                .font_weight(SECONDARY_FONT_WEIGHT)
+                .text_color(colors.foreground.alpha(0.45))
+                .child(format!("{}首", playlist.track_count))
+                .into_any_element(),
+            div()
+                .truncate()
+                .text_color(colors.secondary_foreground)
+                .child(playlist.creator.nickname.clone())
+                .into_any_element(),
+            // 表头和单元格都左对齐（列定义没加 align_right），数字贴着列左缘，
+            // 和「歌曲数」一列同行对齐更整齐。
+            div()
+                .w_full()
+                .whitespace_nowrap()
+                .font_weight(SECONDARY_FONT_WEIGHT)
+                .text_color(colors.foreground.alpha(0.45))
+                .child(play_count_label(playlist.play_count))
+                .into_any_element(),
+        ]
+    }
+
+    /// 歌单标题格：方形封面 + 歌单名。整格都是入口，和官方客户端一样点封面或名字进歌单；
+    /// 撑到 `ROW_HEIGHT` 是为了让上下留白也算点击区。
+    fn playlist_title_cell(
+        &mut self,
+        playlist: &Playlist,
+        colors: ColorTokens,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let playlist_id = playlist.id;
+        div()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .min_w(px(0.))
+            .h(ROW_HEIGHT)
+            .id(("search-playlist-open", playlist_id))
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| this.open_playlist(playlist_id, cx)))
+            .child(
+                div()
+                    .size(px(40.))
+                    .flex_none()
+                    .rounded(px(4.))
+                    .overflow_hidden()
+                    .bg(colors.muted)
+                    .child(
+                        // track_cover_url 顺手做两件事：空地址换默认封面，真实地址拼上
+                        // CDN 缩放参数，不必下载原图再在本地缩。
+                        img(track_cover_image(track_cover_url(
+                            playlist.cover_img_url.as_deref(),
+                            80,
+                        )))
+                        .size_full()
+                        // GPUI 的 overflow_hidden 按矩形裁剪，圆角要直接设在图片上。
+                        .rounded(px(4.))
+                        .object_fit(ObjectFit::Cover),
+                    ),
+            )
+            .child(
+                div()
+                    .min_w(px(0.))
+                    .truncate()
+                    .text_size(px(14.))
+                    .text_color(colors.foreground)
+                    .child(playlist.name.clone()),
+            )
+            .into_any_element()
+    }
+
+    /// 点开搜索结果里的歌单。摘要按 id 现取：闭包要活到点击那一刻，
+    /// 在渲染行时就克隆一份挂进去，可能挂着的正好是上一次搜索的旧副本。
+    fn open_playlist(&mut self, playlist_id: u64, cx: &mut Context<Self>) {
+        let Some(summary) = self
+            .results
+            .read(cx)
+            .playlists
+            .iter()
+            .find(|playlist| playlist.id == playlist_id)
+            .cloned()
+        else {
+            return;
+        };
+        cx.emit(OpenPlaylist {
+            id: playlist_id,
+            summary,
+        });
+    }
+
     fn song_cells(&mut self, index: usize, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let colors = Theme::global(cx).tokens.colors;
         let library = self.library.read(cx);
@@ -142,7 +557,7 @@ impl SearchPage {
             .flex()
             .justify_end()
             .whitespace_nowrap()
-            .font_family(crate::ui::theme::DOLPHIN_FAMILY);
+            .font_family(DOLPHIN_FAMILY);
         vec![
             if is_current_song && play_requested && hovered {
                 index_cell
@@ -318,130 +733,17 @@ impl SearchPage {
 impl Render for SearchPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = Theme::global(cx).tokens.colors;
-        let results = self.results.read(cx);
-        let keywords = results.keywords.clone();
-        let content = if results.loading {
-            div()
-                .id("search-loading")
-                .aria_label("加载中")
-                .w_full()
-                .py(px(36.))
-                .flex()
-                .justify_center()
-                .child(spinner("search-loading-animation", 20., colors.muted_foreground))
-                .into_any_element()
-        } else if let Some(error) = results.error.clone() {
-            div()
-                .flex()
-                .items_center()
-                .text_color(colors.muted_foreground)
-                .child(error)
-                .child(
-                    Button::new("search-retry")
-                        .ml_2()
-                        .child("重试")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let keywords = this.results.read(cx).keywords.clone();
-                            if let Some(keywords) = keywords {
-                                this.results
-                                    .update(cx, |results, cx| results.search(keywords, cx));
-                            }
-                        })),
-                )
-                .into_any_element()
-        } else if keywords.is_none() || results.songs.is_empty() {
-            centered_empty(
-                "images/empty/cm_empty_wuzuopin.png",
-                if keywords.is_none() {
-                    "搜索你感兴趣的音乐"
-                } else {
-                    "没有找到相关内容"
-                },
-                colors,
-            )
-            .into_any_element()
-        } else {
-            // 虚拟表格只渲染可见行，结果再多也不拖慢滚动。
-            let table = virtual_table(
-                cx.entity(),
-                "search-songs",
-                self.columns.clone(),
-                results.songs.len(),
-                |this, index, _, cx| this.song_cells(index, cx),
-                |this, index, cx| this.results.read(cx).songs[index].id,
-                |column, _| {
-                    div()
-                        .px(CELL_PADDING)
-                        .child(column.title.clone())
-                        .into_any_element()
-                },
-                |_| {},
-                |this, key, hovered, cx| {
-                    let next = hovered.then_some(key);
-                    if this.hovered_row != next {
-                        this.hovered_row = next;
-                        cx.notify();
-                    }
-                },
-                // 行上右键与歌单页一致：弹出同一份歌曲原生菜单。
-                |_, _, position, window, cx| {
-                    crate::ui::components::show_song_menu(position, window, cx)
-                },
-                cx,
-            );
-            // 分类 tab 目前只有「综合 / 单曲」有内容：都是同一份单曲结果；
-            // 其余分类先给占位空状态，等后续接入对应接口。
-            let is_songs_tab = SONG_TABS.contains(&self.tabs.read(cx).selected_index());
-            // 「播放全部」只挂在单曲 tab：综合页是聚合入口，不承担整表播放。
-            let is_song_list_tab = self.tabs.read(cx).selected_index() == SONG_TAB;
-            let tab_content = if is_songs_tab {
-                table.into_any_element()
-            } else {
-                centered_empty(
-                    "images/empty/cm_empty_wuzuopin.png",
-                    "该分类暂未支持，先看看单曲吧",
-                    colors,
-                )
-                .into_any_element()
-            };
-            div()
-                .w_full()
-                .flex()
-                .flex_col()
-                .gap(px(12.))
-                // 搜索词大标题，与官方客户端一致。
-                .child(
-                    div()
-                        .text_size(px(24.))
-                        .line_clamp(1)
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(colors.foreground)
-                        .child(keywords.clone().unwrap_or_default()),
-                )
-                // tab 行：左侧分类，右侧「播放全部」（只在单曲分类显示）。
-                // 容器固定为按钮同一高度：按钮时有时无时行高不会跟着塌陷。
-                .child(
-                    div()
-                        .h(ACTION_BUTTON_HEIGHT)
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(self.tabs.clone())
-                        .when(is_song_list_tab, |row| {
-                            row.child(play_all_button(colors, false).on_click(cx.listener(
-                                |this, _, _, cx| {
-                                    let songs = this.results.read(cx).songs.clone();
-                                    this.playback.update(cx, |playback, cx| {
-                                        playback.play_list_from_start(0, songs, cx);
-                                    });
-                                },
-                            )))
-                        }),
-                )
-                .child(tab_content)
-                .into_any_element()
-        };
-
-        div().w_full().flex().flex_col().child(content)
+        let tab = self.tabs.read(cx).selected_index();
+        let kind = SEARCH_TABS[tab].0;
+        // 整页撑满内容区：只有表格区域滚动，标题和 tab 行必须拿到确定高度，
+        // 否则下面那个 flex_1 的滚动容器会塌成 0。shell.rs 对本页关掉了页面滚动容器。
+        div()
+            .size_full()
+            .min_h(px(0.))
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(self.result_header(kind, tab, colors, cx))
+            .child(self.tab_list(kind, colors, cx))
     }
 }

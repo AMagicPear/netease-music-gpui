@@ -5,11 +5,12 @@ use gpui::*;
 
 use super::assets::{CoverPrefetch, thumbnail_url, track_cover_url};
 use super::components::{
-    PLAYER_BAR_HEIGHT, PlayerBar, ResizeDragPreview, SidePanel, SidePanelContent, SurfacePopover,
-    icon_hover_color, window_drag_area,
+    PAGE_SIDE_PADDING, PLAYER_BAR_HEIGHT, PlayerBar, ResizeDragPreview, SidePanel, SidePanelContent,
+    SurfacePopover, icon_hover_color, window_drag_area,
 };
 use super::cover_color::{Backdrop, CoverColor, CoverGradient, gradient_layer};
 use super::now_playing::{NowPlaying, NowPlayingPage};
+use super::pages::search::OpenPlaylist;
 use super::pages::{playlist::PlaylistPage, search::SearchPage, ContentPage};
 use super::sidebar::{LoginRequested, SidebarChanged, SidebarPage};
 use super::theme::{IconSize, PRESSED_ICON_ALPHA};
@@ -223,6 +224,7 @@ pub struct MainContent {
     _user_profile_subscription: Subscription,
     _library_subscription: Subscription,
     _search_subscription: Subscription,
+    _search_page_subscription: Subscription,
 }
 
 impl MainContent {
@@ -272,6 +274,11 @@ impl MainContent {
                 this.submit_current_input(cx);
             }
         });
+        // 搜索结果里点开一个歌单：页面只发出意图，导航和详情加载都归这里。
+        let search_page_subscription =
+            cx.subscribe(&search_page, |this, _, event: &OpenPlaylist, cx| {
+                this.open_searched_playlist(event, cx);
+            });
 
         // 页面在这里全部建好；切走再切回仍是同一个 View 实例。
         let pages = ContentPage::all()
@@ -285,7 +292,7 @@ impl MainContent {
             if this.account_id != user_id {
                 this.account_id = user_id;
                 this.playlist_page
-                    .update(cx, |page, cx| page.open(None, cx));
+                    .update(cx, |page, cx| page.open(None, None, cx));
                 this.navigate(ContentPage::Recommend, cx);
             }
             cx.notify();
@@ -316,6 +323,7 @@ impl MainContent {
             _user_profile_subscription: user_profile_subscription,
             _library_subscription: library_subscription,
             _search_subscription: search_subscription,
+            _search_page_subscription: search_page_subscription,
         }
     }
 
@@ -357,7 +365,24 @@ impl MainContent {
             .update(cx, |sidebar, cx| sidebar.set_active_page(page, cx));
         self.page_scroll.entry(page).or_default();
         self.open_playlist(page, cx);
+        // 搜索结果页自己管滚动位置，切走时归零：下次回来列表从顶上开始，
+        // 不用对着一个和当前语境无关的滚动位置。
+        if page != ContentPage::Search {
+            self.search_page.update(cx, |page, _| page.reset_scroll());
+        }
         cx.notify();
+    }
+
+    /// 搜索结果里点开一个歌单：摘要已经在手上，先交给详情页把页头画出来
+    /// （封面和歌单名不用等详情接口返回），再走统一导航。
+    ///
+    /// `navigate` 里的 `open_playlist` 会补上「是否我喜欢的音乐」，
+    /// 并因为 id 没变、正在加载而跳过第二次请求，摘要不会被冲掉。
+    fn open_searched_playlist(&mut self, event: &OpenPlaylist, cx: &mut Context<Self>) {
+        self.playlist_page.update(cx, |view, cx| {
+            view.open(Some(event.id), Some(event.summary.clone()), cx)
+        });
+        self.navigate(ContentPage::Playlist(event.id), cx);
     }
 
     fn open_playlist(&mut self, page: ContentPage, cx: &mut Context<Self>) {
@@ -382,7 +407,9 @@ impl MainContent {
         };
         self.playlist_page.update(cx, |view, cx| {
             view.set_favorite_view(favorite);
-            view.open(id, cx);
+            // 摘要一律回音乐库找：搜索结果那份摘要只在首次点开时用一次，
+            // 这里再传一遍会把已经补齐的详情换成缺字段的摘要。
+            view.open(id, None, cx);
         });
     }
 }
@@ -741,6 +768,10 @@ impl Render for MainContent {
                 .map(IntoElement::into_any_element),
         };
         let drag_offset = Rc::new(Cell::new(px(0.)));
+        // 搜索结果页自己管滚动：搜索词标题和分类 tab 要一直留在视野里，只有表格区域滚动。
+        // 它连左右留白也不在这一层取——留在这里会被它自己的滚动容器挡在投影之外，
+        // 行的 hover 阴影就被切出硬边了；它把留白加在自己的滚动容器上。
+        let page_scrolls = !matches!(active_page, ContentPage::Search);
 
         div()
             // cached 会独立布局这棵树，根节点需要占满缓存容器。
@@ -779,14 +810,35 @@ impl Render for MainContent {
                                     ))
                                     .flex_1()
                                     .min_h(px(0.))
-                                    .px(px(40.))
                                     .py(px(18.))
-                                    .overflow_y_scroll()
-                                    .track_scroll(page_scroll)
+                                    .when(page_scrolls, |content| {
+                                        content
+                                            .px(PAGE_SIDE_PADDING)
+                                            .overflow_y_scroll()
+                                            .track_scroll(page_scroll)
+                                    })
                                     .children(page),
                             )
+                            // 悬浮页头是页内内容，只是固定贴顶；和滚动条同属这一层，
+                            // 排在滚动条之前，滚动条自然压在上面。
+                            // （放外层不行：那边整棵树排在 main_content 之后，层级必然更高。）
+                            .when(
+                                matches!(
+                                    active_page,
+                                    ContentPage::FavoriteMusic | ContentPage::Playlist(_)
+                                ),
+                                |content| {
+                                    content.child(self.playlist_page.update(cx, |page, cx| {
+                                        page.floating_header(self.playlist_backdrop.clone(), cx)
+                                    }))
+                                },
+                            )
                             // 滚动条放在外层，避免它的边界被计入滚动内容高度。
-                            .child(Scrollbar::vertical(page_scroll).mode(ScrollbarMode::Always)),
+                            .when(page_scrolls, |content| {
+                                content.child(
+                                    Scrollbar::vertical(page_scroll).mode(ScrollbarMode::Always),
+                                )
+                            }),
                     ),
             )
             .child(
@@ -818,7 +870,8 @@ impl Render for MainContent {
 }
 
 impl MainContent {
-    /// 动画和实时背景与缓存内容同级，避免它们每帧使侧栏和歌单缓存失效。
+    /// 播放进度指示留在外层：它按页面内容区的裁剪框绘制（见 `PlayingIndicator`），
+    /// 画不进滚动条那一条，没有遮挡问题，所以不必跟着悬浮页头搬进页面区。
     fn playlist_overlays(&self, cx: &mut Context<Self>) -> Option<Div> {
         matches!(
             self.active_page,
@@ -833,9 +886,6 @@ impl MainContent {
                 .bottom_0()
                 .overflow_hidden()
                 .child(self.playlist_page.read(cx).playing_overlay())
-                .child(self.playlist_page.update(cx, |page, cx| {
-                    page.floating_header(self.playlist_backdrop.clone(), cx)
-                }))
         })
     }
 }

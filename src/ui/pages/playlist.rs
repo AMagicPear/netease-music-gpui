@@ -8,34 +8,9 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-/// 操作按钮的统一高度
-pub(super) const ACTION_BUTTON_HEIGHT: Pixels = px(36.);
-/// 带文字按钮的左右内边距，宽度靠它 + 内容自适应
-const ACTION_BUTTON_PADDING: Pixels = px(12.);
-
-/// Dolphin 里最宽的数字是 600/1000 em。
-const DOLPHIN_WIDEST_DIGIT_EM: f32 = 0.6;
-
-/// 表头和虚拟行独立布局，序号列必须共用宽度，并容得下播放图标。
-fn index_column_width(row_count: usize) -> Pixels {
-    // 末行渲染的是 `format!("{:02}", row_count)`，它就是最长的那个序号。
-    let digits = format!("{:02}", row_count).chars().count() as f32;
-    // 字号跟行内保持一致（ROW_TEXT_SIZE），以后改字号不用回来动这里。
-    let width = digits * DOLPHIN_WIDEST_DIGIT_EM * f32::from(ROW_TEXT_SIZE);
-    // 向上取整：小数宽度按设备像素取整后可能差一丁点，而这点差距就够让数字折行。
-    px(width.ceil().max(20.))
-}
-
 /// 标题、专辑按剩余宽度的比例分配；拖动后保留该比例。
 const ALBUM_SHARE_MIN: f32 = 0.1;
 const ALBUM_SHARE_MAX: f32 = 0.8;
-
-/// 次要文字使用常规字重。
-pub(super) const SECONDARY_FONT_WEIGHT: FontWeight = FontWeight::NORMAL;
-
-/// 「喜欢」「时长」的固定宽度：两列都在分界线右边，反推分界线位置要用到它们。
-const LIKE_COLUMN_WIDTH: Pixels = px(42.);
-const DURATION_COLUMN_WIDTH: Pixels = px(66.);
 
 /// 分界线的元素 id，同时用作它作为 hover group 的名字。
 /// 两处必须完全一致 `group_hover` 才会响应，所以抽成常量而不是写两遍字面量。
@@ -49,9 +24,11 @@ use crate::playback::PlaybackController;
 use crate::state::{library::MusicLibrary, playlist_detail::PlaylistDetail};
 use crate::ui::assets::thumbnail_url;
 use crate::ui::components::{
-    CELL_PADDING, COLUMN_GAP, HEADER_HEIGHT, ROW_TEXT_SIZE, ResizeDragPreview, TabBar, TabChanged,
-    TabItem, TableColumn, artist_label, empty_state, format_duration, like_icon_path,
-    quality_badge_path, spinner, virtual_table,
+    ACTION_BUTTON_HEIGHT, ACTION_BUTTON_PADDING, CELL_PADDING, COLUMN_GAP, DURATION_COLUMN_WIDTH,
+    HEADER_HEIGHT, LIKE_COLUMN_WIDTH, SECONDARY_FONT_WEIGHT, SongDisplay, ResizeDragPreview,
+    TabBar, TabChanged, TabItem, TableColumn, artist_label, centered_empty, hovered_row_after,
+    index_column_width, like_icon_path, play_all_button, play_count_label, quality_badge_path,
+    row_hover_icon, spinner, title_with_subtitle, virtual_table,
 };
 use crate::ui::cover_color::Backdrop;
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
@@ -103,76 +80,6 @@ pub struct PlaylistPage {
     playing_indicator: Entity<PlayingIndicator>,
 }
 
-pub(super) struct SongDisplay {
-    pub(super) cover: Option<ImageSource>,
-    pub(super) title: SharedString,
-    pub(super) subtitle: std::ops::Range<usize>,
-    pub(super) album: SharedString,
-    pub(super) duration: SharedString,
-}
-
-impl SongDisplay {
-    pub(super) fn new(song: &Song) -> Self {
-        let mut title = song.name.clone();
-        let start = title.len();
-        if let Some(subtitle) = song.tns.first().or_else(|| song.alia.first()) {
-            title.push_str(&format!("（{subtitle}）"));
-        }
-        let end = title.len();
-        Self {
-            cover: Some(crate::ui::assets::track_cover_url(song.al.pic_url.as_deref(), 72).into()),
-            title: title.into(),
-            subtitle: start..end,
-            album: song
-                .al
-                .name
-                .as_deref()
-                .filter(|name| !name.trim().is_empty())
-                .unwrap_or("未知专辑")
-                .to_owned()
-                .into(),
-            duration: format_duration(song.duration()).into(),
-        }
-    }
-}
-
-/// 使用同一段 StyledText，标题和副标题一起截断；颜色随当前主题计算。
-pub(super) fn title_with_subtitle(display: &SongDisplay, colors: ColorTokens) -> StyledText {
-    if display.subtitle.is_empty() {
-        return StyledText::new(display.title.clone());
-    }
-
-    // highlight 先 blend 再 fade_out：先替换 RGB，再恢复 alpha。
-    // 因此播放中的红色标题不会污染副标题，也无需预合成背景色。
-    let subtitle_color = colors.muted_foreground;
-
-    StyledText::new(display.title.clone()).with_highlights([(
-        display.subtitle.clone(),
-        HighlightStyle {
-            color: Some(subtitle_color.alpha(1.)),
-            font_weight: Some(SECONDARY_FONT_WEIGHT),
-            fade_out: Some(1. - subtitle_color.a),
-            ..Default::default()
-        },
-    )])
-}
-
-/// 播放量：十万以下照写，十万起折算成万，万位满四位不再带小数。
-fn play_count_label(count: u64) -> String {
-    const WAN: u64 = 10_000;
-    if count < 10 * WAN {
-        return count.to_string();
-    }
-    let wan = count / WAN;
-    // 十分位截断而不是四舍五入：812568 是 81.2万，不是 81.3万。
-    let tenth = count % WAN / 1_000;
-    if wan >= 1_000 || tenth == 0 {
-        format!("{wan}万")
-    } else {
-        format!("{wan}.{tenth}万")
-    }
-}
-
 /// 简介压成一行：换行、连续空白、首尾空白都折叠成一个空格。
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -201,28 +108,6 @@ fn tag_row(tags: &[String], colors: ColorTokens) -> AnyElement {
                 .text_color(colors.secondary_foreground)
                 .child(tag.clone())
         }))
-        .into_any_element()
-}
-
-/// 行 hover 时才出现的图标：序号位置的播放键、标题右侧那排操作按钮，共用这一套样式。
-pub(super) fn row_hover_icon(
-    id: (&'static str, u64),
-    path: &'static str,
-    label: &'static str,
-    size: Pixels,
-    colors: ColorTokens,
-) -> AnyElement {
-    svg()
-        .path(path)
-        .size(size)
-        .flex_none()
-        .text_color(colors.foreground.alpha(0.6))
-        .hover(|style| style.text_color(colors.foreground))
-        .id(id)
-        .role(Role::Button)
-        .aria_label(label)
-        // active 属于 StatefulInteractiveElement，必须跟在 `.id()` 之后（此时是 Stateful<Svg>）。
-        .active(|style| style.text_color(colors.foreground.alpha(PRESSED_ICON_ALPHA)))
         .into_any_element()
 }
 
@@ -477,14 +362,18 @@ impl PlaylistPage {
             .map(|url| thumbnail_url(url, 340))
     }
 
-    pub fn open(&mut self, id: Option<u64>, cx: &mut Context<Self>) {
-        let summary = self
-            .library
-            .read(cx)
-            .playlists
-            .iter()
-            .find(|playlist| Some(playlist.id) == id)
-            .cloned();
+    /// 打开一个歌单。`summary` 是调用方手上已有的歌单摘要（搜索结果里那份），
+    /// 没有时才回音乐库里找 —— 侧栏和收藏歌单的摘要本来就在库里。
+    /// 给了摘要就先渲染页头，详情接口返回后再补齐歌曲列表。
+    pub fn open(&mut self, id: Option<u64>, summary: Option<Playlist>, cx: &mut Context<Self>) {
+        let summary = summary.or_else(|| {
+            self.library
+                .read(cx)
+                .playlists
+                .iter()
+                .find(|playlist| Some(playlist.id) == id)
+                .cloned()
+        });
         self.detail
             .update(cx, |detail, cx| detail.open(id, summary, cx));
     }
@@ -685,18 +574,19 @@ impl PlaylistPage {
         let playlist = detail.playlist.as_ref();
         let cover_url = self.cover_url(cx);
         let play_count = playlist.map(|playlist| playlist.play_count);
-        let created_date = playlist.and_then(|playlist| {
-            time::OffsetDateTime::from_unix_timestamp(playlist.create_time / 1000)
-                .ok()
-                .map(|date| {
-                    format!(
-                        "{}-{:02}-{:02}创建",
-                        date.year(),
-                        u8::from(date.month()),
-                        date.day()
-                    )
-                })
-        });
+        let created_date = playlist
+            .and_then(|playlist| playlist.create_time)
+            .and_then(|create_time| {
+                time::OffsetDateTime::from_unix_timestamp(create_time / 1000).ok()
+            })
+            .map(|date| {
+                format!(
+                    "{}-{:02}-{:02}创建",
+                    date.year(),
+                    u8::from(date.month()),
+                    date.day()
+                )
+            });
         let description = playlist.and_then(Playlist::description).map(one_line);
         let tags = playlist.map(Playlist::tags).unwrap_or_default();
         let cover = div()
@@ -910,15 +800,9 @@ impl PlaylistPage {
         .into_any_element()
     }
 
-    /// 离开事件只清除自身，避免跨行事件顺序导致 hover 闪烁。
     fn set_hovered_row(&mut self, index: u64, hovered: bool, cx: &mut Context<Self>) {
-        let next = if hovered {
-            Some(index)
-        } else if self.hovered_row == Some(index) {
-            None
-        } else {
-            self.hovered_row
-        };
+        // 转移规则在 virtual_table 里，搜索页共用同一份，两边的 hover 表现才不会分叉。
+        let next = hovered_row_after(self.hovered_row, index, hovered);
         if next != self.hovered_row {
             self.hovered_row = next;
             cx.notify();
@@ -1267,53 +1151,6 @@ fn icon_action_button(
         )
 }
 
-/// 「播放全部」：主题红实心按钮，白字白图标，无边框。
-pub(super) fn play_all_button(colors: ColorTokens, compact: bool) -> Button {
-    Button::new(if compact {
-        "playlist-floating-play"
-    } else {
-        "playlist-play-all-button"
-    })
-    .h(ACTION_BUTTON_HEIGHT)
-    .flex_none()
-    .flex()
-    .items_center()
-    .justify_center()
-    .gap(px(4.))
-    // 宽度交给内容：图标 + 文字 + 左右内边距
-    .px(ACTION_BUTTON_PADDING)
-    .when(compact, |button| button.w(ACTION_BUTTON_HEIGHT).px(px(0.)))
-    .rounded_lg()
-    .bg(colors.primary)
-    // hover 只改颜色（向背景靠一档），按下统一降整体透明度
-    .hover(|style| style.bg(colors.primary.alpha(0.88)))
-    .active(|style| style.opacity(PRESSED_OPACITY))
-    .text_size(px(13.))
-    .text_color(colors.primary_foreground)
-    .child(
-        svg()
-            .path("icons/play.svg")
-            .size(px(18.))
-            .flex_none()
-            .text_color(colors.primary_foreground),
-    )
-    .aria_label("播放全部")
-    .when(!compact, |button| button.child("播放全部"))
-}
-
-/// 空状态在右侧留白区水平居中，顶部对齐（不另加边距）。
-pub(super) fn centered_empty(
-    image: &'static str,
-    tip: &str,
-    colors: gpui_kit::base::ColorTokens,
-) -> impl IntoElement {
-    div()
-        .w_full()
-        .flex()
-        .justify_center()
-        .child(empty_state(image, tip, colors))
-}
-
 impl Render for PlaylistPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.playing_indicator.read(cx).placement.set(None);
@@ -1363,7 +1200,7 @@ impl Render for PlaylistPage {
                     message.child(Button::new("playlist-retry").ml_2().child("重试").on_click(
                         cx.listener(|this, _, _, cx| {
                             if this.detail.read(cx).id.is_some() {
-                                this.open(this.playlist_id, cx);
+                                this.open(this.playlist_id, None, cx);
                             } else {
                                 this.library.update(cx, |library, cx| library.retry(cx));
                             }

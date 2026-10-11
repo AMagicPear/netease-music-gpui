@@ -34,7 +34,10 @@ pub use tab_bar::{TabBar, TabChanged, TabItem};
 pub(in crate::ui) use vinyl::{RotationClock, Vinyl};
 pub use vinyl_stage::{Tonearm, vinyl_stage};
 pub use virtual_table::{
-    CELL_PADDING, COLUMN_GAP, HEADER_HEIGHT, ROW_TEXT_SIZE, TableColumn, virtual_table,
+    ACTION_BUTTON_HEIGHT, ACTION_BUTTON_PADDING, CELL_PADDING, COLUMN_GAP, DURATION_COLUMN_WIDTH,
+    HEADER_HEIGHT, LIKE_COLUMN_WIDTH, PAGE_SIDE_PADDING, ROW_HEIGHT, SECONDARY_FONT_WEIGHT,
+    SongDisplay, TableColumn, centered_empty, hovered_row_after, index_column_width,
+    play_all_button, play_count_label, row_hover_icon, title_with_subtitle, virtual_table,
 };
 
 // 浮层都用 deferred 绘制，数字大的画得更晚、盖在上面。

@@ -1,10 +1,34 @@
+//! 虚拟滚动表格引擎，外加音乐列表页共用的「表格长相」和行内零件。
+//!
+//! 歌单详情页和搜索结果页是两个各自独立的页面：列定义、排序、行内交互都不一样，
+//! 但表头、行高、列间距、hover 效果这些必须是同一套，否则摆在一起不像同一种表格。
+//! 公共部分集中在这里，而不是让搜索页去 `use` 歌单页里的东西——
+//! 那等于把「搜索页需要什么」写进歌单页，两个页面从此再也拆不开。
+//!
+//! 下面分三段：尺寸常量与列模型、表格引擎、公共零件。
+
 use std::{ops::Range, rc::Rc};
 
+use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_kit::base::Theme;
+use gpui_kit::base::{Button, ColorTokens, Theme};
+
+use crate::models::Song;
+use crate::ui::assets::track_cover_url;
+use crate::ui::components::{empty_state, format_duration};
+use crate::ui::theme::{PRESSED_ICON_ALPHA, PRESSED_OPACITY};
+
+// ---------------------------------------------------------------------------
+// 1. 尺寸常量与列模型
+// ---------------------------------------------------------------------------
 
 const OVERSCAN_ROWS: usize = 4;
-const ROW_HEIGHT: Pixels = px(56.);
+
+/// 固定行高。虚拟滚动靠它把行下标换算成 y 坐标，所以行高不能按内容变。
+///
+/// 导出是因为调用方偶尔要让某个单元格撑满整行 —— 比如让标题格的点击区盖住
+/// 行内上下留白，而不是只有文字那么高。
+pub const ROW_HEIGHT: Pixels = px(56.);
 /// 表头行高。调用者要在表头上叠东西（比如可拖动的分界线）时，用同一个值对齐。
 pub const HEADER_HEIGHT: Pixels = px(40.);
 /// 行与表头的文字字号。
@@ -14,28 +38,43 @@ pub const COLUMN_GAP: Pixels = px(6.);
 /// 相邻内容仍相隔 20px：两侧 padding 加上 6px 列间距。
 pub const CELL_PADDING: Pixels = px(7.);
 
+/// 内容区左右留白。它同时是行 hover 投影的横向余量：投影拖尾有 3σ = 36px，
+/// 而 padding 属于裁剪框内部，所以留白必须加在**滚动容器自己**身上，
+/// 留在父级的话投影会被滚动容器的边界切出硬边。
+pub const PAGE_SIDE_PADDING: Pixels = px(40.);
+
+/// 次要文字统一用常规字重：副标题、专辑名、时长、计数都靠灰度而不是粗细退让。
+pub const SECONDARY_FONT_WEIGHT: FontWeight = FontWeight::NORMAL;
+
+/// 列表上方那排按钮的尺寸，高度和内边距成对使用；那一行按高度对齐，
+/// 按钮时有时无时行高才不会塌陷。
+pub const ACTION_BUTTON_HEIGHT: Pixels = px(36.);
+pub const ACTION_BUTTON_PADDING: Pixels = px(12.);
+
+/// 「喜欢」列的固定宽度。
+pub const LIKE_COLUMN_WIDTH: Pixels = px(42.);
+/// 「时长」列的固定宽度。
+pub const DURATION_COLUMN_WIDTH: Pixels = px(66.);
+
+/// Dolphin 里最宽的数字是 600/1000 em。
+const DOLPHIN_WIDEST_DIGIT_EM: f32 = 0.6;
+
+/// 序号列宽。表头和虚拟行各自独立布局，必须共用同一个函数，否则列边界错开。
+/// 取「放得下最长序号」和「放得下播放键」两者的较大值。
+pub fn index_column_width(row_count: usize) -> Pixels {
+    // 末行渲染的是 `format!("{:02}", row_count)`，它就是最长的那个序号。
+    let digits = format!("{:02}", row_count).chars().count() as f32;
+    let width = digits * DOLPHIN_WIDEST_DIGIT_EM * f32::from(ROW_TEXT_SIZE);
+    // 向上取整：小数宽度按设备像素取整后可能差一丁点，而这点差距就够让数字折行。
+    px(width.ceil().max(20.))
+}
+
 /// hover 投影的 Y 偏移（正数向下）、模糊半径与颜色透明度（颜色取主题墨色，见行 hover 处）。
 const ROW_HOVER_SHADOW_OFFSET_Y: Pixels = px(2.);
 const ROW_HOVER_SHADOW_BLUR: Pixels = px(12.);
 /// 柔光拖尾按几个 sigma 算：GPUI 的投影顶点着色器（`vs_shadow`）恰好把网格外扩 3σ，
 /// 片元里高斯又直接取 `sigma = blur_radius`，所以 3σ 就是能画到的最远处，且那里已经淡到看不见。
 const ROW_HOVER_SHADOW_TAIL_SIGMAS: f32 = 3.;
-
-/// 给阴影留出空间；GPUI 仍会与祖先裁剪框取交集。
-fn rows_clip(bounds: Bounds<Pixels>) -> ContentMask<Pixels> {
-    // 四边都要盖住 3σ 的拖尾，否则尾巴还剩百分之一点几的可见度时就被切断，边缘会留一道硬边。
-    // 调用这份代码的容器要给足水平留白（外层现在是 40px > 36px），超出部分会被祖先裁剪框截回来。
-    let tail = ROW_HOVER_SHADOW_BLUR * ROW_HOVER_SHADOW_TAIL_SIGMAS;
-    ContentMask {
-        bounds: bounds.extend(Edges {
-            left: tail,
-            right: tail,
-            // 投影整体下移了 offset_y，所以上边可以少留、下边要多留，合起来仍是两个 tail。
-            top: tail - ROW_HOVER_SHADOW_OFFSET_Y,
-            bottom: tail + ROW_HOVER_SHADOW_OFFSET_Y,
-        }),
-    }
-}
 
 /// Some 是固定宽度；None 按 weight 分配剩余宽度。表头与行共用列定义。
 pub struct TableColumn {
@@ -106,7 +145,31 @@ fn table_row(
         )
 }
 
+/// 给阴影留出空间；GPUI 仍会与祖先裁剪框取交集。
+fn rows_clip(bounds: Bounds<Pixels>) -> ContentMask<Pixels> {
+    // 四边都要盖住 3σ 的拖尾，否则尾巴还剩百分之一点几的可见度时就被切断，边缘会留一道硬边。
+    // 调用这份代码的滚动容器要在水平方向留足 `PAGE_SIDE_PADDING`（40px > 36px），
+    // 并且那笔留白要是它的 padding —— 见 `PAGE_SIDE_PADDING` 的说明。
+    let tail = ROW_HOVER_SHADOW_BLUR * ROW_HOVER_SHADOW_TAIL_SIGMAS;
+    ContentMask {
+        bounds: bounds.extend(Edges {
+            left: tail,
+            right: tail,
+            // 投影整体下移了 offset_y，所以上边可以少留、下边要多留，合起来仍是两个 tail。
+            top: tail - ROW_HOVER_SHADOW_OFFSET_Y,
+            bottom: tail + ROW_HOVER_SHADOW_OFFSET_Y,
+        }),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 2. 表格引擎
+// ---------------------------------------------------------------------------
+
 /// 跟随祖先滚动的固定行高表格。回调仅为可见范围及上下各四行缓冲创建单元格。
+///
+/// 祖先滚动容器由调用方提供，可以是整页滚动，也可以只包住表格区域 ——
+/// 本组件在 `prepaint` 里读当前裁剪框算出可见行，所以对滚动层级的位置没有要求。
 #[expect(
     clippy::too_many_arguments,
     reason = "各回调职责独立，保留显式参数，避免为一个调用方引入配置层"
@@ -232,6 +295,7 @@ impl Element for VirtualRows {
     fn id(&self) -> Option<ElementId> {
         Some(self.id.clone())
     }
+
     fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
         None
     }
@@ -313,9 +377,169 @@ impl Element for VirtualRows {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 3. 公共零件
+// ---------------------------------------------------------------------------
+
+/// 「当前 hover 在哪一行」的状态转移规则。两个列表页都只有这一个状态。
+///
+/// 离开事件只允许清掉「自己」那一行：鼠标从 A 移到 B 时事件可能「B 进入」后才
+/// 「A 离开」，无脑写成 `hovered.then_some(id)` 会把已经点亮的新行清掉，
+/// 表现就是序号变播放键时有时无。
+pub fn hovered_row_after(current: Option<u64>, id: u64, hovered: bool) -> Option<u64> {
+    if hovered {
+        Some(id)
+    } else if current == Some(id) {
+        None
+    } else {
+        current
+    }
+}
+
+/// 一首歌在列表行里要显示的内容。构造一次、行内多次复用，避免每帧重算。
+pub struct SongDisplay {
+    pub cover: Option<ImageSource>,
+    pub title: SharedString,
+    pub subtitle: std::ops::Range<usize>,
+    pub album: SharedString,
+    pub duration: SharedString,
+}
+
+impl SongDisplay {
+    pub fn new(song: &Song) -> Self {
+        let mut title = song.name.clone();
+        let start = title.len();
+        if let Some(subtitle) = song.tns.first().or_else(|| song.alia.first()) {
+            title.push_str(&format!("（{subtitle}）"));
+        }
+        let end = title.len();
+        Self {
+            cover: Some(track_cover_url(song.al.pic_url.as_deref(), 72).into()),
+            title: title.into(),
+            subtitle: start..end,
+            album: song
+                .al
+                .name
+                .as_deref()
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or("未知专辑")
+                .to_owned()
+                .into(),
+            duration: format_duration(song.duration()).into(),
+        }
+    }
+}
+
+/// 使用同一段 StyledText，标题和副标题一起截断；颜色随当前主题计算。
+pub fn title_with_subtitle(display: &SongDisplay, colors: ColorTokens) -> StyledText {
+    if display.subtitle.is_empty() {
+        return StyledText::new(display.title.clone());
+    }
+
+    // highlight 先 blend 再 fade_out：先替换 RGB，再恢复 alpha。
+    // 因此播放中的红色标题不会污染副标题，也无需预合成背景色。
+    let subtitle_color = colors.muted_foreground;
+
+    StyledText::new(display.title.clone()).with_highlights([(
+        display.subtitle.clone(),
+        HighlightStyle {
+            color: Some(subtitle_color.alpha(1.)),
+            font_weight: Some(SECONDARY_FONT_WEIGHT),
+            fade_out: Some(1. - subtitle_color.a),
+            ..Default::default()
+        },
+    )])
+}
+
+/// 行 hover 时才出现的图标：序号位置的播放键、标题右侧那排操作按钮，共用这一套样式。
+pub fn row_hover_icon(
+    id: (&'static str, u64),
+    path: &'static str,
+    label: &'static str,
+    size: Pixels,
+    colors: ColorTokens,
+) -> AnyElement {
+    svg()
+        .path(path)
+        .size(size)
+        .flex_none()
+        .text_color(colors.foreground.alpha(0.6))
+        .hover(|style| style.text_color(colors.foreground))
+        .id(id)
+        .role(Role::Button)
+        .aria_label(label)
+        // active 属于 StatefulInteractiveElement，必须跟在 `.id()` 之后（此时是 Stateful<Svg>）。
+        .active(|style| style.text_color(colors.foreground.alpha(PRESSED_ICON_ALPHA)))
+        .into_any_element()
+}
+
+/// 播放量：十万以下照写，十万起折算成万，万位满四位不再带小数。
+pub fn play_count_label(count: u64) -> String {
+    const WAN: u64 = 10_000;
+    if count < 10 * WAN {
+        return count.to_string();
+    }
+    let wan = count / WAN;
+    // 十分位截断而不是四舍五入：812568 是 81.2万，不是 81.3万。
+    let tenth = count % WAN / 1_000;
+    if wan >= 1_000 || tenth == 0 {
+        format!("{wan}万")
+    } else {
+        format!("{wan}.{tenth}万")
+    }
+}
+
+/// 「播放全部」：主题红实心按钮，白字白图标，无边框。
+pub fn play_all_button(colors: ColorTokens, compact: bool) -> Button {
+    Button::new(if compact {
+        "playlist-floating-play"
+    } else {
+        "playlist-play-all-button"
+    })
+    .h(ACTION_BUTTON_HEIGHT)
+    .flex_none()
+    .flex()
+    .items_center()
+    .justify_center()
+    .gap(px(4.))
+    // 宽度交给内容：图标 + 文字 + 左右内边距
+    .px(ACTION_BUTTON_PADDING)
+    .when(compact, |button| button.w(ACTION_BUTTON_HEIGHT).px(px(0.)))
+    .rounded_lg()
+    .bg(colors.primary)
+    // hover 只改颜色（向背景靠一档），按下统一降整体透明度
+    .hover(|style| style.bg(colors.primary.alpha(0.88)))
+    .active(|style| style.opacity(PRESSED_OPACITY))
+    .text_size(px(13.))
+    .text_color(colors.primary_foreground)
+    .child(
+        svg()
+            .path("icons/play.svg")
+            .size(px(18.))
+            .flex_none()
+            .text_color(colors.primary_foreground),
+    )
+    .aria_label("播放全部")
+    .when(!compact, |button| button.child("播放全部"))
+}
+
+/// 空状态在列表区水平居中，顶部对齐（不另加边距）。
+pub fn centered_empty(image: &'static str, tip: &str, colors: ColorTokens) -> impl IntoElement {
+    div()
+        .w_full()
+        .flex()
+        .justify_center()
+        .child(empty_state(image, tip, colors))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::visible_rows;
+    use gpui::px;
+
+    use super::{
+        PAGE_SIDE_PADDING, ROW_HOVER_SHADOW_BLUR, ROW_HOVER_SHADOW_TAIL_SIGMAS,
+        hovered_row_after, index_column_width, play_count_label, visible_rows,
+    };
 
     #[test]
     fn visible_range_tracks_outer_viewport() {
@@ -327,5 +551,48 @@ mod tests {
         assert_eq!(visible_rows(1193, 66808., 68000.), 0..0);
         assert_eq!(visible_rows(0, 0., 500.), 0..0);
         assert_eq!(visible_rows(10, 100., 100.), 0..0);
+    }
+
+    /// 「后到的离开事件」不能把已经点亮的新行清掉，否则行内序号/播放键的切换会时有时无。
+    #[test]
+    fn leaving_a_row_only_clears_that_row() {
+        // 进入 B，然后 A 离开（无论先后到达）都要停在 B。
+        assert_eq!(hovered_row_after(Some(1), 2, true), Some(2));
+        assert_eq!(hovered_row_after(Some(2), 1, false), Some(2));
+        assert_eq!(hovered_row_after(Some(3), 9, false), Some(3));
+        // 同一行自己进出。
+        assert_eq!(hovered_row_after(None, 7, true), Some(7));
+        assert_eq!(hovered_row_after(Some(7), 7, false), None);
+        assert_eq!(hovered_row_after(None, 1, false), None);
+    }
+
+    /// 投影拖尾必须小于内容区留白，否则水平方向会被滚动容器切出硬边。
+    #[test]
+    fn side_padding_exceeds_the_shadow_tail() {
+        let tail = ROW_HOVER_SHADOW_BLUR * ROW_HOVER_SHADOW_TAIL_SIGMAS;
+        assert!(f32::from(PAGE_SIDE_PADDING) > f32::from(tail));
+    }
+
+    /// 下面的期望值按 13px 字号算出来的，改字号时这里会红。
+    #[test]
+    fn index_column_follows_digits_but_never_below_the_play_icon() {
+        // 一位数只有 7.8px，下限 20px 兜住播放键。
+        assert_eq!(index_column_width(9), px(20.));
+        assert_eq!(index_column_width(30), px(20.));
+        assert_eq!(index_column_width(999), px(24.));
+        // `{:02}` 只补到两位不截断，1193 是四位数。
+        assert_eq!(index_column_width(1193), px(32.));
+    }
+
+    #[test]
+    fn play_count_switches_to_wan_and_truncates_rather_than_rounds() {
+        assert_eq!(play_count_label(0), "0");
+        assert_eq!(play_count_label(99_999), "99999");
+        assert_eq!(play_count_label(100_000), "10万");
+        // 十分位截断：812568 是 81.2万，不是 81.3万。
+        assert_eq!(play_count_label(812_568), "81.2万");
+        assert_eq!(play_count_label(150_000), "15万");
+        // 万位满四位不再带小数。
+        assert_eq!(play_count_label(12_345_678), "1234万");
     }
 }

@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 pub struct UserProfile {
     pub user_id: u64,
     pub nickname: String,
+    /// 头像地址。搜索结果里的歌单创建者这一栏直接给 `null`（不是空串），
+    /// 所以反序列化时把 null 归一成空串 —— 展示层本来就按「空串 = 用默认头像」处理。
+    #[serde(default, deserialize_with = "null_as_empty")]
     pub avatar_url: String,
     pub background_url: Option<String>,
     pub signature: Option<String>,
@@ -14,6 +17,11 @@ pub struct UserProfile {
     pub vip_type: Option<u32>,
     pub user_type: Option<u32>,
     pub auth_status: Option<u32>,
+}
+
+/// `null` 归一成空串，其余值原样透传。
+fn null_as_empty<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -61,7 +69,26 @@ impl VipInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::{VipInfo, VipMembership};
+    use super::{UserProfile, VipInfo, VipMembership};
+
+    #[test]
+    fn avatar_url_accepts_null_and_missing() {
+        // 搜索结果里的歌单创建者：avatarUrl 可能是 null，也可能整个字段都没有。
+        // 两种都要落到空串（展示层据此换默认头像），不能让整个歌单解析失败。
+        let nulled: UserProfile = serde_json::from_value(
+            serde_json::json!({"userId": 1, "nickname": "我", "avatarUrl": null}),
+        )
+        .unwrap();
+        assert_eq!(nulled.avatar_url, "");
+        let missing: UserProfile =
+            serde_json::from_value(serde_json::json!({"userId": 1, "nickname": "我"})).unwrap();
+        assert_eq!(missing.avatar_url, "");
+        let present: UserProfile = serde_json::from_value(serde_json::json!({
+            "userId": 1, "nickname": "我", "avatarUrl": "https://example.com/a.jpg"
+        }))
+        .unwrap();
+        assert_eq!(present.avatar_url, "https://example.com/a.jpg");
+    }
 
     #[test]
     fn badge_follows_membership_expiry() {
