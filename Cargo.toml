@@ -9,7 +9,10 @@ reqwest-client = { package = "gpui-pre-reqwest-client", version = "=0.3.8" }
 gpui-kit = { git = "https://github.com/longbridge/gpui-kit", default-features = false, features = [
     "component",
 ] }
-ncm-api-rs = { git = "https://github.com/SPlayer-Dev/ncm-api-rs.git" }
+# 本地 vendor：fork 仓库 https://github.com/AMagicPear/ncm-api-rs（git submodule）。
+# 分支 fix/captcha-login-and-deps：修了验证码登录 password 字段的 bug（upstream issue #5）
+# 并把 rand/base64/md-5 升级到与主项目一致的版本去重。上游合并后可切回官方仓库。
+ncm-api-rs = { path = "vendor/ncm-api-rs" }
 tokio = { version = "1", features = ["full"] }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
@@ -36,7 +39,7 @@ windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
 raw-window-handle = "0.6"
 objc2 = "0.6"
 objc2-foundation = "0.3.2"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSView", "NSWindow", "NSBitmapImageRep", "NSImage", "NSImageRep", "NSGraphics", "NSStatusItem", "NSStatusBarButton", "NSButton"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSView", "NSWindow", "NSControl", "NSButton", "NSBitmapImageRep", "NSImage", "NSImageRep", "NSGraphics", "NSStatusItem", "NSStatusBarButton"] }
 
 [dev-dependencies]
 futures = "0.3"

@@ -4382,6 +4382,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "md-5"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69b6441f590336821bb897fb28fc622898ccceb1d6cea3fde5ea86b090c4de98"
+dependencies = [
+ "cfg-if",
+ "digest 0.11.3",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4546,16 +4556,15 @@ dependencies = [
 [[package]]
 name = "ncm-api-rs"
 version = "0.1.0"
-source = "git+https://github.com/SPlayer-Dev/ncm-api-rs.git#133b65bfe482e41ebccf018870d3fce07bf58eb3"
 dependencies = [
  "aes",
- "base64 0.22.1",
+ "base64 0.23.1",
  "cbc",
  "chrono",
  "ecb",
  "hex",
- "md-5",
- "rand 0.8.8",
+ "md-5 0.11.0",
+ "rand 0.9.5",
  "regex-lite",
  "reqwest",
  "rsa",
@@ -5353,7 +5362,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hkdf",
  "hmac",
- "md-5",
+ "md-5 0.10.6",
  "num",
  "num-bigint-dig 0.9.1",
  "pbkdf2",

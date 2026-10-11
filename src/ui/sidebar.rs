@@ -13,6 +13,11 @@ use crate::state::library::MusicLibrary;
 /// 选中项变化时发出的事件，`MainContent` 订阅它来重新渲染右侧内容。
 pub(super) struct SidebarChanged(pub ContentPage);
 
+/// 未登录侧边栏的「立即登录云音乐」框被点击。
+pub(super) struct LoginRequested;
+
+impl EventEmitter<LoginRequested> for SidebarPage {}
+
 pub(super) struct SidebarPage {
     active_page: ContentPage,
     library: Entity<MusicLibrary>,
@@ -254,6 +259,32 @@ fn playlist_nav_item(
         )
 }
 
+/// 未登录时替代「创建的歌单 / 收藏的歌单」区域的登录入口框：
+/// 非常淡的圆角方框，左边文案右边箭头，点击拉起登录窗。
+fn login_prompt(colors: ColorTokens, cx: &mut Context<SidebarPage>) -> Stateful<Div> {
+    div()
+        .id("sidebar-login-prompt")
+        .w_full()
+        .flex()
+        .items_center()
+        .justify_between()
+        .rounded(px(8.))
+        .px(px(12.))
+        .py(px(10.))
+        .bg(colors.foreground.alpha(0.04))
+        .text_size(px(12.))
+        .text_color(colors.secondary_foreground)
+        .cursor_pointer()
+        .on_click(cx.listener(|_, _, _, cx| cx.emit(LoginRequested)))
+        .child("立即登录云音乐")
+        .child(
+            svg()
+                .path("icons/chevron_right.svg")
+                .size(px(14.))
+                .text_color(colors.secondary_foreground),
+        )
+}
+
 fn playlist_group(
     id: &'static str,
     title: &'static str,
@@ -288,22 +319,32 @@ impl Render for SidebarPage {
             .filter(|playlist| playlist.special_type != 5)
             .cloned()
             .partition(|playlist| playlist.creator.user_id == library.user_id);
-        let created = playlist_group(
-            "created-playlists-heading",
-            "创建的歌单",
-            &created,
-            self.active_page,
-            colors,
-            cx,
-        );
-        let subscribed = playlist_group(
-            "subscribed-playlists-heading",
-            "收藏的歌单",
-            &subscribed,
-            self.active_page,
-            colors,
-            cx,
-        );
+        // 未登录（user_id == 0）时歌单区换成登录入口框；歌单列表本来就为空。
+        let playlist_section = if library.user_id == 0 {
+            login_prompt(colors, cx).into_any_element()
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .child(playlist_group(
+                    "created-playlists-heading",
+                    "创建的歌单",
+                    &created,
+                    self.active_page,
+                    colors,
+                    cx,
+                ))
+                .child(divider(colors))
+                .child(playlist_group(
+                    "subscribed-playlists-heading",
+                    "收藏的歌单",
+                    &subscribed,
+                    self.active_page,
+                    colors,
+                    cx,
+                ))
+                .into_any_element()
+        };
 
         div()
             .size_full()
@@ -329,9 +370,7 @@ impl Render for SidebarPage {
                             .child(divider(colors))
                             .child(library_navigation(self.active_page, colors, cx))
                             .child(divider(colors))
-                            .child(created)
-                            .child(divider(colors))
-                            .child(subscribed),
+                            .child(playlist_section),
                     ),
             )
     }

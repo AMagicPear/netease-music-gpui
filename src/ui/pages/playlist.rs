@@ -50,8 +50,8 @@ use crate::state::{library::MusicLibrary, playlist_detail::PlaylistDetail};
 use crate::ui::assets::thumbnail_url;
 use crate::ui::components::{
     CELL_PADDING, COLUMN_GAP, HEADER_HEIGHT, ROW_TEXT_SIZE, ResizeDragPreview, TabBar, TabChanged,
-    TabItem, TableColumn, artist_label, format_duration, like_icon_path, quality_badge_path,
-    spinner, virtual_table,
+    TabItem, TableColumn, artist_label, empty_state, format_duration, like_icon_path,
+    quality_badge_path, spinner, virtual_table,
 };
 use crate::ui::cover_color::Backdrop;
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
@@ -81,6 +81,9 @@ pub struct PlaylistPage {
     detail: Entity<PlaylistDetail>,
     _detail_subscription: Subscription,
     playlist_id: Option<u64>,
+    /// 导航意图：当前是否是「我喜欢的音乐」页。
+    /// 未登录时详情加载不了、拿不到 specialType，标题靠这个字段保持正确。
+    is_favorite_view: bool,
     tabs: Entity<TabBar>,
     _tabs_subscription: Subscription,
     library: Entity<MusicLibrary>,
@@ -424,6 +427,7 @@ impl PlaylistPage {
             detail,
             _detail_subscription: detail_subscription,
             playlist_id: None,
+            is_favorite_view: false,
             tabs,
             _tabs_subscription: tabs_subscription,
             library,
@@ -483,6 +487,11 @@ impl PlaylistPage {
             .cloned();
         self.detail
             .update(cx, |detail, cx| detail.open(id, summary, cx));
+    }
+
+    /// 记录导航意图（是否「我喜欢的音乐」页）；未登录时标题靠它。
+    pub fn set_favorite_view(&mut self, favorite: bool) {
+        self.is_favorite_view = favorite;
     }
 
     fn action_buttons(&self, compact: bool, cx: &Context<Self>) -> Div {
@@ -656,12 +665,18 @@ impl PlaylistPage {
             .font_weight(FontWeight::BOLD)
             .text_color(Theme::global(cx).tokens.colors.foreground)
             .child(
-                self.detail
-                    .read(cx)
-                    .playlist
-                    .as_ref()
-                    .map(|playlist| playlist.name.clone())
-                    .unwrap_or_else(|| "歌单".into()),
+                // 「是否我喜欢的音乐」由 open_playlist 在导航时写入 is_favorite_view，
+                // 未登录拿不到接口数据也照样成立，标题只有一个真值来源。
+                if self.is_favorite_view {
+                    "我喜欢的音乐".into()
+                } else {
+                    self.detail
+                        .read(cx)
+                        .playlist
+                        .as_ref()
+                        .map(|playlist| playlist.name.clone())
+                        .unwrap_or_else(|| "歌单".into())
+                },
             )
     }
 
@@ -1286,6 +1301,19 @@ fn play_all_button(colors: ColorTokens, compact: bool) -> Button {
     .when(!compact, |button| button.child("播放全部"))
 }
 
+/// 空状态在右侧留白区水平居中，顶部对齐（不另加边距）。
+fn centered_empty(
+    image: &'static str,
+    tip: &str,
+    colors: gpui_kit::base::ColorTokens,
+) -> impl IntoElement {
+    div()
+        .w_full()
+        .flex()
+        .justify_center()
+        .child(empty_state(image, tip, colors))
+}
+
 impl Render for PlaylistPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.playing_indicator.read(cx).placement.set(None);
@@ -1323,6 +1351,11 @@ impl Render for PlaylistPage {
                     colors.muted_foreground,
                 ))
                 .into_any_element(),
+            // 未登录（库级错误）时与官方一致：不弹登录提示，直接给空状态插画。
+            _ if error.is_some() && detail.id.is_none() && library.user_id == 0 => {
+                centered_empty("images/empty/cm_empty_wuzuopin.png", "空空如也", colors)
+                    .into_any_element()
+            }
             _ if error.is_some() => div()
                 .text_color(colors.muted_foreground)
                 .child(error.unwrap())
@@ -1338,15 +1371,14 @@ impl Render for PlaylistPage {
                     ))
                 })
                 .into_any_element(),
-            _ if detail.id.is_none() => div()
-                .text_color(colors.muted_foreground)
-                .child("暂无歌单")
-                .into_any_element(),
-            PlaylistTab::Songs if self.display_order.is_empty() => div()
-                .py_8()
-                .text_color(colors.muted_foreground)
-                .child("这个歌单还没有歌曲")
-                .into_any_element(),
+            _ if detail.id.is_none() => {
+                centered_empty("images/empty/cm_empty_wuzuopin.png", "空空如也", colors)
+                    .into_any_element()
+            }
+            PlaylistTab::Songs if self.display_order.is_empty() => {
+                centered_empty("images/empty/cm_empty_wuzuopin.png", "空空如也", colors)
+                    .into_any_element()
+            }
             PlaylistTab::Songs => {
                 let header_layout = Rc::new(Cell::new([Bounds::default(); 2]));
                 let table = virtual_table(

@@ -70,9 +70,12 @@ pub fn init(cx: &mut App) {
         colors.foreground = ink;
         colors.secondary_foreground = ink.alpha(0.8);
         colors.muted_foreground = ink.alpha(0.6);
-        colors.border = ink.alpha(0.1);
-        colors.muted = ink.alpha(0.06);
-        colors.accent = ink.alpha(0.06);
+        // 官方边框与填充用同一套灰的透明度：边框 rgba(46,50,56,0.09)（grey-8），
+        // 填充 rgba(28,31,35,0.08)（grey-9，见 cmd-button-group 与排版色）。
+        // 这里沿用墨色基色近似，透明度与官方一致。
+        colors.border = ink.alpha(0.09);
+        colors.muted = ink.alpha(0.08);
+        colors.accent = ink.alpha(0.08);
         colors.primary = rgb(0xfc3d49).into();
         colors.primary_foreground = rgb(0xffffff).into();
         colors.selection = colors.primary.alpha(0.3);

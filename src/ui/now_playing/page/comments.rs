@@ -4,7 +4,7 @@ use gpui_kit::base::{Button, Scrollbar, ScrollbarMode, TextSelectionLayer, Theme
 
 use crate::api::MusicApi;
 use crate::models::SongComment;
-use crate::ui::components::{comment_row, spinner};
+use crate::ui::components::{comment_row, empty_state, spinner};
 use crate::ui::cover_color::{Backdrop, dark_colors, dark_gradient};
 use crate::ui::theme::DOLPHIN_FAMILY;
 
@@ -197,12 +197,11 @@ impl Render for CommentsView {
                         .on_click(cx.listener(|this, _, _, cx| this.load(cx))),
                 );
             } else if !self.loading && self.comments.is_empty() {
-                list = list.child(
-                    div()
-                        .py_8()
-                        .text_color(colors.muted_foreground)
-                        .child("还没有评论"),
-                );
+                list = list.child(empty_state(
+                    "images/empty/cm_empty_wupinglun.png",
+                    "还没有评论",
+                    colors,
+                ));
             }
         }
         div()

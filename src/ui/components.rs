@@ -1,5 +1,6 @@
 use crate::models::AudioQualityLevel;
-use gpui::{Div, Hsla, InteractiveElement, MouseButton, Stateful, WindowControlArea, div};
+use gpui::{Div, Hsla, InteractiveElement, MouseButton, Stateful, WindowControlArea, div, img, px};
+use gpui::{ParentElement as _, Styled as _};
 use gpui_kit::base::ColorTokens;
 
 mod collect_window;
@@ -22,8 +23,9 @@ pub use comment_row::comment_row;
 pub use drag_preview::ResizeDragPreview;
 pub use player_bar::{PLAYER_BAR_HEIGHT, PlayerBar};
 pub use song_menu::show_song_menu;
-// 播放队列浮层和音质弹窗共用同一份圆角与投影；子模块通过 `super::` 取名。
-use popover::{SURFACE_RADIUS, surface_shadow};
+// 播放队列浮层、音质弹窗、账号弹层共用同一份圆角与投影；
+// 子模块与 ui 模块（shell）都通过这里取名。
+pub(in crate::ui) use popover::{SURFACE_RADIUS, surface_shadow};
 pub use spinner::spinner;
 pub use tab_bar::{TabBar, TabChanged, TabItem};
 pub(in crate::ui) use vinyl::{RotationClock, Vinyl};
@@ -58,6 +60,43 @@ pub(super) fn icon_hover_color(mut base: Hsla, colors: ColorTokens) -> Hsla {
 // （比如换了素材只改一处），所以集中在这里，由调用方决定怎么渲染。
 
 /// Windows 用原生命中区；macOS/Linux 在按下时把拖拽交给系统。
+/// 隐藏 macOS 窗口红绿灯里的部分按钮。登录窗只隐藏绿灯（保留可最小化），
+/// 收藏窗黄灯绿灯都隐藏。gpui 的 WindowOptions 没有“隐藏某个灯”的开关，
+/// style mask 只能整体去能力（隐藏 / 灰显），所以直接操作原生 NSWindow。
+#[cfg(target_os = "macos")]
+pub(super) fn hide_traffic_lights(window: &gpui::Window, hide_minimize: bool) {
+    use objc2::msg_send;
+    use objc2_app_kit::{NSWindowButton, NSWindowStyleMask};
+    use raw_window_handle::AppKitWindowHandle;
+
+    // Window 的固有方法 window_handle() 返回 AnyWindowHandle，会遮蔼 trait
+    // 同名方法，拿不到原始句柄；必须全限定调用 trait 方法。
+    let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let raw_window_handle::RawWindowHandle::AppKit(AppKitWindowHandle { ns_view, .. }) =
+        handle.as_raw()
+    else {
+        return;
+    };
+    unsafe {
+        // gpui 的 macOS 后端把根 NSView 存在 handle 里，取它所在的 NSWindow。
+        let view: *mut objc2_app_kit::NSView = ns_view.as_ptr().cast();
+        let window: Option<objc2::rc::Retained<objc2_app_kit::NSWindow>> = msg_send![view, window];
+        let Some(window) = window else { return };
+        if let Some(zoom) = window.standardWindowButton(NSWindowButton::ZoomButton) {
+            zoom.setHidden(true);
+        }
+        if hide_minimize {
+            if let Some(minimize) = window.standardWindowButton(NSWindowButton::MiniaturizeButton) {
+                minimize.setHidden(true);
+            }
+        }
+        // 双击标题栏按系统设置可能触发最大化，去掉 FullScreen 可用性一并禁掉。
+        window.setStyleMask(window.styleMask() & !NSWindowStyleMask::FullScreen);
+    }
+}
+
 pub(super) fn window_drag_area(id: &'static str) -> Stateful<Div> {
     div()
         .id(id)
@@ -75,6 +114,24 @@ pub(super) fn window_drag_area(id: &'static str) -> Stateful<Div> {
                 }
             }
         })
+}
+
+/// 空状态占位：官方 cm_empty_* 位图（180px 逻辑尺寸，600px 源图足够 Retina）+ 说明文字。
+/// 官方 CSS：`.BackImage{width:180px;height:180px}`，下方紧跟灰字提示。
+pub(super) fn empty_state(image: &'static str, tip: &str, colors: ColorTokens) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .py_8()
+        .gap(px(8.))
+        .child(img(image).w(px(180.)).h(px(180.)))
+        .child(
+            div()
+                .text_size(px(14.))
+                .text_color(colors.muted_foreground)
+                .child(tip.to_string()),
+        )
 }
 
 /// 音质徽章的图标，素材与官方「音质选项」一一对应。

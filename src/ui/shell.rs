@@ -5,18 +5,19 @@ use gpui::*;
 
 use super::assets::{CoverPrefetch, thumbnail_url, track_cover_url};
 use super::components::{
-    PLAYER_BAR_HEIGHT, PlayerBar, ResizeDragPreview, icon_hover_color, window_drag_area,
+    PLAYER_BAR_HEIGHT, PlayerBar, ResizeDragPreview, SURFACE_RADIUS, icon_hover_color,
+    surface_shadow, window_drag_area,
 };
 use super::cover_color::{Backdrop, CoverColor, CoverGradient, gradient_layer};
 use super::now_playing::{NowPlaying, NowPlayingPage};
 use super::pages::{ContentPage, playlist::PlaylistPage};
-use super::sidebar::{SidebarChanged, SidebarPage};
+use super::sidebar::{LoginRequested, SidebarChanged, SidebarPage};
 use super::theme::{IconSize, PRESSED_ICON_ALPHA};
 use crate::playback::PlaybackController;
 use crate::state::account::AccountState;
 use crate::state::library::MusicLibrary;
 use gpui_kit::base::input::{Input, InputState};
-use gpui_kit::base::{Button, ColorTokens, Scrollbar, ScrollbarMode, Theme};
+use gpui_kit::base::{Button, ColorTokens, Popup, Scrollbar, ScrollbarMode, Theme};
 use gpui_kit::component::Sizable;
 use gpui_kit::component::avatar::Avatar;
 
@@ -197,6 +198,8 @@ pub struct MainContent {
     search_input: Entity<InputState>,
     user_profile: Entity<AccountState>,
     login_window: Option<AnyWindowHandle>,
+    /// 账号弹层（头像 popover）是否展开；未登录时点击头像走登录窗。
+    profile_menu_open: bool,
     account_id: u64,
     /// 每个导航项对应一个页面 View，一次创建后长期持有。
     pages: HashMap<ContentPage, AnyView>,
@@ -205,6 +208,7 @@ pub struct MainContent {
     page_scroll: HashMap<ContentPage, ScrollHandle>,
     playlist_backdrop: Backdrop,
     _sidebar_subscription: Subscription,
+    _sidebar_login_subscription: Subscription,
     _user_profile_subscription: Subscription,
     _library_subscription: Subscription,
 }
@@ -221,6 +225,15 @@ impl MainContent {
         let sidebar_subscription = cx.subscribe(&sidebar, |this, _, event: &SidebarChanged, cx| {
             this.navigate(event.0, cx);
         });
+        // 侧边栏「立即登录云音乐」点击 → 打开登录窗（与头像入口同一套流程）。
+        let login_subscription = cx.subscribe_in(
+            &sidebar,
+            window,
+            |this, _, _: &LoginRequested, window, cx| {
+                this.login_window =
+                    super::login::open(window, this.user_profile.clone(), this.login_window, cx);
+            },
+        );
         let playlist_page = cx.new(|cx| PlaylistPage::new(library.clone(), playback, cx));
         let library_subscription = cx.observe(&library, |this, _, cx| {
             // 收藏歌单的 ID 要等账号索引返回后才能解析。
@@ -258,6 +271,7 @@ impl MainContent {
             search_input,
             user_profile,
             login_window: None,
+            profile_menu_open: false,
             account_id: 0,
             pages,
             playlist_page,
@@ -267,6 +281,7 @@ impl MainContent {
                 .map(|page| (page, ScrollHandle::default()))
                 .collect(),
             _sidebar_subscription: sidebar_subscription,
+            _sidebar_login_subscription: login_subscription,
             _user_profile_subscription: user_profile_subscription,
             _library_subscription: library_subscription,
         }
@@ -283,16 +298,29 @@ impl MainContent {
     }
 
     fn open_playlist(&mut self, page: ContentPage, cx: &mut Context<Self>) {
-        let id = match page {
-            ContentPage::FavoriteMusic => self
-                .library
-                .read(cx)
-                .favorite_playlist()
-                .map(|playlist| playlist.id),
-            ContentPage::Playlist(id) => Some(id),
+        // 「是否我喜欢的音乐」在这里一次定死：显式导航算 true，
+        // 传 id 进来的按 id 是否命中喜欢歌单判断。
+        let (id, favorite) = match page {
+            ContentPage::FavoriteMusic => (
+                self.library
+                    .read(cx)
+                    .favorite_playlist()
+                    .map(|playlist| playlist.id),
+                true,
+            ),
+            ContentPage::Playlist(id) => (
+                Some(id),
+                self.library
+                    .read(cx)
+                    .favorite_playlist()
+                    .is_some_and(|playlist| playlist.id == id),
+            ),
             _ => return,
         };
-        self.playlist_page.update(cx, |view, cx| view.open(id, cx));
+        self.playlist_page.update(cx, |view, cx| {
+            view.set_favorite_view(favorite);
+            view.open(id, cx);
+        });
     }
 }
 
@@ -408,56 +436,190 @@ pub(super) fn mini_and_window_buttons(
     buttons
 }
 
-/// 页头右端的头像与昵称菜单。
-fn profile_menu(
-    nickname: String,
-    avatar_url: String,
-    vip_badge: Option<String>,
-    colors: ColorTokens,
-) -> [Stateful<Div>; 2] {
-    let avatar = div()
-        .id("header-avatar")
-        .ml_auto()
-        .flex_none()
-        .occlude()
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(Avatar::new().with_size(px(28.)).flex_none().src(avatar_url));
-    let menu = div()
-        .id("header-profile-menu")
-        // 把整块（昵称 + VIP + 箭头）声明成一个 group，
-        // 子元素就能用 group_hover 感知「整块是否被悬浮」，而不是各自单独判断。
-        .group("header-profile-menu")
-        .occlude()
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .ml(px(4.))
-        .flex()
-        .items_center()
-        .gap(px(4.))
-        .text_size(px(13.))
-        // 昵称保持原本设计的 0.7；文字子元素会继承这个色，
-        // 所以这里的 hover 一并让昵称变深到 foreground。
-        .text_color(colors.foreground.alpha(0.7))
-        .hover(|style| style.text_color(colors.foreground))
-        .child(nickname)
-        .when_some(vip_badge, |menu, badge| {
-            menu.child(img(badge).h(px(16.)).flex_none())
-        })
-        .child(
-            svg()
-                .path("icons/unfold.svg")
-                .size(px(20.))
-                .flex_none()
-                // svg 不继承文字色的 hover，改用 group_hover：
-                // 只要整块被悬浮，箭头也跟着变深到 foreground。
-                .text_color(colors.foreground.alpha(0.6))
-                .group_hover("header-profile-menu", |style| {
-                    style.text_color(colors.foreground)
-                }),
-        );
-    [avatar, menu]
-}
-
 impl MainContent {
+    /// 页头右端的头像与昵称；点击弹出账号菜单（官方同款 popover）。
+    /// 未登录时点击仍是打开登录窗，已登录时开合弹层。
+    fn profile_menu(&self, colors: ColorTokens, cx: &Context<Self>) -> impl IntoElement {
+        let profile = self.user_profile.read(cx);
+        let logged_in = profile.profile.user_id != 0;
+        let was_open = self.profile_menu_open;
+        let nickname = profile.profile.nickname.clone();
+        let avatar_url = profile.profile.avatar_url.clone();
+        let vip_badge = profile.vip.as_ref().and_then(|vip| {
+            vip.badge_path(time::OffsetDateTime::now_utc().unix_timestamp() as u64 * 1000)
+        });
+
+        let trigger = div()
+            .id("header-profile-trigger")
+            .ml_auto()
+            .flex_none()
+            .flex()
+            .items_center()
+            .occlude()
+            .cursor_pointer()
+            .focusable()
+            .role(Role::Button)
+            .aria_label("账号菜单")
+            // 守卫比较本次渲染的开合值：点在触发器上时，弹层的 down-out
+            // 监听可能已经先把它关掉了，这次按下不能再翻回去（同音质弹层）。
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    if logged_in {
+                        if this.profile_menu_open == was_open {
+                            this.profile_menu_open = !was_open;
+                            cx.notify();
+                        }
+                    } else {
+                        this.login_window = super::login::open(
+                            window,
+                            this.user_profile.clone(),
+                            this.login_window,
+                            cx,
+                        );
+                    }
+                    cx.stop_propagation();
+                }),
+            )
+            .child(
+                // 未登录 / 无头像时用官方默认头像位图（avatarMiniBar，灰圆人形）；
+                // 不走 gpui-kit 的内置占位图标：它继承 base 的 text_color（背景色），
+                // 在浅灰圆上几乎不可见。有头像才走 CDN 缩略图。
+                if avatar_url.is_empty() {
+                    Avatar::new()
+                        .with_size(px(28.))
+                        .flex_none()
+                        .src("images/default_avatar.png")
+                        .into_any_element()
+                } else {
+                    Avatar::new()
+                        .with_size(px(28.))
+                        .flex_none()
+                        .src(thumbnail_url(&avatar_url, 56))
+                        .into_any_element()
+                },
+            )
+            .child(
+                div()
+                    // 把整块（昵称 + VIP + 箭头）声明成一个 group，
+                    // 子元素就能用 group_hover 感知「整块是否被悬浮」。
+                    .group("header-profile-menu")
+                    .ml(px(4.))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .text_size(px(13.))
+                    // 昵称保持原本设计的 0.7；hover 一并让昵称变深到 foreground。
+                    .text_color(colors.foreground.alpha(0.7))
+                    .hover(|style| style.text_color(colors.foreground))
+                    .child(nickname)
+                    .when_some(vip_badge, |menu, badge| {
+                        menu.child(img(badge).h(px(16.)).flex_none())
+                    })
+                    .child(
+                        svg()
+                            .path("icons/unfold.svg")
+                            .size(px(20.))
+                            .flex_none()
+                            .text_color(colors.foreground.alpha(0.6))
+                            .group_hover("header-profile-menu", |style| {
+                                style.text_color(colors.foreground)
+                            }),
+                    ),
+            );
+
+        Popup::new("header-profile-popover", trigger)
+            .anchor(Anchor::TopRight)
+            .offset(px(8.))
+            .flex_none()
+            .when(logged_in && was_open, |popup| {
+                popup.content(self.profile_menu_content(colors, cx))
+            })
+    }
+
+    /// 账号弹层内容：用户信息行 + 退出登录。
+    fn profile_menu_content(&self, colors: ColorTokens, cx: &Context<Self>) -> impl IntoElement {
+        let profile = self.user_profile.read(cx);
+        let nickname = profile.profile.nickname.clone();
+        let avatar_url = profile.profile.avatar_url.clone();
+        let vip_badge = profile.vip.as_ref().and_then(|vip| {
+            vip.badge_path(time::OffsetDateTime::now_utc().unix_timestamp() as u64 * 1000)
+        });
+
+        div()
+            .id("header-profile-surface")
+            .w(px(240.))
+            .bg(colors.surface)
+            .rounded(SURFACE_RADIUS)
+            .shadow(vec![surface_shadow(colors)])
+            .py(px(6.))
+            .text_color(colors.foreground)
+            // 点弹层外面收起（捕获阶段触发，点在弹层内不会到这）；
+            // 点在弹层内不冒泡，避免误触页面其它交互。
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.profile_menu_open = false;
+                cx.notify();
+            }))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .px(px(12.))
+                    .py(px(8.))
+                    .child(
+                        // 弹层里的头像展示更大一号，取 72px 缩略图。
+                        if avatar_url.is_empty() {
+                            Avatar::new()
+                                .with_size(px(36.))
+                                .flex_none()
+                                .src("images/default_avatar.png")
+                                .into_any_element()
+                        } else {
+                            Avatar::new()
+                                .with_size(px(36.))
+                                .flex_none()
+                                .src(thumbnail_url(&avatar_url, 72))
+                                .into_any_element()
+                        },
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .min_w(px(0.))
+                            .child(div().text_size(px(13.)).line_clamp(1).child(nickname))
+                            .when_some(vip_badge, |col, badge| {
+                                col.child(img(badge).h(px(14.)).w_auto())
+                            }),
+                    ),
+            )
+            .child(div().h(px(1.)).bg(colors.border))
+            .child(
+                div()
+                    .id("header-profile-logout")
+                    .cursor_pointer()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(12.))
+                    .py(px(8.))
+                    .text_size(px(13.))
+                    .text_color(colors.foreground.alpha(0.8))
+                    .hover(|style| style.bg(colors.muted).text_color(colors.foreground))
+                    .child(svg().path("icons/logout.svg").size(px(15.)).flex_none())
+                    .child("退出登录")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.profile_menu_open = false;
+                        this.user_profile
+                            .update(cx, |account, cx| account.logout(cx));
+                        cx.notify();
+                    })),
+            )
+    }
+
     /// 页头空白处拖动窗口，交互控件阻止拖动。
     fn page_header(
         &self,
@@ -465,7 +627,6 @@ impl MainContent {
         colors: ColorTokens,
         cx: &Context<Self>,
     ) -> impl IntoElement {
-        let profile = self.user_profile.read(cx);
         window_drag_area("page-header")
             .h(px(HEADER_HEIGHT))
             .pt(px(HEADER_TOP_INSET))
@@ -494,32 +655,7 @@ impl MainContent {
                     ),
             )
             .child(search_box(self.search_input.clone(), colors))
-            .children(
-                profile_menu(
-                    profile.profile.nickname.clone(),
-                    thumbnail_url(&profile.profile.avatar_url, 56),
-                    profile.vip.as_ref().and_then(|vip| {
-                        vip.badge_path(
-                            time::OffsetDateTime::now_utc().unix_timestamp() as u64 * 1000,
-                        )
-                    }),
-                    colors,
-                )
-                .map(|item| {
-                    item.cursor_pointer()
-                        .focusable()
-                        .role(Role::Button)
-                        .aria_label("账号与登录")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.login_window = super::login::open(
-                                window,
-                                this.user_profile.clone(),
-                                this.login_window,
-                                cx,
-                            );
-                        }))
-                }),
-            )
+            .child(self.profile_menu(colors, cx))
             .child(hover_icon(
                 "header-message-button",
                 "消息",

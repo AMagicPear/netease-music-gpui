@@ -6,8 +6,8 @@
 //! - **标题栏可拖拽**：窗口声明 `app_owns_titlebar_drag`，拖动交给 `window_drag_area`
 //!   调 `start_window_move`（macOS 上 AppKit 不再代劳拖拽）。
 //!
-//! 窗口按钮走平台惯例：macOS 用系统红绿灯，只保留关闭红灯（不可缩放、不可最小化，
-//! 系统便不会画绿 / 黄灯）；其它平台在右上角自绘一个叉号。
+//! 窗口按钮走平台惯例：macOS 用系统红绿灯，黄灯绿灯真隐藏，只留关闭红灯；
+//! 其它平台在右上角自绘一个叉号。
 //!
 //! 内容是一个可滚动的歌单列表：第一项「创建新歌单」，第二项「喜欢的音乐」，
 //! 之后是其它歌单。列表数据来自 [`MusicLibrary`]，加载完成会通过订阅刷新。
@@ -16,6 +16,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_kit::base::{ColorTokens, Scrollbar, ScrollbarMode, Theme};
 
+use super::hide_traffic_lights;
 use crate::desktop;
 use crate::models::Playlist;
 use crate::state::library::MusicLibrary;
@@ -86,6 +87,9 @@ pub fn open_collect_window(parent: &Window, cx: &mut App) {
         return;
     };
     match gpui_kit::open_window(options, cx, move |window, cx| {
+        // 黄灯绿灯真隐藏（不是灰显），只留关闭红灯；登录窗同款机制。
+        #[cfg(target_os = "macos")]
+        hide_traffic_lights(window, true);
         // 原生关闭按钮（macOS 红灯 / 其它平台的窗口关闭）走的都是 should-close，
         // 在这里清掉句柄，避免留下一个失效的窗口引用。
         window.on_window_should_close(cx, |_, cx| {

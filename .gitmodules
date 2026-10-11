@@ -1,0 +1,4 @@
+[submodule "vendor/ncm-api-rs"]
+	path = vendor/ncm-api-rs
+	url = https://github.com/AMagicPear/ncm-api-rs.git
+	branch = fix/captcha-login-and-deps
