@@ -109,15 +109,21 @@ impl RenderOnce for SurfacePopover {
             return popup.into_any_element();
         }
 
+        // 浮现方向跟锚点走：弹层在触发器下方（Top*）从锚点向下出现，
+        // 在上方（Bottom*）则向上浮起；退场反向收回。
+        let travel = match self.anchor {
+            Anchor::TopLeft | Anchor::TopCenter | Anchor::TopRight => -SURFACE_TRAVEL,
+            _ => SURFACE_TRAVEL,
+        };
+
         let mut surface = div()
             .id((self.id, "surface"))
             .bg(colors.surface)
             .rounded(SURFACE_RADIUS)
             .shadow(vec![surface_shadow(colors)])
             .text_color(colors.foreground)
-            // 入场：从下方浮起并淡入；退场同一条曲线原路收回。
             .opacity(presence.progress)
-            .top(SURFACE_TRAVEL * (1. - presence.progress))
+            .top(travel * (1. - presence.progress))
             .refine_style(&self.style)
             .children(self.children);
         if let Some(on_out) = self.on_mouse_down_out {
