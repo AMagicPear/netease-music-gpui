@@ -11,9 +11,9 @@ use ncm_api_rs::{ApiResponse, NcmError, Query, create_client};
 use tokio::runtime::Runtime;
 
 use crate::models::{
-    parse_comments, parse_forwards, parse_notices, parse_private, AudioQualityLevel,
-    AudioSourceInfo, LyricLine, MessageItem, Playlist, Privilege, Song, SongComment, SongComments,
-    TrackId, UserProfile, VipInfo,
+    AudioQualityLevel, AudioSourceInfo, LyricLine, MessageItem, Playlist, Privilege, Song,
+    SongComment, SongComments, TrackId, UserProfile, VipInfo, parse_comments, parse_forwards,
+    parse_notices, parse_private,
 };
 
 /// GPUI 负责界面，Tokio 负责 SDK 的网络请求。客户端和运行时在应用内复用。
@@ -212,31 +212,29 @@ impl MusicApi {
         client: &ApiClient,
         user_id: u64,
     ) -> Result<(Vec<MessageItem>, u32), String> {
-        let mut response = Self::request(
-            client.msg_private(&Query::new().param("limit", "30")),
-        )
-        .await?;
+        let mut response =
+            Self::request(client.msg_private(&Query::new().param("limit", "30"))).await?;
         let unread = response.body["newMsgCount"].as_u64().unwrap_or(0) as u32;
         let msgs = response.body["msgs"].take();
         Ok((parse_private(&msgs, user_id), unread))
     }
 
     /// 收到的评论（消息面板·评论 tab）。
-    pub async fn comment_messages(client: &ApiClient, user_id: u64) -> Result<Vec<MessageItem>, String> {
-        let mut response = Self::request(
-            client.msg_comments(&Query::new().param("uid", &user_id.to_string())),
-        )
-        .await?;
+    pub async fn comment_messages(
+        client: &ApiClient,
+        user_id: u64,
+    ) -> Result<Vec<MessageItem>, String> {
+        let mut response =
+            Self::request(client.msg_comments(&Query::new().param("uid", &user_id.to_string())))
+                .await?;
         let comments = response.body["comments"].take();
         Ok(parse_comments(&comments))
     }
 
     /// @我（消息面板·@我 tab）。同时带回总未读数。
     pub async fn mention_messages(client: &ApiClient) -> Result<(Vec<MessageItem>, u32), String> {
-        let mut response = Self::request(
-            client.msg_forwards(&Query::new().param("limit", "30")),
-        )
-        .await?;
+        let mut response =
+            Self::request(client.msg_forwards(&Query::new().param("limit", "30"))).await?;
         let unread = response.body["newCount"].as_u64().unwrap_or(0) as u32;
         let forwards = response.body["forwards"].take();
         Ok((parse_forwards(&forwards), unread))
@@ -244,10 +242,8 @@ impl MusicApi {
 
     /// 系统通知（消息面板·通知 tab）。
     pub async fn notice_messages(client: &ApiClient) -> Result<Vec<MessageItem>, String> {
-        let mut response = Self::request(
-            client.msg_notices(&Query::new().param("limit", "30")),
-        )
-        .await?;
+        let mut response =
+            Self::request(client.msg_notices(&Query::new().param("limit", "30"))).await?;
         let notices = response.body["notices"].take();
         Ok(parse_notices(&notices))
     }
@@ -293,7 +289,8 @@ impl MusicApi {
             .map_err(|error| format!("搜索结果格式无效：{error}"))?;
         // 权益拿不到不影响列表本身，音质判断会退回歌曲自带的变体字段。
         let privileges: Vec<Privilege> =
-            serde_json::from_value(response.body["result"]["privileges"].take()).unwrap_or_default();
+            serde_json::from_value(response.body["result"]["privileges"].take())
+                .unwrap_or_default();
         attach_privileges(&mut songs, privileges);
         Ok(songs)
     }
@@ -917,12 +914,23 @@ mod temp_probe {
             .runtime
             .block_on(api.client.msg_notices(&Query::new().param("limit", "30")))
             .unwrap();
-        for (i, item) in response.body["notices"].as_array().unwrap().iter().enumerate() {
+        for (i, item) in response.body["notices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
             let payload = item["notice"].as_str().unwrap_or("");
             let value: serde_json::Value = serde_json::from_str(payload).unwrap_or_default();
             // 只看 type != 6 的，找「赞评论」以外的类型。
-            if value["type"].as_i64() == Some(6) { continue; }
-            println!("=== notices[{i}] type={} ===\n{}", value["type"], serde_json::to_string_pretty(item).unwrap());
+            if value["type"].as_i64() == Some(6) {
+                continue;
+            }
+            println!(
+                "=== notices[{i}] type={} ===\n{}",
+                value["type"],
+                serde_json::to_string_pretty(item).unwrap()
+            );
         }
     }
 

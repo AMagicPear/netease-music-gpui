@@ -28,11 +28,8 @@ const REVEAL_DURATION: Duration = Duration::from_millis(260);
 
 /// 面板高度：窗口减去页头、播放栏和上下间隔。
 pub(in crate::ui) fn panel_height(window: &Window) -> Pixels {
-    (window.viewport_size().height
-        - px(HEADER_HEIGHT)
-        - px(PLAYER_BAR_HEIGHT)
-        - PANEL_GAP * 2.)
-    .max(px(0.))
+    (window.viewport_size().height - px(HEADER_HEIGHT) - px(PLAYER_BAR_HEIGHT) - PANEL_GAP * 2.)
+        .max(px(0.))
 }
 
 /// 侧面板当前展示的内容。

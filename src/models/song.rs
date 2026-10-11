@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::AudioQualityLevel;
 
 /// 歌曲详情、歌单 tracks 和每日推荐歌曲使用的字段。
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Song {
     pub id: u64,
@@ -34,7 +34,7 @@ pub struct Song {
 
 /// 歌曲的播放/下载权益。实测 `playMaxBrLevel`、`maxBrLevel`、`maxbr` 不随登录态变化，
 /// 描述的是平台为这首歌提供的最高档位；账号只影响 `pl` / `dl` 这类权限位。
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Privilege {
     pub id: u64,
@@ -48,7 +48,7 @@ pub struct Privilege {
     pub pl: Option<u64>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 pub struct Artist {
     pub id: u64,
     pub name: Option<String>,
@@ -58,7 +58,7 @@ pub struct Artist {
     pub tns: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Album {
     pub id: u64,
@@ -68,7 +68,7 @@ pub struct Album {
     pub tns: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct AudioQuality {
     pub br: u64,
     pub size: u64,

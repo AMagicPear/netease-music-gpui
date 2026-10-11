@@ -168,7 +168,8 @@ impl MessagePanel {
         } else {
             None
         };
-        self.tabs.update(cx, |tabs, cx| tabs.set_count(tab, count, cx));
+        self.tabs
+            .update(cx, |tabs, cx| tabs.set_count(tab, count, cx));
     }
 
     /// 一键全读：先清本地未读（行内徽标 + tab 角标），再同步服务端。
@@ -188,9 +189,9 @@ impl MessagePanel {
         }
         let api = MusicApi::global(cx);
         let client = api.client.clone();
-        let request = api.runtime.spawn(async move {
-            MusicApi::clear_message_counts(&client).await
-        });
+        let request = api
+            .runtime
+            .spawn(async move { MusicApi::clear_message_counts(&client).await });
         cx.spawn(async move |this, cx| {
             if let Err(error) = request
                 .await
@@ -218,7 +219,9 @@ async fn fetch_tab(
             .map(|items| (items, 0)),
         TAB_MENTIONS => MusicApi::mention_messages(&client).await,
         // 其余（通知）没有账号级未读数。
-        _ => MusicApi::notice_messages(&client).await.map(|items| (items, 0)),
+        _ => MusicApi::notice_messages(&client)
+            .await
+            .map(|items| (items, 0)),
     }
 }
 
@@ -245,9 +248,7 @@ impl Render for MessagePanel {
                     .child(
                         // 58px 头部里指示条挂在文字下方，居中会让文字视觉重心偏上；
                         // 下压让它和播放列表那行大标题的视觉基线齐平。
-                        div()
-                            .mt(px(6.))
-                            .child(self.tabs.clone()),
+                        div().mt(px(6.)).child(self.tabs.clone()),
                     )
                     .child(div().flex_1())
                     .child(header_text_button(
@@ -295,7 +296,9 @@ fn message_list_state(data: &TabData, colors: ColorTokens) -> Vec<AnyElement> {
             .into_any_element()
     };
     if data.loading && data.items.is_empty() {
-        return vec![centered(spinner("message-panel-loading", 20., colors.muted_foreground).into_any_element())];
+        return vec![centered(
+            spinner("message-panel-loading", 20., colors.muted_foreground).into_any_element(),
+        )];
     }
     if let Some(error) = &data.error {
         return vec![centered(
@@ -340,7 +343,12 @@ fn message_row(item: &MessageItem, colors: ColorTokens) -> AnyElement {
             div()
                 .relative()
                 .flex_none()
-                .child(Avatar::new().with_size(AVATAR_SIZE).border_0().src(avatar_src))
+                .child(
+                    Avatar::new()
+                        .with_size(AVATAR_SIZE)
+                        .border_0()
+                        .src(avatar_src),
+                )
                 .when(item.unread > 0, |wrap| {
                     wrap.child(
                         div()
@@ -434,6 +442,11 @@ fn message_time(millis: i64) -> String {
     } else if date.year() == now.year() {
         format!("{:02}-{:02}", u8::from(date.month()), date.day())
     } else {
-        format!("{}-{:02}-{:02}", date.year(), u8::from(date.month()), date.day())
+        format!(
+            "{}-{:02}-{:02}",
+            date.year(),
+            u8::from(date.month()),
+            date.day()
+        )
     }
 }

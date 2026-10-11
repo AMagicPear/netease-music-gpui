@@ -9,9 +9,7 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_kit::base::{
-    ColorTokens, IndexPath, InteractiveElementExt as _, Selectable, Theme,
-};
+use gpui_kit::base::{ColorTokens, IndexPath, InteractiveElementExt as _, Selectable, Theme};
 use gpui_kit::component::list::{List, ListDelegate, ListState};
 
 use super::{
@@ -334,13 +332,17 @@ impl ListDelegate for QueueDelegate {
 
         // 行上右键：和行内「更多」图标弹同一份原生菜单，只是换个触发方式。
         // 位置同样取鼠标点下的窗口坐标，所以两处菜单落点行为一致。
+        let playback_for_menu = self.playback.clone();
         let on_right_click: RowCallback<ClickEvent> = Box::new(cx.listener(
             move |_: &mut ListState<QueueDelegate>,
                   event: &ClickEvent,
                   window: &mut Window,
                   cx: &mut Context<ListState<QueueDelegate>>| {
                 cx.stop_propagation();
-                crate::ui::components::show_song_menu(event.position(), window, cx);
+                let Some(song) = playback_for_menu.read(cx).queue().get(index).cloned() else {
+                    return;
+                };
+                crate::ui::components::show_song_menu(event.position(), song, window, cx);
             },
         ));
 
@@ -536,7 +538,7 @@ fn row_content(
         vec![
             cover,
             text,
-            row_actions(index, liked, colors, on_like_click),
+            row_actions(index, song, liked, colors, on_like_click),
         ]
     } else {
         // 时长是辅助信息：比 muted_foreground 再淡一档，和歌单行一致。
@@ -555,6 +557,7 @@ fn row_content(
 /// 尺寸和间距对齐歌单页那排操作图标（`IconSize::Small`，图标之间 10px）。
 fn row_actions(
     index: usize,
+    song: &Song,
     liked: bool,
     colors: ColorTokens,
     on_like_click: RowCallback<ClickEvent>,
@@ -618,12 +621,18 @@ fn row_actions(
         )
         // 更多：弹出原生菜单。
         .child(
-            plain(("playlist-panel-more", index), "icons/xpoint.svg", "更多").on_click(
-                |event, window, cx| {
+            plain(("playlist-panel-more", index), "icons/xpoint.svg", "更多").on_click({
+                let song = song.clone();
+                move |event, window, cx| {
                     cx.stop_propagation();
-                    crate::ui::components::show_song_menu(event.position(), window, cx);
-                },
-            ),
+                    crate::ui::components::show_song_menu(
+                        event.position(),
+                        song.clone(),
+                        window,
+                        cx,
+                    );
+                }
+            }),
         )
         .into_any_element()
 }

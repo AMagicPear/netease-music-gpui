@@ -537,8 +537,8 @@ mod tests {
     use gpui::px;
 
     use super::{
-        PAGE_SIDE_PADDING, ROW_HOVER_SHADOW_BLUR, ROW_HOVER_SHADOW_TAIL_SIGMAS,
-        hovered_row_after, index_column_width, play_count_label, visible_rows,
+        PAGE_SIDE_PADDING, ROW_HOVER_SHADOW_BLUR, ROW_HOVER_SHADOW_TAIL_SIGMAS, hovered_row_after,
+        index_column_width, play_count_label, visible_rows,
     };
 
     #[test]

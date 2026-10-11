@@ -12,8 +12,8 @@ use crate::ui::assets::{track_cover_image, track_cover_url};
 use crate::ui::components::{
     ACTION_BUTTON_HEIGHT, CELL_PADDING, DURATION_COLUMN_WIDTH, LIKE_COLUMN_WIDTH,
     PAGE_SIDE_PADDING, ROW_HEIGHT, SECONDARY_FONT_WEIGHT, SongDisplay, TabBar, TabChanged, TabItem,
-    TableColumn, artist_label, centered_empty, hovered_row_after, index_column_width, like_icon_path,
-    play_all_button, play_count_label, quality_badge_path, row_hover_icon, spinner,
+    TableColumn, artist_label, centered_empty, hovered_row_after, index_column_width,
+    like_icon_path, play_all_button, play_count_label, quality_badge_path, row_hover_icon, spinner,
     title_with_subtitle, virtual_table,
 };
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize};
@@ -182,7 +182,10 @@ impl SearchPage {
         }
     }
 
-    fn playback_state(playback: &Entity<PlaybackController>, cx: &App) -> (Option<u64>, bool, bool) {
+    fn playback_state(
+        playback: &Entity<PlaybackController>,
+        cx: &App,
+    ) -> (Option<u64>, bool, bool) {
         let playback = playback.read(cx);
         let snapshot = playback.snapshot();
         (
@@ -297,7 +300,11 @@ impl SearchPage {
                 .py(px(36.))
                 .flex()
                 .justify_center()
-                .child(spinner("search-loading-animation", 20., colors.muted_foreground))
+                .child(spinner(
+                    "search-loading-animation",
+                    20.,
+                    colors.muted_foreground,
+                ))
                 .into_any_element();
         }
         if let Some(error) = error {
@@ -388,8 +395,18 @@ impl SearchPage {
             |_| {},
             |this, key, hovered, cx| this.set_hovered_row(key, hovered, cx),
             // 行上右键与歌单页一致：弹出同一份歌曲原生菜单。
-            |_, _, position, window, cx| {
-                crate::ui::components::show_song_menu(position, window, cx)
+            |this, key, position, window, cx| {
+                let Some(song) = this
+                    .results
+                    .read(cx)
+                    .songs
+                    .iter()
+                    .find(|song| song.id == key)
+                    .cloned()
+                else {
+                    return;
+                };
+                crate::ui::components::show_song_menu(position, song, window, cx)
             },
             cx,
         )
@@ -680,51 +697,44 @@ impl SearchPage {
             )
             .child(
                 // 文字保持 flex_1 + min_w(0)，空间不足时截断文字，不改变列宽。
-                div()
-                    .min_w(px(0.))
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .child(
-                        div()
-                            .min_w(px(0.))
-                            .flex_1()
-                            .child(
-                                div()
-                                    .text_size(px(14.))
-                                    .text_color(if is_current_song {
-                                        colors.primary
-                                    } else {
-                                        colors.foreground
-                                    })
-                                    .truncate()
-                                    .child(title_with_subtitle(display, colors)),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(4.))
-                                    .min_w(px(0.))
-                                    .when_some(song.best_quality_level(), |row, level| {
-                                        row.child(
-                                            img(quality_badge_path(level)).h(px(13.)).flex_none(),
-                                        )
-                                    })
-                                    .child(
-                                        div()
-                                            .min_w(px(0.))
-                                            .truncate()
-                                            .font_weight(SECONDARY_FONT_WEIGHT)
-                                            .text_color(if is_current_song {
-                                                colors.primary
-                                            } else {
-                                                colors.muted_foreground
-                                            })
-                                            .child(artist_label(song, colors)),
-                                    ),
-                            ),
-                    ),
+                div().min_w(px(0.)).flex_1().flex().items_center().child(
+                    div()
+                        .min_w(px(0.))
+                        .flex_1()
+                        .child(
+                            div()
+                                .text_size(px(14.))
+                                .text_color(if is_current_song {
+                                    colors.primary
+                                } else {
+                                    colors.foreground
+                                })
+                                .truncate()
+                                .child(title_with_subtitle(display, colors)),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.))
+                                .min_w(px(0.))
+                                .when_some(song.best_quality_level(), |row, level| {
+                                    row.child(img(quality_badge_path(level)).h(px(13.)).flex_none())
+                                })
+                                .child(
+                                    div()
+                                        .min_w(px(0.))
+                                        .truncate()
+                                        .font_weight(SECONDARY_FONT_WEIGHT)
+                                        .text_color(if is_current_song {
+                                            colors.primary
+                                        } else {
+                                            colors.muted_foreground
+                                        })
+                                        .child(artist_label(song, colors)),
+                                ),
+                        ),
+                ),
             )
             .into_any_element()
     }

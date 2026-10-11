@@ -184,7 +184,10 @@ mod tests {
         assert!(results.loading && results.error.is_none());
         assert!(results.finish(4, Ok(vec![song(2), song(3)])));
         assert!(!results.loading);
-        assert_eq!(results.songs.iter().map(|song| song.id).collect::<Vec<_>>(), [2, 3]);
+        assert_eq!(
+            results.songs.iter().map(|song| song.id).collect::<Vec<_>>(),
+            [2, 3]
+        );
         results.clear();
         assert!(results.keywords.is_none() && results.songs.is_empty() && results.error.is_none());
         assert_eq!(results.generation, 5);

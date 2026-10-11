@@ -5,13 +5,13 @@ use gpui::*;
 
 use super::assets::{CoverPrefetch, thumbnail_url, track_cover_url};
 use super::components::{
-    PAGE_SIDE_PADDING, PLAYER_BAR_HEIGHT, PlayerBar, ResizeDragPreview, SidePanel, SidePanelContent,
-    SurfacePopover, icon_hover_color, window_drag_area,
+    PAGE_SIDE_PADDING, PLAYER_BAR_HEIGHT, PlayNext, PlayerBar, ResizeDragPreview, SidePanel,
+    SidePanelContent, SurfacePopover, icon_hover_color, window_drag_area,
 };
 use super::cover_color::{Backdrop, CoverColor, CoverGradient, gradient_layer};
 use super::now_playing::{NowPlaying, NowPlayingPage};
 use super::pages::search::OpenPlaylist;
-use super::pages::{playlist::PlaylistPage, search::SearchPage, ContentPage};
+use super::pages::{ContentPage, playlist::PlaylistPage, search::SearchPage};
 use super::sidebar::{LoginRequested, SidebarChanged, SidebarPage};
 use super::theme::{IconSize, PRESSED_ICON_ALPHA};
 use crate::playback::PlaybackController;
@@ -41,6 +41,8 @@ pub struct MainWindow {
     _background_subscriptions: Vec<Subscription>,
     cover_tint: CoverColor,
     cover_prefetch: CoverPrefetch,
+    /// 持有播放控制器，只为接住歌词菜单的「下一首播放」这一类全局派发的 action。
+    playback: Entity<PlaybackController>,
 }
 
 impl MainWindow {
@@ -75,6 +77,7 @@ impl MainWindow {
             _background_subscriptions: background_subscriptions,
             cover_tint: CoverColor::default(),
             cover_prefetch: CoverPrefetch::default(),
+            playback: playback.clone(),
         };
         this.sync_cover_prefetch(&playback, cx);
         this
@@ -143,7 +146,16 @@ impl Render for MainWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = Theme::global(cx).tokens.colors;
         let tint = self.playlist_tint(window, cx);
+        let playback = self.playback.clone();
         div()
+            // 歌曲菜单的「下一首播放」：原生菜单把 action 派发到窗口，冒泡上来后由这个根
+            // div 接住（元素级 on_action 在绘制阶段注册，避开「只能 paint 期间调用」的限制）。
+            // action 自己带着要插入的歌曲，直接交给控制器插到当前歌曲之后。
+            .on_action(move |action: &PlayNext, _window, cx| {
+                cx.update_entity(&playback, |controller, cx| {
+                    controller.insert_next(action.0.clone(), cx);
+                });
+            })
             .size_full()
             .flex()
             .flex_col()
@@ -267,7 +279,12 @@ impl MainContent {
         // InputState 是 EventEmitter<InputEvent>，PressEnter 即回车（含 IME 确认后的回车）。
         let search_results = cx.new(|_| SearchResults::default());
         let search_page = cx.new(|cx| {
-            SearchPage::new(library.clone(), playback.clone(), search_results.clone(), cx)
+            SearchPage::new(
+                library.clone(),
+                playback.clone(),
+                search_results.clone(),
+                cx,
+            )
         });
         let search_subscription = cx.subscribe(&search_input, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
@@ -723,9 +740,8 @@ impl MainContent {
                     }))
                     .on_click(cx.listener(|this, _, _, cx| {
                         cx.stop_propagation();
-                        this.side_panel.update(cx, |panel, cx| {
-                            panel.toggle(SidePanelContent::Messages, cx)
-                        });
+                        this.side_panel
+                            .update(cx, |panel, cx| panel.toggle(SidePanelContent::Messages, cx));
                     })),
             )
             .child(hover_icon(

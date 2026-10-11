@@ -25,7 +25,7 @@ use crate::state::{library::MusicLibrary, playlist_detail::PlaylistDetail};
 use crate::ui::assets::thumbnail_url;
 use crate::ui::components::{
     ACTION_BUTTON_HEIGHT, ACTION_BUTTON_PADDING, CELL_PADDING, COLUMN_GAP, DURATION_COLUMN_WIDTH,
-    HEADER_HEIGHT, LIKE_COLUMN_WIDTH, SECONDARY_FONT_WEIGHT, SongDisplay, ResizeDragPreview,
+    HEADER_HEIGHT, LIKE_COLUMN_WIDTH, ResizeDragPreview, SECONDARY_FONT_WEIGHT, SongDisplay,
     TabBar, TabChanged, TabItem, TableColumn, artist_label, centered_empty, hovered_row_after,
     index_column_width, like_icon_path, play_all_button, play_count_label, quality_badge_path,
     row_hover_icon, spinner, title_with_subtitle, virtual_table,
@@ -112,7 +112,7 @@ fn tag_row(tags: &[String], colors: ColorTokens) -> AnyElement {
 }
 
 /// 行 hover 时贴在标题右侧的那排操作图标：下载 / 收藏 / 评论 / 更多。
-fn row_actions(index: u64, colors: ColorTokens) -> AnyElement {
+fn row_actions(index: u64, song: &Song, colors: ColorTokens) -> AnyElement {
     // 四个图标只有 id / 路径 / 无障碍名不同，其余全都一样：尺寸用 header 那排的
     // `IconSize::Small`，灰度和三态交互在这里统一给。
     // 返回 `Stateful<Svg>`，需要交互的图标（收藏 / 更多）还能继续挂 `.on_click`。
@@ -152,11 +152,17 @@ fn row_actions(index: u64, colors: ColorTokens) -> AnyElement {
         ))
         // 最右侧的「更多」弹出原生菜单。
         .child(
-            action_icon("playlist-song-more", "icons/xpoint.svg", "更多").on_click(
-                |event, window, cx| {
-                    crate::ui::components::show_song_menu(event.position(), window, cx)
-                },
-            ),
+            action_icon("playlist-song-more", "icons/xpoint.svg", "更多").on_click({
+                let song = song.clone();
+                move |event, window, cx| {
+                    crate::ui::components::show_song_menu(
+                        event.position(),
+                        song.clone(),
+                        window,
+                        cx,
+                    )
+                }
+            }),
         )
         .into_any_element()
 }
@@ -889,7 +895,7 @@ impl PlaylistPage {
                     )
                     // 隐形元素仍占宽度且可点击，因此只在 hover 时挂载操作图标。
                     .when(self.hovered_row == Some(song.id), |title| {
-                        title.child(row_actions(song.id, colors))
+                        title.child(row_actions(song.id, song, colors))
                     }),
             )
             .into_any_element()
@@ -1291,8 +1297,18 @@ impl Render for PlaylistPage {
                     |this, index, hovered, cx| this.set_hovered_row(index, hovered, cx),
                     // 行上右键和点「更多」图标是同一个效果：都弹这份原生菜单，
                     // 位置也都取鼠标点的窗口坐标（「更多」取的是它自己的点击位置）。
-                    |_, _, position, window, cx| {
-                        crate::ui::components::show_song_menu(position, window, cx)
+                    |this, key, position, window, cx| {
+                        let Some(song) = this
+                            .detail
+                            .read(cx)
+                            .songs
+                            .iter()
+                            .find(|song| song.id == key)
+                            .cloned()
+                        else {
+                            return;
+                        };
+                        crate::ui::components::show_song_menu(position, song, window, cx)
                     },
                     cx,
                 )

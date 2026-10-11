@@ -489,7 +489,6 @@ impl PlaybackController {
     }
 
     /// 下一首插入：插到当前歌曲之后。「播完这首就听它」和心动模式穿插推荐都走这里。
-    #[allow(dead_code, reason = "下一首插入与心动模式尚未接入 UI")]
     pub fn insert_next(&mut self, song: Song, cx: &mut Context<Self>) {
         self.cancel_preload();
         match self.queue_cursor {

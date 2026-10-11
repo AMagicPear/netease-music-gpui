@@ -1006,12 +1006,14 @@ impl Render for PlayerBar {
                                 ))
                                 // 松开时才开合，和其它浮层触发一致；点击不冒泡到
                                 // 播放栏根部的歌词页开合。
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    this.side_panel.update(cx, |panel, cx| {
-                                        panel.toggle(SidePanelContent::PlayQueue, cx)
-                                    });
-                                })),
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.side_panel.update(cx, |panel, cx| {
+                                            panel.toggle(SidePanelContent::PlayQueue, cx)
+                                        });
+                                    },
+                                )),
                             ),
                     )
                     // 右侧：收藏、音量等工具

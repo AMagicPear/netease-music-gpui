@@ -88,7 +88,10 @@ pub(crate) fn parse_forwards(forwards: &Value) -> Vec<MessageItem> {
     array_of(forwards)
         .iter()
         .map(|forward| {
-            let payload = forward["json"].as_str().map(json_snippet).unwrap_or_default();
+            let payload = forward["json"]
+                .as_str()
+                .map(json_snippet)
+                .unwrap_or_default();
             let user = [
                 &payload["comment"]["user"],
                 &payload["user"],
@@ -129,7 +132,10 @@ pub(crate) fn parse_notices(notices: &Value) -> Vec<MessageItem> {
     array_of(notices)
         .iter()
         .map(|notice| {
-            let payload = notice["notice"].as_str().map(json_snippet).unwrap_or_default();
+            let payload = notice["notice"]
+                .as_str()
+                .map(json_snippet)
+                .unwrap_or_default();
             let (nickname, avatar_url) = user_of(&payload["user"]);
             MessageItem {
                 nickname,
