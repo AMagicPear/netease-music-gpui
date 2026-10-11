@@ -12,7 +12,7 @@ use gpui::{
     MouseButton, MouseDownEvent, ParentElement, Pixels, RenderOnce, StyleRefinement, Styled,
     Window, div, ease_out_quint, px,
 };
-use gpui_kit::base::{Popup, Presence, StyledExt as _, Theme, Transition};
+use gpui_kit::base::{ColorTokens, Popup, Presence, StyledExt as _, Theme, Transition};
 use smallvec::SmallVec;
 
 /// 浮层统一圆角。播放队列抽屉复用它（只取左侧两角），所有浮层的圆角量始终一致。
@@ -41,6 +41,9 @@ pub(in crate::ui) struct SurfacePopover {
     anchor: Anchor,
     offset: Pixels,
     on_mouse_down_out: Option<Rc<dyn Fn(&MouseDownEvent, &mut Window, &mut App)>>,
+    /// 调用方色板。播放栏在歌词页会过渡到暗色板，浮层要跟着用同一套
+    /// （否则白字配浅底）；不传则用全局主题。
+    palette: Option<ColorTokens>,
     children: SmallVec<[AnyElement; 1]>,
     style: StyleRefinement,
 }
@@ -54,6 +57,7 @@ impl SurfacePopover {
             anchor: Anchor::BottomCenter,
             offset: px(12.),
             on_mouse_down_out: None,
+            palette: None,
             children: SmallVec::new(),
             style: StyleRefinement::default(),
         }
@@ -68,6 +72,13 @@ impl SurfacePopover {
     /// 与触发器锚点方向的间距。
     pub fn offset(mut self, offset: Pixels) -> Self {
         self.offset = offset;
+        self
+    }
+
+    /// 浮层使用的色板（surface 底色、默认文字色）。
+    /// 深色上下文（如歌词页上的播放栏）必须传入自己的混合色板。
+    pub fn colors(mut self, colors: ColorTokens) -> Self {
+        self.palette = Some(colors);
         self
     }
 
@@ -95,7 +106,8 @@ impl Styled for SurfacePopover {
 
 impl RenderOnce for SurfacePopover {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let colors = Theme::global(cx).tokens.colors;
+        let theme = Theme::global(cx).tokens.colors;
+        let colors = self.palette.clone().unwrap_or(theme.clone());
         // 进出场共用一条 Presence：`should_render()` 在退场期间仍为真，
         // 弹层会继续挂着直到动画放完才卸载——退场动画能存在全靠这一步。
         let presence = Presence::new((self.id.clone(), "motion"), self.open)
@@ -120,7 +132,8 @@ impl RenderOnce for SurfacePopover {
             .id((self.id, "surface"))
             .bg(colors.surface)
             .rounded(SURFACE_RADIUS)
-            .shadow(vec![surface_shadow(colors)])
+            // 阴影永远是墨色的：深色面板上不该出现白色光晕。
+            .shadow(vec![surface_shadow(theme)])
             .text_color(colors.foreground)
             .opacity(presence.progress)
             .top(travel * (1. - presence.progress))

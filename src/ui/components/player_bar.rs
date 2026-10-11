@@ -336,6 +336,9 @@ impl PlayerBar {
         // 这里只给尺寸、文字色和内容。
         SurfacePopover::new("player-quality-popover", was_open, trigger)
             .anchor(Anchor::BottomCenter)
+            // 播放栏在歌词页会过渡到暗色板，浮层必须用同一套，
+            // 否则全局浅色 surface 配上暗色板的浅文字就读不出来了。
+            .colors(colors.clone())
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                 this.set_quality_popover(false, cx);
             }))
