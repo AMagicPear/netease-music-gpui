@@ -28,6 +28,15 @@ def assemble(root, executable, output, platform, version):
                 "CFBundlePackageType": "APPL",
                 "CFBundleShortVersionString": version,
                 "CFBundleVersion": version,
+                # 与官方客户端一致声明 orpheus scheme，网页「点击打开客户端」
+                # 按钮可以唤起本应用；不主动抢系统默认处理器。
+                "CFBundleURLTypes": [
+                    {
+                        "CFBundleTypeRole": "Viewer",
+                        "CFBundleURLName": "orpheus",
+                        "CFBundleURLSchemes": ["orpheus"],
+                    }
+                ],
                 "NSHighResolutionCapable": True,
             }, file)
         for language, name in (("en", "NetEase Music"), ("zh-Hans", "网易云音乐"), ("zh-Hant", "网易云音乐")):

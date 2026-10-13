@@ -5,10 +5,14 @@ use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem},
 };
 
+use crate::api::MusicApi;
 use crate::models::PlayMode;
 use crate::playback::PlaybackController;
 use crate::state::library::MusicLibrary;
 use crate::ui::shell::MainWindow;
+
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 
 /// Dock 右键菜单里可触发的动作。它们只转发到播放控制器 / 音乐库。
 #[cfg(target_os = "macos")]
@@ -34,6 +38,8 @@ mod dock_actions {
 struct Desktop {
     window: AnyWindowHandle,
     view: Entity<MainWindow>,
+    /// 网页唤起后台取回数据后要提交播放队列，需要控制器句柄。
+    playback: Entity<PlaybackController>,
     /// 音乐库；收藏弹窗要显示歌单列表，需要读它。
     library: Entity<MusicLibrary>,
     bounds: WindowBounds,
@@ -59,6 +65,7 @@ pub fn init(
     cx.set_global(Desktop {
         window,
         view,
+        playback: playback.clone(),
         library: library.clone(),
         bounds,
         collect_window: None,
@@ -83,6 +90,11 @@ pub fn init(
 /// 音乐库 Entity；窗口创建后一直存在，收藏弹窗用它读歌单列表。
 pub(crate) fn library(cx: &App) -> Option<Entity<MusicLibrary>> {
     Some(cx.try_global::<Desktop>()?.library.clone())
+}
+
+/// 播放控制器 Entity；网页唤起用它提交播放队列。
+pub(crate) fn playback(cx: &App) -> Option<Entity<PlaybackController>> {
+    Some(cx.try_global::<Desktop>()?.playback.clone())
 }
 
 /// 当前打开的收藏弹窗句柄；`None` 表示没有打开。
@@ -237,6 +249,139 @@ fn build_dock_menu(state: DockMenuState) -> Vec<gpui::MenuItem> {
         gpui::MenuItem::action("随机播放", dock_actions::ShufflePlayback)
             .checked(mode == PlayMode::Shuffle),
     ]
+}
+
+/// 网页「点击打开客户端」按钮的唤起目标。官方网页把参数 JSON 编成 base64
+/// 放在 orpheus:// 后面，如 {"type":"song","id":"21948077","cmd":"play"}。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum OrpheusTarget {
+    Song(u64),
+    Playlist(u64),
+}
+
+/// 解析 orpheus:// 唤起链接。官方网页用 `location.href = "orpheus://" + btoa(JSON)`
+/// 触发，cmd 只区分 play/download，这里统一按播放处理；其余类型（专辑、节目等）不响应。
+fn parse_orpheus_url(url: &str) -> Option<OrpheusTarget> {
+    let payload = url.strip_prefix("orpheus://")?.trim();
+    // URL 传递时可能丢掉 base64 尾部的 `=` 填充，补齐再解码。
+    let mut payload = payload.to_string();
+    while payload.len() % 4 != 0 {
+        payload.push('=');
+    }
+    let json = BASE64.decode(payload.as_bytes()).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&json).ok()?;
+    let id = match &value["id"] {
+        serde_json::Value::String(id) => id.parse().ok()?,
+        serde_json::Value::Number(id) => id.as_u64()?,
+        _ => return None,
+    };
+    match value["type"].as_str()? {
+        "song" => Some(OrpheusTarget::Song(id)),
+        "playlist" => Some(OrpheusTarget::Playlist(id)),
+        _ => None,
+    }
+}
+
+/// 处理系统转来的 orpheus:// 唤起：解析出目标，后台取回数据后立即播放，并把窗口带回前台。
+pub fn handle_open_urls(urls: Vec<String>, cx: &mut App) {
+    let mut targets = Vec::new();
+    for url in urls {
+        match parse_orpheus_url(&url) {
+            Some(target) => targets.push(target),
+            None => eprintln!("忽略无法识别的唤起链接：{url}"),
+        }
+    }
+    if targets.is_empty() {
+        return;
+    }
+    show_window(cx);
+    let Some(playback) = playback(cx) else {
+        return;
+    };
+    for target in targets {
+        play_orpheus_target(target, playback.clone(), cx);
+    }
+}
+
+/// 先发请求再提交播放：网络在 Tokio 运行时上，结果回到 GPUI 主线程交给播放控制器。
+fn play_orpheus_target(target: OrpheusTarget, playback: Entity<PlaybackController>, cx: &mut App) {
+    cx.spawn(async move |cx| {
+        let fetched = match target {
+            OrpheusTarget::Song(id) => {
+                let request = cx.update(|cx| {
+                    let api = MusicApi::global(cx);
+                    api.runtime
+                        .spawn(MusicApi::song_detail(api.client.clone(), id))
+                });
+                // 任务被取消按请求失败处理。
+                request
+                    .await
+                    .unwrap_or_else(|_| Err("歌曲详情请求任务失败".into()))
+                    .map(|song| vec![song])
+            }
+            OrpheusTarget::Playlist(id) => {
+                let request = cx.update(|cx| {
+                    let api = MusicApi::global(cx);
+                    api.runtime
+                        .spawn(MusicApi::playlist(api.client.clone(), id))
+                });
+                request
+                    .await
+                    .unwrap_or_else(|_| Err("歌单请求任务失败".into()))
+                    .map(|(_, songs)| songs)
+            }
+        };
+        let songs = match fetched {
+            Ok(songs) => songs,
+            Err(error) => {
+                eprintln!("打开网页唤起的内容失败：{error}");
+                return;
+            }
+        };
+        let _ = playback.update(cx, |playback, cx| match target {
+            OrpheusTarget::Song(id) => playback.play_list(0, songs, id, cx),
+            OrpheusTarget::Playlist(id) => playback.play_list_from_start(id, songs, cx),
+        });
+    })
+    .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    // 不能用 `use super::*`：父模块顶部是 `use gpui::*`，glob 会把 GPUI 的全部
+    // 项重新导入 tests 模块，`#[test]` 展开时要为新模块重做名字解析，递归深度
+    // 直接超过默认上限 128。这里只显式引入用到的名字。
+    use super::{BASE64, OrpheusTarget, parse_orpheus_url};
+    // BASE64 只是引擎常量，调用 decode/encode 还需要 Engine trait 在作用域里。
+    use base64::Engine as _;
+
+    #[test]
+    fn parses_song_url_from_web_page() {
+        // music.163.com 歌曲页「点击打开客户端」实际发出的链接。
+        let url = "orpheus://eyJ0eXBlIjoic29uZyIsImlkIjoiMjE5NDgwNzciLCJjbWQiOiJwbGF5In0=";
+        assert_eq!(parse_orpheus_url(url), Some(OrpheusTarget::Song(21948077)));
+    }
+
+    #[test]
+    fn parses_playlist_and_tolerates_missing_padding() {
+        let url = "orpheus://eyJ0eXBlIjoicGxheWxpc3QiLCJpZCI6IjM3Nzg2NzgiLCJjbWQiOiJwbGF5In0";
+        assert_eq!(
+            parse_orpheus_url(url),
+            Some(OrpheusTarget::Playlist(3778678))
+        );
+    }
+
+    #[test]
+    fn rejects_unrelated_payloads() {
+        // base64 有效但不是 JSON。
+        assert_eq!(parse_orpheus_url("orpheus://aGVsbG8="), None);
+        assert_eq!(parse_orpheus_url("https://music.163.com/song?id=1"), None);
+        assert_eq!(parse_orpheus_url("orpheus://"), None);
+        // JSON 有效但不是歌曲或歌单。这里直接 encode，而不是 decode 一段手写的
+        // base64：base64 载荷长度必须是 4 的倍数，手写字符串很容易漏掉填充。
+        let encoded = BASE64.encode(br#"{"type":"album","id":"1"}"#);
+        assert_eq!(parse_orpheus_url(&format!("orpheus://{encoded}")), None);
+    }
 }
 
 pub fn configure_window(window: &Window, cx: &App) {

@@ -135,6 +135,23 @@ impl MusicApi {
         ]
     }
 
+    /// 单曲详情；歌单分批加载与网页 orpheus:// 唤起共用这个接口。
+    pub async fn song_detail(client: ApiClient, song_id: u64) -> Result<Song, String> {
+        let mut response =
+            Self::request(client.song_detail(&Query::new().param("ids", &song_id.to_string())))
+                .await?;
+        let mut songs: Vec<Song> = serde_json::from_value(response.body["songs"].take())
+            .map_err(|error| format!("歌曲详情格式无效：{error}"))?;
+        // 权益拿不到不影响播放本身，音质判断会退回歌曲自带的变体字段。
+        let privileges: Vec<Privilege> =
+            serde_json::from_value(response.body["privileges"].take()).unwrap_or_default();
+        attach_privileges(&mut songs, privileges);
+        songs
+            .into_iter()
+            .next()
+            .ok_or_else(|| format!("歌曲 {song_id} 不存在"))
+    }
+
     pub async fn song_lyrics(client: ApiClient, song_id: u64) -> Result<Vec<LyricLine>, String> {
         let response =
             Self::request(client.lyric(&Query::new().param("id", &song_id.to_string()))).await?;

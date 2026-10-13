@@ -34,6 +34,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_assets(assets)
         .with_quit_mode(QuitMode::Explicit);
     application.on_reopen(desktop::show_window);
+    // 网页「点击打开客户端」按钮用 orpheus:// 唤起本应用。原生回调没有 &mut App，
+    // 先转发进通道，等事件循环跑起来后再接回 GPUI 主线程处理。
+    let (open_url_tx, mut open_url_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<String>>();
+    application.on_open_urls(move |urls| {
+        let _ = open_url_tx.send(urls);
+    });
     application.run(move |cx: &mut App| {
         cx.set_global(api);
         theme::load_fonts(cx).expect("failed to load external dolphin fonts");
@@ -100,6 +106,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap();
         let (playback, library) = desktop_handles.expect("open_window 会运行构建闭包");
         desktop::init(window, view, playback, library, cx);
+        cx.spawn(async move |cx| {
+            while let Some(urls) = open_url_rx.recv().await {
+                cx.update(|cx| desktop::handle_open_urls(urls, cx));
+            }
+        })
+        .detach();
     });
     Ok(())
 }

@@ -27,6 +27,9 @@ anyhow = "1"
 # 用于随机播放；gpui 依赖同一版本
 rand = "0.9"
 sha2 = "0.10"
+# 解析网页「点击打开客户端」按钮的 orpheus:// 唤起链接（base64 载荷）。
+# ncm-api-rs 已带入同一版本，不新增下载。
+base64 = "0.22"
 tempfile = "3"
 # 二维码编码；SVG 直接交给 GPUI 渲染，不需要图像编码依赖。
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
