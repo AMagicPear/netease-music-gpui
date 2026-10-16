@@ -35,6 +35,32 @@ const SCROLL_END_TOLERANCE: f32 = 1.;
 const RETURN_DURATION: Duration = Duration::from_millis(600);
 /// 补间的收敛容差，同时也是「偏移被谁动过」的判定门限。
 const TWEEN_EPSILON: f32 = 0.5;
+/// 吸附用的弹簧：临界阻尼（ζ = 1），ω₀ = 15 rad/s。
+///
+/// 临界阻尼就是不过冲——吸附是纠偏动作，来回摆一下会让人觉得页面在犹豫。
+/// ω₀ 取 15：整页的落差（约 700px）0.48s 落定，几十像素的小修正 0.27s。
+/// 弹簧的收敛时间只随落差的**对数**增长，所以小修正不会跟着一起变慢。
+const SETTLE_SPRING: SpringConfig = SpringConfig::new(225., 30., 1.);
+/// 弹簧的收敛容差（像素）。
+const SETTLE_EPSILON: f32 = 0.5;
+/// 停手判定：多久没有滚轮事件就算「手停了」。
+///
+/// 触控板抬指之后惯性还会一路派发事件，所以手势期间事件是连续的，一个短间隙
+/// 就足够说明停手；鼠标滚轮没有抬指信号、两次咔哒之间本来就可能隔着几百毫秒，
+/// 手指还按着的时候也只是在歇手，这两种情况都得用更长的窗口。
+const SETTLE_QUIET_FINE: Duration = Duration::from_millis(110);
+const SETTLE_QUIET_COARSE: Duration = Duration::from_millis(400);
+/// 吸附落点的迟滞带。停在中段时按「最后往哪推」收紧或放宽：
+/// 往评论区推着停下，四成就算数；往歌词页推着停下，得退到六成才回去。
+/// 来向不明（只有零星事件）才退回中点。中间态是过路的，不该因为几像素之差
+/// 就翻回去；但「推到哪儿算数」得听用户的意图，不能只看停在哪。
+const SETTLE_COMMIT: (f32, f32) = (0.4, 0.6);
+/// 判定「手往哪推」的最小单次位移（像素）。惯性的尾巴越来越小、方向却没变，
+/// 噪声门限以下的事件不该改写来向。
+const DIRECTION_NOISE: f32 = 0.5;
+/// 页头「播放器模式」与悬浮「发布评论」跟着翻页进度淡出 / 淡入的区间（占一整屏的比例）。
+const HEADER_FADE: (f32, f32) = (0.1, 0.5);
+const PUBLISH_FADE: (f32, f32) = (0.55, 0.95);
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum SongTab {
@@ -44,72 +70,214 @@ enum SongTab {
     Similar,
 }
 
-/// 外层滚动的补间，只服务「回到唱片」这一条程序化路径。
+/// 外层滚动的程序化运动。用户自己的滚轮不走这里。
 ///
-/// 其余位移全走原生滚动，补间到站就彻底放手：目标留着不清，下一次单靠
-/// 「目标没变」会被挡掉，人就回不去了。跑动中一旦发现偏移被别的来源改过
-/// （滚轮、原生惯性、窗口补位），立刻让位——手永远优先于动画。
+/// 两种运动的性格不一样，所以是两个变体而不是一套参数：
+/// - [`Motion::Command`]：点「回到唱片」发出的命令，固定节拍，和整页展开 / 收起同拍；
+/// - [`Motion::Settle`]：延迟吸附，从当前偏移出发的临界阻尼弹簧。
+///
+/// 两者共用一条规矩：跑动中一旦发现偏移被别的来源改过（滚轮、窗口补位），
+/// 立刻让位——手永远优先于动画。
 #[derive(Default)]
-struct ScrollTween {
-    /// 目标偏移；`None` 表示不接管。
-    target: Option<Pixels>,
-    /// 起点与起始时刻。
-    playing: Option<(f32, Instant)>,
+struct ScrollMotion {
+    active: Option<Motion>,
     /// 上一帧写进去的值，用来认「谁动了偏移」。
     written: Option<f32>,
 }
 
-impl ScrollTween {
-    /// 瞄准一个目标偏移；已经在目标上就什么都不做。
-    fn aim(&mut self, handle: &ScrollHandle, target: Pixels, now: Instant) {
-        if self.target == Some(target) {
+enum Motion {
+    /// 固定节拍的补间。
+    Command {
+        from: f32,
+        target: f32,
+        started: Instant,
+    },
+    /// 弹簧收敛。速度从 0 起算——手已经停了，落定本身不该带冲劲。
+    Settle {
+        target: f32,
+        spring: SpringState,
+        updated: Instant,
+    },
+}
+
+impl ScrollMotion {
+    fn is_active(&self) -> bool {
+        self.active.is_some()
+    }
+
+    /// 命令式补间：从当前位置滑到 `target`。已经在飞向同一个目标就什么都不做。
+    fn command(&mut self, handle: &ScrollHandle, target: Pixels, now: Instant) {
+        let from = f32::from(handle.offset().y);
+        let to = f32::from(target);
+        if let Some(Motion::Command { target, .. }) = &self.active
+            && *target == to
+        {
             return;
         }
-        let from = f32::from(handle.offset().y);
-        if (f32::from(target) - from).abs() <= TWEEN_EPSILON {
+        if (to - from).abs() <= TWEEN_EPSILON {
             *self = Self::default();
             return;
         }
-        self.target = Some(target);
-        self.playing = Some((from, now));
+        self.active = Some(Motion::Command {
+            from,
+            target: to,
+            started: now,
+        });
         self.written = Some(from);
     }
 
-    fn is_playing(&self) -> bool {
-        self.playing.is_some()
+    /// 弹簧收敛：从当前位置停到 `target`。已经在目标上就什么都不做。
+    fn settle(&mut self, handle: &ScrollHandle, target: Pixels, now: Instant) {
+        let from = f32::from(handle.offset().y);
+        let to = f32::from(target);
+        if (to - from).abs() <= SETTLE_EPSILON {
+            *self = Self::default();
+            return;
+        }
+        self.active = Some(Motion::Settle {
+            target: to,
+            spring: SpringState {
+                position: from,
+                velocity: 0.,
+            },
+            updated: now,
+        });
+        self.written = Some(from);
     }
 
-    /// 推进补间；还在飞就顺带要下一帧。
+    /// 推进运动；还在动就顺带要下一帧。
     fn step(&mut self, handle: &ScrollHandle, window: &mut Window, now: Instant) -> bool {
-        let playing = self.advance(handle, now);
-        if playing {
+        let running = self.advance(handle, now);
+        if running {
             window.request_animation_frame();
         }
-        playing
+        running
     }
 
     fn advance(&mut self, handle: &ScrollHandle, now: Instant) -> bool {
-        let (Some((from, started)), Some(target)) = (self.playing, self.target) else {
+        let Some(mut active) = self.active.take() else {
             return false;
         };
-        // 上一帧写下的偏移被改过：有人接管了滚动，补间让位。
+        // 上一帧写下的偏移被改过：有人接管了滚动，让位。
         if let Some(written) = self.written
             && (f32::from(handle.offset().y) - written).abs() > TWEEN_EPSILON
         {
             *self = Self::default();
             return false;
         }
-        let progress = (now.saturating_duration_since(started).as_secs_f32()
-            / RETURN_DURATION.as_secs_f32())
-        .min(1.);
-        let y = from + (f32::from(target) - from) * ease_out_quint()(progress);
+        let (y, done) = match &mut active {
+            Motion::Command {
+                from,
+                target,
+                started,
+            } => {
+                let progress = (now.saturating_duration_since(*started).as_secs_f32()
+                    / RETURN_DURATION.as_secs_f32())
+                .min(1.);
+                (
+                    *from + (*target - *from) * ease_out_quint()(progress),
+                    progress >= 1.,
+                )
+            }
+            Motion::Settle {
+                target,
+                spring,
+                updated,
+            } => {
+                *spring = SETTLE_SPRING.step(
+                    *spring,
+                    *target,
+                    now.saturating_duration_since(*updated).as_secs_f32(),
+                );
+                *updated = now;
+                (
+                    spring.position,
+                    SETTLE_SPRING.is_settled(*spring, *target, SETTLE_EPSILON),
+                )
+            }
+        };
         handle.set_offset(point(px(0.), px(y)));
         self.written = Some(y);
-        if progress < 1. {
-            return true;
+        if done {
+            // 到站整块清空：目标留着不清，下一次点「回到唱片」会被「目标没变」挡掉。
+            *self = Self::default();
+            return false;
         }
-        *self = Self::default();
-        false
+        self.active = Some(active);
+        true
+    }
+}
+
+/// 最近一次滚轮事件的样本。
+#[derive(Clone, Copy)]
+struct WheelSample {
+    at: Instant,
+    /// 精确位移（触控板）还是按行计的（鼠标滚轮）。
+    fine: bool,
+    /// 手指抬起来了没有。只有触控板会给出这个信号。
+    lifted: bool,
+    /// 方向：正数是往评论区推，负数是往歌词页推。
+    direction: f32,
+}
+
+/// 「手停了没有」。
+///
+/// 滚轮事件是这一页唯一拿得到的「手」的信号。`ScrollWheelEvent::touch_phase`
+/// 只有触控板会填（鼠标滚轮恒为 `Moved`），手指离开后惯性也还是 `Moved`，
+/// 所以相位当不了「松手」用，只能配合事件间隙一起判。
+#[derive(Default)]
+struct WheelWatch {
+    last: Option<WheelSample>,
+}
+
+impl WheelWatch {
+    fn note(&mut self, now: Instant, event: &ScrollWheelEvent, line_height: Pixels) {
+        let delta = f32::from(event.delta.pixel_delta(line_height).y);
+        // 触控板一次新手势会带 `Started`：来向从这里重新算起，免得上一轮的方向
+        // 被一串噪声事件继承下来。
+        let carried = if event.touch_phase == TouchPhase::Started {
+            0.
+        } else {
+            self.last.map_or(0., |sample| sample.direction)
+        };
+        let direction = if delta.abs() >= DIRECTION_NOISE {
+            delta.signum()
+        } else {
+            carried
+        };
+        let lifted = match event.touch_phase {
+            TouchPhase::Started => false,
+            TouchPhase::Ended | TouchPhase::Cancelled => true,
+            // 惯性段和鼠标滚轮都落在这里，沿用上一次的判断。
+            TouchPhase::Moved => self.last.is_some_and(|sample| sample.lifted),
+        };
+        self.last = Some(WheelSample {
+            at: now,
+            fine: event.delta.precise(),
+            lifted,
+            direction,
+        });
+    }
+
+    /// 手停了没有；停了就把这轮样本取走，下一次手势重新计时。
+    fn released(&mut self, now: Instant) -> Option<f32> {
+        let sample = self.last?;
+        // 只有「触控板抬了指」才认短窗口：手指还按着时只是在歇手，别抢。
+        let quiet = if sample.fine && sample.lifted {
+            SETTLE_QUIET_FINE
+        } else {
+            SETTLE_QUIET_COARSE
+        };
+        if now.saturating_duration_since(sample.at) < quiet {
+            return None;
+        }
+        self.last = None;
+        Some(sample.direction)
+    }
+
+    /// 还在等窗口过去——这时要下一帧才判得了。
+    fn waiting(&self) -> bool {
+        self.last.is_some()
     }
 }
 
@@ -126,8 +294,10 @@ pub(in crate::ui) struct NowPlayingPage {
     vinyl: Entity<Vinyl>,
     summary_vinyl: Entity<Vinyl>,
     scroll: ScrollHandle,
-    /// 「回到唱片」的补间。只动外层，评论列表原地不动。
-    scroll_tween: ScrollTween,
+    /// 外层的程序化运动：「回到唱片」的补间和延迟吸附共用它，只动外层。
+    scroll_motion: ScrollMotion,
+    /// 滚轮事件的采样。延迟吸附靠它判「手停了没有」和「最后往哪推」。
+    wheel_watch: WheelWatch,
     cover_color: CoverColor,
     backdrop: Backdrop,
     song_id: Option<u64>,
@@ -142,7 +312,8 @@ struct FrameData {
     content_width: f32,
     side: f32,
     summary_top: f32,
-    show_comments: bool,
+    /// 评论区顶到视口顶的进度：0 = 歌词页，1 = 评论区整屏到位。
+    comment_progress: f32,
     song_at_rest: bool,
     /// 评论列表这一帧听谁的，见 [`ListMode`]。
     list_mode: ListMode,
@@ -247,7 +418,8 @@ impl NowPlayingPage {
             vinyl,
             summary_vinyl,
             scroll,
-            scroll_tween: ScrollTween::default(),
+            scroll_motion: ScrollMotion::default(),
+            wheel_watch: WheelWatch::default(),
             cover_color: CoverColor::default(),
             backdrop,
             song_id: None,
@@ -276,20 +448,60 @@ impl NowPlayingPage {
 
     /// 回到歌词页：换歌、重新打开这一页都从这里起步。
     fn reset_page(&mut self) {
-        self.scroll_tween = ScrollTween::default();
+        self.scroll_motion = ScrollMotion::default();
+        self.wheel_watch = WheelWatch::default();
         self.scroll.set_offset(point(px(0.), px(0.)));
     }
 
     /// 「回到唱片」：外层滑回歌词页。
     ///
     /// 只有外层偏移在动——评论列表保持自己的位置，整页连着评论区一起升上去，
-    /// 中途不会有内容跳变。补间期间滚轮归谁见 [`ListMode::Held`]。
+    /// 中途不会有内容跳变。运动期间滚轮归谁见 [`ListMode::Held`]。
     fn return_to_song(&mut self, cx: &mut Context<Self>) {
+        self.wheel_watch = WheelWatch::default();
         if cx.reduce_motion() {
             self.scroll.set_offset(point(px(0.), px(0.)));
         } else {
             let now = cx.background_executor().now();
-            self.scroll_tween.aim(&self.scroll, px(0.), now);
+            self.scroll_motion.command(&self.scroll, px(0.), now);
+        }
+        cx.notify();
+    }
+
+    /// 延迟吸附：手停下来之后，如果这一屏停在两个静止点之间，就把它送到该去的那一边。
+    ///
+    /// 「延迟」是这套交互的要点。两屏各占一整屏、中间态不是合法的落脚点，所以
+    /// 停在中间终究要被送走；但**不**在用户还在推的时候改他的位置——那正是官方
+    /// 客户端「定点强制滚动」手感的来源。这里让自由滚动一直连到手指离开，等滚轮
+    /// 事件彻底静下来再收敛，用户看到的是「我停稳了，页面自己归位」。
+    fn settle_if_idle(
+        &mut self,
+        expanded: bool,
+        page_height: f32,
+        now: Instant,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !expanded || self.scroll_motion.is_active() {
+            return;
+        }
+        let scrolled = -f32::from(self.scroll.offset().y);
+        // 两个静止点本来就是合法的落脚点，只有中间地带才需要归位。
+        if song_page_at_rest(scrolled) || reached_comments(scrolled, page_height) {
+            return;
+        }
+        let Some(direction) = self.wheel_watch.released(now) else {
+            if self.wheel_watch.waiting() {
+                // 还在等窗口过去：要下一帧才接着判。
+                window.request_animation_frame();
+            }
+            return;
+        };
+        let target = settle_target(scrolled, page_height, direction);
+        if cx.reduce_motion() {
+            self.scroll.set_offset(point(px(0.), target));
+        } else {
+            self.scroll_motion.settle(&self.scroll, target, now);
         }
         cx.notify();
     }
@@ -312,7 +524,8 @@ impl NowPlayingPage {
 
     /// 收起时的副作用：停掉歌词跟随、复位评论区，和展开时对称。
     fn on_collapse(&mut self, cx: &mut Context<Self>) {
-        self.scroll_tween = ScrollTween::default();
+        self.scroll_motion = ScrollMotion::default();
+        self.wheel_watch = WheelWatch::default();
         self.lyrics
             .update(cx, |view, cx| view.set_active(false, cx));
         self.comments
@@ -345,20 +558,22 @@ impl NowPlayingPage {
         let reveal = NowPlaying::reveal(expanded, window, cx);
         // 摘要条此刻在屏幕上的位置，唱片 / 摘要唱片的绘制用它做连续性判断。
         let summary_top = page_height + HEADER_TOP_INSET + f32::from(self.scroll.offset().y);
-        // 「在不在评论区」从滚动位置推导：滚过半屏就算。原生滚动每一步都会
-        // 通知本页重绘，这个值跟着滚动连续更新。
+        // 「在不在评论区」不再是一个布尔位，而是这一屏翻过去的连续进度。页头文案和
+        // 悬浮按钮都跟着它淡出 / 淡入：在中点硬切会在翻页途中造出一次肉眼可见的
+        // 状态跳变，而那一刻场景里没有任何别的信号说明「换了状态」。原生滚动每一步
+        // 都会通知本页重绘，这个值跟着滚动连续更新。
         let scrolled = -f32::from(self.scroll.offset().y);
-        let show_comments = scrolled >= page_height * 0.5;
+        let comment_progress = (scrolled / page_height).clamp(0., 1.);
         // 两屏各有一个静止点，滚轮只归「已经停住」的那一屏，路上（两个静止点之间）
         // 一律归外层。判定都从偏移算：0 是歌词页，页高是评论区。
         //
         // 这不是洁癖——两屏的嵌套滚动都抢在指针前面注册监听，只要露出一点、
         // 指针又在它上面，就会把位移截走，外层这一屏从此停在中途，再也翻不完。
-        let song_at_rest = scrolled <= SCROLL_END_TOLERANCE;
-        // 评论列表这一帧听谁的。补间插在最前面：外层正在飞的那几百毫秒里，
+        let song_at_rest = song_page_at_rest(scrolled);
+        // 评论列表这一帧听谁的。程序化运动插在最前面：外层正在飞的那几百毫秒里，
         // 「到没到位」每帧都在翻，不能让它决定列表的去留——否则滚动条会闪一下，
         // 列表也会自己跳回顶部。
-        let list_mode = if self.scroll_tween.is_playing() {
+        let list_mode = if self.scroll_motion.is_active() {
             ListMode::Held
         } else if expanded && reached_comments(scrolled, page_height) {
             ListMode::Owned
@@ -401,7 +616,7 @@ impl NowPlayingPage {
             content_width,
             side,
             summary_top,
-            show_comments,
+            comment_progress,
             song_at_rest,
             list_mode,
             reveal,
@@ -687,14 +902,15 @@ impl NowPlayingPage {
                     .ml_auto()
                     .flex()
                     .items_center()
-                    .when(!frame.show_comments, |group| {
-                        group.child(
-                            div()
-                                .text_color(frame.colors.muted_foreground)
-                                .text_size(px(13.))
-                                .child("播放器模式"),
-                        )
-                    })
+                    // 文案常驻，只改透明度。整块右对齐，抽掉它会让右边那组按钮横向
+                    // 跳一下——淡出把这一跳也一并省了。
+                    .child(
+                        div()
+                            .text_color(frame.colors.muted_foreground)
+                            .text_size(px(13.))
+                            .opacity(1. - ramp(frame.comment_progress, HEADER_FADE))
+                            .child("播放器模式"),
+                    )
                     .children(mini_and_window_buttons(
                         "album-header-mini-button",
                         window,
@@ -707,23 +923,26 @@ impl NowPlayingPage {
 
 impl Render for NowPlayingPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 「回到唱片」的补间先走一步：它写的就是这一帧要画的偏移。
         let now = cx.background_executor().now();
-        self.scroll_tween.step(&self.scroll, window, now);
+        let expanded = self.now_playing.read(cx).is_expanded();
+        // 程序化运动（「回到唱片」的补间 / 吸附的弹簧）先走一步：它写的就是这一帧要画的偏移。
+        self.scroll_motion.step(&self.scroll, window, now);
         let page_height = (f32::from(window.viewport_size().height) - PLAYER_BAR_HEIGHT).max(1.);
         let previous_height = self.page_height.replace(page_height);
         if let Some(previous_height) = previous_height
             && previous_height != page_height
-            // 补间在飞时不动偏移：目标就是歌词页静止点，窗口变了它照样对。
-            && !self.scroll_tween.is_playing()
+            // 运动在飞时不动偏移：目标就是歌词页静止点，窗口变了它照样对。
+            && !self.scroll_motion.is_active()
             && reached_comments(-f32::from(self.scroll.offset().y), previous_height)
         {
             // 窗口变高时原生滚动不会自动补位：原来停在评论页静止点，
             // 就直接挪到新的评论页静止点。
             self.scroll.set_offset(point(px(0.), px(-page_height)));
         }
+        // 手停了就把停在中间的这一屏送走。判定要发生在读偏移之前——吸附一旦
+        // 起跑，这一帧的 list_mode 就得是 `Held`。
+        self.settle_if_idle(expanded, page_height, now, window, cx);
         let frame = self.frame_data(window, cx);
-        let expanded = self.now_playing.read(cx).is_expanded();
         // Backdrop 在 prepaint 写入实际插值色；其下一帧通知让缓存 fade 重新绘制。
         let backdrop_gradient = self.backdrop.gradient();
         // 把共享底的最新插值广播给播放栏/进度条：它们据此重新取色，配色才能跟着
@@ -784,6 +1003,9 @@ impl Render for NowPlayingPage {
             );
         let summary = self.render_summary(&frame, summary_vinyl, cx);
         let song_page = build_song_page(&frame, song_info, vinyl);
+        // 悬浮按钮的淡入进度。它和页头文案用同一条连续量，只是区间不同：
+        // 页头文案属于歌词页、先走，按钮属于评论区、后到。
+        let publish = ramp(frame.comment_progress, PUBLISH_FADE);
 
         // 滑动层放在缓存根的子节点，百分比 top 才以全页为参照。
         div()
@@ -823,6 +1045,15 @@ impl Render for NowPlayingPage {
                                     // 嵌套的歌词 / 评论列表自己决定什么时候拦位移，到边自然交回这里。
                                     .overflow_y_scroll()
                                     .track_scroll(&self.scroll)
+                                    // 只采样滚轮事件、不拦位移：位移照旧由平台滚动和
+                                    // 评论列表分。延迟吸附靠这份采样判手停了没有、
+                                    // 以及最后是往哪推的。
+                                    .on_scroll_wheel(cx.listener(
+                                        |this, event: &ScrollWheelEvent, window, cx| {
+                                            let now = cx.background_executor().now();
+                                            this.wheel_watch.note(now, event, window.line_height());
+                                        },
+                                    ))
                                     .child(song_page)
                                     .child(
                                         div()
@@ -847,13 +1078,17 @@ impl Render for NowPlayingPage {
                                             .child(comments),
                                     ),
                             )
-                            .when(frame.show_comments, |content| {
+                            // 悬浮按钮跟着评论区一起升上来。只在淡入真正开始之后才挂上去，
+                            // 免得白付一次背景模糊；模糊半径跟着进度长，也就跟着一起淡了
+                            // ——`paint_backdrop_blur` 不吃元素透明度，半径得自己缩。
+                            .when(publish > 0., |content| {
                                 content.child(
                                     div()
                                         .absolute()
-                                        .bottom(px(16.))
+                                        .bottom(px(16. + 10. * (1. - publish)))
                                         .left(relative(0.5))
                                         .ml(px(-76.))
+                                        .opacity(publish)
                                         .child(
                                             div()
                                                 .relative()
@@ -862,10 +1097,10 @@ impl Render for NowPlayingPage {
                                                 .child(
                                                     canvas(
                                                         |_, _, _| (),
-                                                        |bounds, _, window, _| {
+                                                        move |bounds, _, window, _| {
                                                             window.paint_backdrop_blur(
                                                                 bounds,
-                                                                px(12.),
+                                                                px(12. * publish),
                                                                 px(20.).into(),
                                                             );
                                                         },
@@ -905,6 +1140,16 @@ impl Render for NowPlayingPage {
     }
 }
 
+/// 这一屏还停在歌词页静止点没有。
+fn song_page_at_rest(scrolled: f32) -> bool {
+    scrolled <= SCROLL_END_TOLERANCE
+}
+
+/// 把进度映射到 `(起点, 终点)` 区间上的 0→1。
+fn ramp(progress: f32, (from, to): (f32, f32)) -> f32 {
+    ((progress - from) / (to - from)).clamp(0., 1.)
+}
+
 /// 外层这一屏翻完了没有。
 ///
 /// 两屏的页高都等于窗口可视高度，内容总高正好是两倍页高，所以外层的滚动尽头
@@ -912,6 +1157,28 @@ impl Render for NowPlayingPage {
 /// 把滚轮交给评论列表，[`ListMode::Owned`] 和窗口变高时的补位都读它。
 fn reached_comments(scrolled: f32, page_height: f32) -> bool {
     scrolled >= page_height - SCROLL_END_TOLERANCE
+}
+
+/// 吸附的落点：按「停在哪」和「最后往哪推」一起定。
+///
+/// 只按中点切会在一个很常见的手势上出错——慢慢往评论区推、推到四成停下，
+/// 明明是奔着评论区去的，却被判回歌词页。所以停在中段时把判据按来向收紧 /
+/// 放宽：推着往下停，四成就算数；推着往上停，得退到六成才回去。来向不明
+/// （只有零星事件）才退回中点。
+fn settle_target(scrolled: f32, page_height: f32, direction: f32) -> Pixels {
+    let (push_down, push_up) = SETTLE_COMMIT;
+    let commit = if direction > 0. {
+        push_down
+    } else if direction < 0. {
+        push_up
+    } else {
+        0.5
+    };
+    if scrolled / page_height >= commit {
+        px(-page_height)
+    } else {
+        px(0.)
+    }
 }
 
 fn source_name(

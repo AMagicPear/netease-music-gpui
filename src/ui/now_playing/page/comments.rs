@@ -56,6 +56,9 @@ pub(super) struct CommentsView {
     request: Option<tokio::task::AbortHandle>,
     /// 这一帧滚轮归谁、位置归谁，见 [`ListMode`]。
     mode: ListMode,
+    /// 上一次轮到列表接管滚轮时它停在哪。不接管期间钉回这里，而不是无条件钉到顶
+    /// ——指针不在列表上时它根本不会偷滚，无脑钉顶只会让可见内容凭空跳回开头。
+    parked_at: ListOffset,
     layout_pending: bool,
 }
 
@@ -77,6 +80,7 @@ impl CommentsView {
             error: None,
             request: None,
             mode: ListMode::Parked,
+            parked_at: ListOffset::default(),
             layout_pending: false,
         }
     }
@@ -97,6 +101,7 @@ impl CommentsView {
         self.loading = false;
         self.error = None;
         self.list.reset(2);
+        self.parked_at = ListOffset::default();
         self.layout_pending = true;
         if id.is_some() {
             self.load(cx);
@@ -200,17 +205,21 @@ impl Render for CommentsView {
             self.load_near_bottom(cx);
         }
 
-        // 还没轮到评论列表接管滚轮时，把它钉在顶部。
+        // 钉住位置：`gpui::list` 的滚轮监听注册在元素内部、外部关不掉，只要指针
+        // 落在列表上（外层翻页的路上，露出半屏的评论页就够），它每次都会先吃掉
+        // 一段位移。于是在重绘前把位置拉回去——这一帧画出来的评论纹丝不动，位移
+        // 全部留给外层把这一屏翻完。
         //
-        // `gpui::list` 的滚轮监听注册在元素内部、外部关不掉：只要指针落在列表
-        // 上（外层翻页的路上，露出半屏的评论页就够），它每次都会先吃掉一段位移。
-        // 于是在重绘前把位置拉回顶部——这一帧画出来的评论纹丝不动，位移全部留给
-        // 外层把这一屏翻完。接管的时刻到了就不用再管，位置完全归列表自己。
+        // 拉回去的目标是 `parked_at`（上一次接管时停的地方）而不是「顶部」：不接管
+        // 的这段时间里列表该相对整页冻住、跟着页面一起升降，钉到顶会让指针不在
+        // 列表上（因此根本没发生偷滚）的场合也凭空跳回开头。
         //
-        // 只在 `Parked` 钉：`Held` 时外层正带着整页往上飞，这时钉一下就是
-        // 让评论内容在飞行途中跳回开头。
-        if self.mode == ListMode::Parked {
-            self.list.scroll_to(ListOffset::default());
+        // `Held` 什么都不做：外层正带着整页飞，这时拉一下就是让评论内容在飞行
+        // 途中跳位置。
+        match self.mode {
+            ListMode::Owned => self.parked_at = self.list.logical_scroll_top(),
+            ListMode::Parked => self.list.scroll_to(self.parked_at),
+            ListMode::Held => {}
         }
 
         // render_item 闭包只有 App 上下文，数据经实体读出来。
