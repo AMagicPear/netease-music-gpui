@@ -1,6 +1,19 @@
+//! 歌曲评论页：`gpui::list` 虚拟化渲染 + 自己的滚轮协调。
+//!
+//! 评论行高随正文换行变化，`gpui::list` 在布局时实测行高、只构建视口附近的
+//! 条目（gpui-kit 的 `VirtualList` 需要预先给出每行精确高度，`component::list`
+//! 要求等高行，都不适合这种「正文任意换行」的列表）。
+//!
+//! 这一屏嵌在外层滚动容器（`super`）的第二页里，两层都要吃滚轮。规矩只有一条：
+//! **外层翻到评论区（整屏到位）之前，一个像素都不给评论列表**。判定由外层算好
+//! 传进来（[`ListMode`]），这里只认它，不反推。
+//!
+//! 条目布局：`[0]` 标题行，`[1..=n]` 评论，`[n+1]` 脚标（加载 / 重试 / 空态 /
+//! 底部留白）。脚标恒占一个条目，状态切换不用动 `ListState` 的条目数。
+
 use gpui::prelude::*;
 use gpui::*;
-use gpui_kit::base::{Button, Scrollbar, ScrollbarMode, TextSelectionLayer, Theme};
+use gpui_kit::base::{Button, ColorTokens, Scrollbar, ScrollbarMode, TextSelectionLayer, Theme};
 
 use crate::api::MusicApi;
 use crate::models::SongComment;
@@ -8,9 +21,30 @@ use crate::ui::components::{comment_row, empty_state, spinner};
 use crate::ui::cover_color::{Backdrop, dark_colors, dark_gradient};
 use crate::ui::theme::DOLPHIN_FAMILY;
 
+/// 底部留白：原来的 `pb(100.)`，现在由脚标条目的高度承担，
+/// 这样 `max_offset_for_scrollbar` 测出来的滚动范围和原来一致。
+const FOOTER_SPACING: Pixels = px(100.);
+
+/// 外层这一帧把评论列表当什么。
+///
+/// 三个状态各对应一种「谁吃位移、位置归谁」，缺一不可：`Owned` 是目的地，
+/// `Parked` 是待命，`Held` 是「外层正在飞、内层别动」——少了它，回顶动画
+/// 一开始列表就会自己跳回顶部。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ListMode {
+    /// 滚轮归列表：外层已经整屏翻到位。
+    Owned,
+    /// 外层正在飞（「回到唱片」的补间）：不吃位移，也不动位置——
+    /// 整页连着评论区一起升上去，内层跟着动就成了两段式。
+    Held,
+    /// 外层还没翻到评论区：钉在顶部待命。
+    Parked,
+}
+
 pub(super) struct CommentsView {
     backdrop: Backdrop,
-    scroll: ScrollHandle,
+    /// 虚拟化列表状态：条目数由数据驱动（`splice`/`reset`），行高布局时实测。
+    list: ListState,
     song_id: Option<u64>,
     generation: u64,
     comments: Vec<SongComment>,
@@ -20,9 +54,8 @@ pub(super) struct CommentsView {
     loading: bool,
     error: Option<String>,
     request: Option<tokio::task::AbortHandle>,
-    enabled: bool,
-    show_comments: bool,
-    collapsed: bool,
+    /// 这一帧滚轮归谁、位置归谁，见 [`ListMode`]。
+    mode: ListMode,
     layout_pending: bool,
 }
 
@@ -30,7 +63,10 @@ impl CommentsView {
     pub(super) fn new(backdrop: Backdrop) -> Self {
         Self {
             backdrop,
-            scroll: ScrollHandle::default(),
+            // 标题行 + 脚标两个条目起步；歌曲到位后 `set_song` 会 reset。
+            // 均匀高度提示让滚动条拇指从一开始就接近真实大小，随实测收敛。
+            list: ListState::new(2, ListAlignment::Top, px(300.))
+                .with_uniform_item_height(px(110.)),
             song_id: None,
             generation: 0,
             comments: Vec::new(),
@@ -40,9 +76,7 @@ impl CommentsView {
             loading: false,
             error: None,
             request: None,
-            enabled: false,
-            show_comments: false,
-            collapsed: false,
+            mode: ListMode::Parked,
             layout_pending: false,
         }
     }
@@ -62,8 +96,7 @@ impl CommentsView {
         self.more = false;
         self.loading = false;
         self.error = None;
-        self.collapsed = false;
-        self.scroll.set_offset(point(px(0.), px(0.)));
+        self.list.reset(2);
         self.layout_pending = true;
         if id.is_some() {
             self.load(cx);
@@ -71,21 +104,12 @@ impl CommentsView {
         cx.notify();
     }
 
-    pub(super) fn configure(&mut self, enabled: bool, show_comments: bool, cx: &mut Context<Self>) {
-        if (self.enabled, self.show_comments) == (enabled, show_comments) {
+    /// 外层通知这一帧的归属；这一页只有这一个开关。
+    pub(super) fn configure(&mut self, mode: ListMode, cx: &mut Context<Self>) {
+        if self.mode == mode {
             return;
         }
-        self.enabled = enabled;
-        self.show_comments = show_comments;
-        self.layout_pending = true;
-        cx.notify();
-    }
-
-    pub(super) fn set_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
-        if self.collapsed == collapsed {
-            return;
-        }
-        self.collapsed = collapsed;
+        self.mode = mode;
         self.layout_pending = true;
         cx.notify();
     }
@@ -131,6 +155,9 @@ impl CommentsView {
                         if this.comments.len() == before {
                             this.more = false;
                         }
+                        // 新评论插在脚标之前：条目 = 标题(1) + 评论 + 脚标(1)。
+                        this.list
+                            .splice(before + 1..before + 1, this.comments.len() - before);
                         this.layout_pending = true;
                     }
                     Err(error) => this.error = Some(error),
@@ -142,18 +169,19 @@ impl CommentsView {
         cx.notify();
     }
 
+    /// 滚到接近底部就续拉下一页。外层的活（拍板何时接管、翻页补位）不在这里，
+    /// 这里只管列表自己还差几页数据。
     fn load_near_bottom(&mut self, cx: &mut Context<Self>) {
-        if self.layout_pending || self.collapsed || self.scroll.bounds().size.height <= px(0.) {
+        if self.mode != ListMode::Owned || !self.more || self.loading || self.error.is_some() {
             return;
         }
-        if can_load_more_comments(
-            self.enabled,
-            self.show_comments,
-            self.more,
-            self.loading,
-            self.error.is_some(),
-        ) && self.scroll.max_offset().y + self.scroll.offset().y < px(120.)
-        {
+        // 行高要等 prepaint 实测，视口高度为 0 时两者都还没有意义。
+        if self.layout_pending || self.list.viewport_bounds().size.height <= px(0.) {
+            return;
+        }
+        let remaining =
+            self.list.max_offset_for_scrollbar().y + self.list.scroll_px_offset_for_scrollbar().y;
+        if remaining < px(120.) {
             self.load(cx);
         }
     }
@@ -161,8 +189,9 @@ impl CommentsView {
 
 impl Render for CommentsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.layout_pending && self.enabled && self.show_comments && !self.collapsed {
-            // 新页内容先经 prepaint 更新 bounds，再判断是否需要填满视口。
+        let owns_scroll = self.mode == ListMode::Owned;
+        if self.layout_pending && owns_scroll {
+            // 新页内容先经 prepaint 更新行高，再判断是否需要填满视口。
             cx.on_next_frame(window, |this, _, cx| {
                 this.layout_pending = false;
                 cx.notify();
@@ -170,40 +199,38 @@ impl Render for CommentsView {
         } else {
             self.load_near_bottom(cx);
         }
-        let colors = dark_colors(
-            Theme::global(cx).tokens.colors,
-            self.backdrop
-                .gradient()
-                .unwrap_or_else(|| dark_gradient(None))
-                .0[1]
-                .into(),
-        );
-        let scrollable = self.enabled && self.show_comments && !self.collapsed;
-        let mut list = div();
-        if !self.collapsed {
-            list =
-                list.children(self.comments.iter().map(comment_row))
-                    .when(self.loading, |list| {
-                        list.child(div().py_5().flex().justify_center().child(spinner(
-                            "album-comments-loading",
-                            20.,
-                            colors.muted_foreground,
-                        )))
-                    });
-            if self.error.is_some() {
-                list = list.child(
-                    Button::new("retry-song-comments")
-                        .child("评论加载失败，重试")
-                        .on_click(cx.listener(|this, _, _, cx| this.load(cx))),
-                );
-            } else if !self.loading && self.comments.is_empty() {
-                list = list.child(empty_state(
-                    "images/empty/cm_empty_wupinglun.png",
-                    "还没有评论",
-                    colors,
-                ));
-            }
+
+        // 还没轮到评论列表接管滚轮时，把它钉在顶部。
+        //
+        // `gpui::list` 的滚轮监听注册在元素内部、外部关不掉：只要指针落在列表
+        // 上（外层翻页的路上，露出半屏的评论页就够），它每次都会先吃掉一段位移。
+        // 于是在重绘前把位置拉回顶部——这一帧画出来的评论纹丝不动，位移全部留给
+        // 外层把这一屏翻完。接管的时刻到了就不用再管，位置完全归列表自己。
+        //
+        // 只在 `Parked` 钉：`Held` 时外层正带着整页往上飞，这时钉一下就是
+        // 让评论内容在飞行途中跳回开头。
+        if self.mode == ListMode::Parked {
+            self.list.scroll_to(ListOffset::default());
         }
+
+        // render_item 闭包只有 App 上下文，数据经实体读出来。
+        let entity = cx.entity();
+        let list_el = list(self.list.clone(), move |ix, _window, cx| {
+            let view = entity.read(cx);
+            let item = match ix.checked_sub(1).and_then(|i| view.comments.get(i)) {
+                Some(comment) => comment_row(comment).into_any_element(),
+                None if ix == 0 => heading(view.total),
+                None => footer(&entity, view, colors_for(&view.backdrop, cx)),
+            };
+            // 列表视口撑满整个区域（滚动条贴边），左右留白由每个条目自带。
+            // w_full：条目以独立布局根测量，flex 根的 auto 宽会收缩，必须显式拉满。
+            div().w_full().px(px(80.)).child(item).into_any_element()
+        })
+        // `gpui::list` 的条目不走 taffy 布局（prepaint 手动定位），必须显式给尺寸，
+        // 否则布局高度为 0，什么都画不出来。
+        .size_full()
+        .pt(px(24.));
+
         div()
             .size_full()
             .relative()
@@ -214,55 +241,33 @@ impl Render for CommentsView {
                     .debug_selector(|| "album-comments-region".into())
                     .size_full()
                     .overflow_hidden()
-                    .when(scrollable, |comments| comments.overflow_y_scroll())
-                    .track_scroll(&self.scroll)
                     .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
-                        // 不可滚的时候什么都不做，让事件冒泡给页面。
-                        if !(this.enabled && this.show_comments && !this.collapsed) {
+                        // 没轮到评论区接管时什么都不做，让事件冒泡给外层翻这一屏。
+                        if this.mode != ListMode::Owned {
                             return;
                         }
-                        // 列表自己吃得下这段位移就自己滚（原生滚动随后会执行）；
-                        // 吃不下（到顶还要往上、到底还要往下）就让事件冒泡，
-                        // 由页面决定要不要翻页——不再往外层塞剩余位移。
+                        // 列表自己的滚轮监听先于本监听器执行（子元素后注册的先跑），
+                        // 位移已经被它按边界裁剪消费，这里只看该方向还有没有余量：
+                        // 吃得下就拦住事件，吃不下（到顶还要往上、到底还要往下）
+                        // 就冒泡，交给外层继续滚。
                         let delta = event.delta.pixel_delta(window.line_height()).y;
-                        let to = this.scroll.offset().y + delta;
-                        if to <= px(0.) && to >= -this.scroll.max_offset().y {
+                        let scrolled = -this.list.scroll_px_offset_for_scrollbar().y;
+                        let room = if delta < px(0.) {
+                            this.list.max_offset_for_scrollbar().y - scrolled
+                        } else {
+                            scrolled
+                        };
+                        if room >= delta.abs() {
                             cx.stop_propagation();
                         }
                     }))
-                    .px(px(80.))
-                    .pt(px(24.))
-                    .pb(px(100.))
-                    .child(
-                        div()
-                            .debug_selector(|| "album-comments-heading".into())
-                            .flex()
-                            .items_center()
-                            .items_start()
-                            .mb_4()
-                            .text_color(white())
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(
-                                div()
-                                    .text_size(px(16.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child("全部评论"),
-                            )
-                            .child(
-                                div()
-                                    .ml(px(1.))
-                                    .text_size(px(13.))
-                                    .font_weight(FontWeight::BOLD)
-                                    .font_family(DOLPHIN_FAMILY)
-                                    .child(self.total.to_string()),
-                            ),
-                    )
-                    .child(list),
+                    .child(list_el),
             )
-            .when(scrollable, |comments| {
+            .when(owns_scroll, |comments| {
                 comments.child(
                     // 滚动条必须在滚动容器外，避免自身高度计入内容。
-                    Scrollbar::vertical(&self.scroll)
+                    // gpui-kit 的 Scrollbar 直接实现了对 gpui::ListState 的支持。
+                    Scrollbar::vertical(&self.list)
                         .mode(ScrollbarMode::Scrolling)
                         .styles(|styles| {
                             styles
@@ -274,12 +279,66 @@ impl Render for CommentsView {
     }
 }
 
-fn can_load_more_comments(
-    enabled: bool,
-    visible: bool,
-    more: bool,
-    loading: bool,
-    failed: bool,
-) -> bool {
-    enabled && visible && more && !loading && !failed
+fn colors_for(backdrop: &Backdrop, cx: &App) -> ColorTokens {
+    dark_colors(
+        Theme::global(cx).tokens.colors,
+        backdrop.gradient().unwrap_or_else(|| dark_gradient(None)).0[1].into(),
+    )
+}
+
+/// 标题行：跟随内容一起滚动（原来就在滚动容器里）。
+fn heading(total: u64) -> AnyElement {
+    div()
+        .debug_selector(|| "album-comments-heading".into())
+        .flex()
+        .items_center()
+        .items_start()
+        .mb_4()
+        .text_color(white())
+        .font_weight(FontWeight::SEMIBOLD)
+        .child(
+            div()
+                .text_size(px(16.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child("全部评论"),
+        )
+        .child(
+            div()
+                .ml(px(1.))
+                .text_size(px(13.))
+                .font_weight(FontWeight::BOLD)
+                .font_family(DOLPHIN_FAMILY)
+                .child(total.to_string()),
+        )
+        .into_any_element()
+}
+
+/// 脚标条目：加载指示、重试按钮、空态；无事可示时退化为底部留白。
+fn footer(entity: &Entity<CommentsView>, view: &CommentsView, colors: ColorTokens) -> AnyElement {
+    if view.loading {
+        div()
+            .w_full()
+            .pt(px(20.))
+            .flex()
+            .justify_center()
+            .child(spinner(
+                "album-comments-loading",
+                20.,
+                colors.muted_foreground,
+            ))
+            .h(FOOTER_SPACING)
+            .into_any_element()
+    } else if view.error.is_some() {
+        let entity = entity.clone();
+        Button::new("retry-song-comments")
+            .child("评论加载失败，重试")
+            .on_click(move |_, _, cx| {
+                entity.update(cx, |view, cx| view.load(cx));
+            })
+            .into_any_element()
+    } else if view.comments.is_empty() {
+        empty_state("images/empty/cm_empty_wupinglun.png", "还没有评论", colors).into_any_element()
+    } else {
+        div().h(FOOTER_SPACING).into_any_element()
+    }
 }

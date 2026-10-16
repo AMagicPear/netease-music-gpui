@@ -4,7 +4,6 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_kit::base::{Button, Theme, Transition, transition};
 
-use super::ScrollTween;
 use crate::api::MusicApi;
 use crate::models::LyricLine;
 use crate::playback::PlaybackController;
@@ -25,6 +24,54 @@ const LYRIC_TRANSLATION_TEXT: f32 = 17.;
 const LYRIC_TRANSLATION_LINE_HEIGHT: f32 = 20.;
 const LYRIC_TRANSLATION_ACTIVE_ALPHA: f32 = 0.45;
 const LYRIC_TRANSLATION_IDLE_ALPHA: f32 = 0.25;
+/// 歌词跟随滚动的补间时长。
+const LYRIC_SCROLL_DURATION: Duration = Duration::from_millis(600);
+
+/// 歌词自动跟随的滚动补间：完成后保留目标但不再写 offset，
+/// 手动滚动不会被推回去。
+#[derive(Default)]
+struct ScrollTween {
+    target: Option<Pixels>,
+    playing: Option<(f32, Instant)>,
+}
+
+impl ScrollTween {
+    fn aim(&mut self, handle: &ScrollHandle, target: Option<Pixels>, now: Instant) {
+        if self.target == target {
+            return;
+        }
+        self.target = target;
+        self.playing = target.and_then(|to| {
+            let from = f32::from(handle.offset().y);
+            ((f32::from(to) - from).abs() > 0.5).then_some((from, now))
+        });
+    }
+
+    fn step(&mut self, handle: &ScrollHandle, window: &mut Window, now: Instant) -> bool {
+        let playing = self.advance(handle, now);
+        if playing {
+            window.request_animation_frame();
+        }
+        playing
+    }
+
+    fn advance(&mut self, handle: &ScrollHandle, now: Instant) -> bool {
+        let (Some((from, started)), Some(to)) = (self.playing, self.target) else {
+            self.playing = None;
+            return false;
+        };
+        let progress = (now.saturating_duration_since(started).as_secs_f32()
+            / LYRIC_SCROLL_DURATION.as_secs_f32())
+        .min(1.);
+        let y = from + (f32::from(to) - from) * ease_out_quint()(progress);
+        handle.set_offset(point(px(0.), px(y)));
+        if progress < 1. {
+            return true;
+        }
+        self.playing = None;
+        false
+    }
+}
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum LyricFollow {
