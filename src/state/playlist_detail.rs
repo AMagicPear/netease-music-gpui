@@ -32,12 +32,35 @@ impl PlaylistDetail {
         self.loading = true;
         let generation = self.generation;
         let api = MusicApi::global(cx);
-        let request = api
-            .runtime
-            .spawn(MusicApi::playlist(api.client.clone(), id));
+        let client = api.client.clone();
+        let runtime = api.runtime.handle().clone();
+        let request = runtime.spawn(MusicApi::playlist_meta(client.clone(), id));
         self.request = Some(request.abort_handle());
         cx.spawn(async move |this, cx| {
-            let result = request
+            // 两步：详情一到就先交给界面（封面、标题、评论数），歌曲继续分批下。
+            // 串成一步的话，评论数要等最后一批歌曲才出现。
+            let meta = request
+                .await
+                .unwrap_or_else(|_| Err("歌单请求任务失败".into()));
+            let playlist = match meta {
+                Ok(playlist) => playlist,
+                Err(message) => {
+                    let _ = this.update(cx, |this, cx| {
+                        if this.finish(id, generation, Err(message)) {
+                            cx.notify();
+                        }
+                    });
+                    return;
+                }
+            };
+            let songs_request = runtime.spawn(MusicApi::playlist_songs(client, playlist.clone()));
+            let _ = this.update(cx, |this, cx| {
+                this.request = Some(songs_request.abort_handle());
+                if this.loaded_meta(id, generation, playlist) {
+                    cx.notify();
+                }
+            });
+            let result = songs_request
                 .await
                 .unwrap_or_else(|_| Err("歌单请求任务失败".into()));
             let _ = this.update(cx, |this, cx| {
@@ -100,12 +123,16 @@ impl PlaylistDetail {
         self.error = None;
     }
 
-    fn finish(
-        &mut self,
-        id: u64,
-        generation: u64,
-        result: Result<(Playlist, Vec<Song>), String>,
-    ) -> bool {
+    /// 详情已到、歌曲还在下：先把头部换掉，页面继续显示加载态。
+    fn loaded_meta(&mut self, id: u64, generation: u64, playlist: Playlist) -> bool {
+        if self.id != Some(id) || self.generation != generation {
+            return false;
+        }
+        self.playlist = Some(playlist);
+        true
+    }
+
+    fn finish(&mut self, id: u64, generation: u64, result: Result<Vec<Song>, String>) -> bool {
         // 取消网络任务之外，再拦截已经送回界面的旧结果。
         if self.id != Some(id) || self.generation != generation {
             return false;
@@ -113,8 +140,7 @@ impl PlaylistDetail {
         self.request = None;
         self.loading = false;
         match result {
-            Ok((playlist, songs)) => {
-                self.playlist = Some(playlist);
+            Ok(songs) => {
                 self.songs = songs;
                 self.error = None;
             }

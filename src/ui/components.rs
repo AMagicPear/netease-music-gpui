@@ -12,6 +12,7 @@ use crate::ui::theme::{PRESSED_ICON_ALPHA, link_blue};
 
 mod collect_window;
 mod comment_row;
+mod comments;
 mod drag_preview;
 mod message_panel;
 mod play_queue;
@@ -29,6 +30,7 @@ mod volume_control;
 
 pub use collect_window::open_collect_window;
 pub use comment_row::comment_row;
+pub use comments::{CommentResource, CommentsView, ListMode};
 pub use drag_preview::ResizeDragPreview;
 pub use player_bar::{PLAYER_BAR_HEIGHT, PlayerBar};
 pub use side_panel::{SidePanel, SidePanelContent};

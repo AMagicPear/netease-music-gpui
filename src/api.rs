@@ -176,6 +176,25 @@ impl MusicApi {
         song_comment_page(response.body, offset)
     }
 
+    /// 歌单评论。响应形状与歌曲评论一致（`/api/v1/resource/comments/A_PL_0_{id}`），
+    /// 解析直接复用 `song_comment_page`：offset 语义相同（普通评论分页，热评只合并在第一页）。
+    pub async fn playlist_comments(
+        client: ApiClient,
+        playlist_id: u64,
+        offset: usize,
+    ) -> Result<SongComments, String> {
+        let response = Self::request(
+            client.comment_playlist(
+                &Query::new()
+                    .param("id", &playlist_id.to_string())
+                    .param("limit", "20")
+                    .param("offset", &offset.to_string()),
+            ),
+        )
+        .await?;
+        song_comment_page(response.body, offset)
+    }
+
     pub async fn song_source(
         client: ApiClient,
         song_id: u64,
@@ -336,16 +355,23 @@ impl MusicApi {
         Ok(playlists)
     }
 
-    pub async fn playlist(
-        client: ApiClient,
-        playlist_id: u64,
-    ) -> Result<(Playlist, Vec<Song>), String> {
+    /// 歌单详情：评论数、收藏数、曲目 id 全在这一步。
+    /// 和 `playlist_songs` 分开，是因为详情很快就回来，歌曲要分批下；
+    /// 拆开才能让头部（含「评论 N」）先渲染，不用等所有批次。
+    pub async fn playlist_meta(client: ApiClient, playlist_id: u64) -> Result<Playlist, String> {
         let mut response = Self::request(
             client.playlist_detail(&Query::new().param("id", &playlist_id.to_string())),
         )
         .await?;
-        let playlist: Playlist = serde_json::from_value(response.body["playlist"].take())
-            .map_err(|error| format!("歌单详情格式无效：{error}"))?;
+        serde_json::from_value(response.body["playlist"].take())
+            .map_err(|error| format!("歌单详情格式无效：{error}"))
+    }
+
+    /// 按 `track_ids` 分批拉歌曲详情。
+    pub async fn playlist_songs(
+        client: ApiClient,
+        playlist: Playlist,
+    ) -> Result<Vec<Song>, String> {
         let mut songs = Vec::new();
         // 每个歌单沿用同一条链路，分批加载全部 trackIds。
         for tracks in playlist.track_ids.chunks(200) {
@@ -365,6 +391,16 @@ impl MusicApi {
             attach_privileges(&mut batch, privileges);
             songs.extend(batch);
         }
+        Ok(songs)
+    }
+
+    /// 详情 + 歌曲，等全部完成才返回。给不需要中间态的调用方用。
+    pub async fn playlist(
+        client: ApiClient,
+        playlist_id: u64,
+    ) -> Result<(Playlist, Vec<Song>), String> {
+        let playlist = Self::playlist_meta(client.clone(), playlist_id).await?;
+        let songs = Self::playlist_songs(client, playlist.clone()).await?;
         Ok((playlist, songs))
     }
 }
@@ -464,7 +500,7 @@ fn song_comment_page(body: serde_json::Value, offset: usize) -> Result<SongComme
         more: bool,
     }
     let page: Page =
-        serde_json::from_value(body).map_err(|error| format!("歌曲评论格式无效：{error}"))?;
+        serde_json::from_value(body).map_err(|error| format!("评论格式无效：{error}"))?;
     let mut seen = HashSet::new();
     let hot = if offset == 0 {
         page.hot_comments.unwrap_or_default()

@@ -237,6 +237,7 @@ pub struct MainContent {
     _library_subscription: Subscription,
     _search_subscription: Subscription,
     _search_page_subscription: Subscription,
+    _playlist_subscription: Subscription,
 }
 
 impl MainContent {
@@ -261,8 +262,25 @@ impl MainContent {
                     super::login::open(window, this.user_profile.clone(), this.login_window, cx);
             },
         );
-        let playlist_page =
-            cx.new(|cx| PlaylistPage::new(window, library.clone(), playback.clone(), cx));
+        // 吸顶编辑框要按自己的屏幕位置从这份渐变里取色，所以两边共用同一个句柄。
+        let playlist_backdrop = Backdrop::default();
+        let playlist_page = cx.new(|cx| {
+            PlaylistPage::new(
+                window,
+                library.clone(),
+                playback.clone(),
+                playlist_backdrop.clone(),
+                cx,
+            )
+        });
+        let mut comments_active = false;
+        let playlist_subscription = cx.observe(&playlist_page, move |_, page, cx| {
+            let active = page.read(cx).comments_active(cx);
+            if active != comments_active {
+                comments_active = active;
+                cx.notify();
+            }
+        });
         let library_subscription = cx.observe(&library, |this, _, cx| {
             // 收藏歌单的 ID 要等账号索引返回后才能解析。
             this.open_playlist(this.active_page, cx);
@@ -332,7 +350,7 @@ impl MainContent {
             search_results,
             library,
             side_panel,
-            playlist_backdrop: Backdrop::default(),
+            playlist_backdrop,
             page_scroll: ContentPage::all()
                 .map(|page| (page, ScrollHandle::default()))
                 .collect(),
@@ -342,6 +360,7 @@ impl MainContent {
             _library_subscription: library_subscription,
             _search_subscription: search_subscription,
             _search_page_subscription: search_page_subscription,
+            _playlist_subscription: playlist_subscription,
         }
     }
 
@@ -781,6 +800,10 @@ impl Render for MainContent {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = Theme::global(cx).tokens.colors;
         let active_page = self.active_page;
+        let playlist_comments = matches!(
+            active_page,
+            ContentPage::FavoriteMusic | ContentPage::Playlist(_)
+        ) && self.playlist_page.read(cx).comments_active(cx);
         let page_scroll = &self.page_scroll[&active_page];
         let page = match active_page {
             ContentPage::FavoriteMusic | ContentPage::Playlist(_) => Some(PlaylistPage::content(
@@ -800,7 +823,8 @@ impl Render for MainContent {
         // 搜索结果页自己管滚动：搜索词标题和分类 tab 要一直留在视野里，只有表格区域滚动。
         // 它连左右留白也不在这一层取——留在这里会被它自己的滚动容器挡在投影之外，
         // 行的 hover 阴影就被切出硬边了；它把留白加在自己的滚动容器上。
-        let page_scrolls = !matches!(active_page, ContentPage::Search);
+        // 评论页把歌单头部也纳入虚拟列表，整页只保留列表自己的滚动条。
+        let page_scrolls = !matches!(active_page, ContentPage::Search) && !playlist_comments;
 
         div()
             // cached 会独立布局这棵树，根节点需要占满缓存容器。
@@ -839,7 +863,7 @@ impl Render for MainContent {
                                     ))
                                     .flex_1()
                                     .min_h(px(0.))
-                                    .py(px(18.))
+                                    .when(!playlist_comments, |content| content.py(px(18.)))
                                     .when(page_scrolls, |content| {
                                         content
                                             .px(PAGE_SIDE_PADDING)
@@ -852,10 +876,11 @@ impl Render for MainContent {
                             // 排在滚动条之前，滚动条自然压在上面。
                             // （放外层不行：那边整棵树排在 main_content 之后，层级必然更高。）
                             .when(
-                                matches!(
-                                    active_page,
-                                    ContentPage::FavoriteMusic | ContentPage::Playlist(_)
-                                ),
+                                !playlist_comments
+                                    && matches!(
+                                        active_page,
+                                        ContentPage::FavoriteMusic | ContentPage::Playlist(_)
+                                    ),
                                 |content| {
                                     content.child(self.playlist_page.update(cx, |page, cx| {
                                         page.floating_header(self.playlist_backdrop.clone(), cx)

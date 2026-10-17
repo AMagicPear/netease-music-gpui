@@ -1,6 +1,11 @@
+mod comments;
+mod song_order;
+
+use song_order::{SongSort, next_sort, song_matches, sort_indices, sort_label};
+
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_kit::base::input::{Input, InputEditorStyle, InputEvent, InputState};
+use gpui_kit::base::input::{Input, InputEditorStyle, InputEvent, InputState, TextareaState};
 use gpui_kit::base::{Button, ColorTokens, Theme, Transition, transition};
 use gpui_kit::component::Sizable;
 use gpui_kit::component::avatar::Avatar;
@@ -37,12 +42,12 @@ use crate::playback::PlaybackController;
 use crate::state::{library::MusicLibrary, playlist_detail::PlaylistDetail};
 use crate::ui::assets::thumbnail_url;
 use crate::ui::components::{
-    ACTION_BUTTON_HEIGHT, ACTION_BUTTON_PADDING, CELL_PADDING, COLUMN_GAP, DURATION_COLUMN_WIDTH,
-    HEADER_HEIGHT, LIKE_COLUMN_WIDTH, ResizeDragPreview, SECONDARY_FONT_WEIGHT, SongDisplay,
-    TabBar, TabChanged, TabItem, TableColumn, artist_label, centered_empty, hovered_row_after,
-    index_column_width, keyword_ranges, like_icon_path, play_all_button, play_count_label,
-    quality_badge_path, row_hover_icon, search_clear_button, spinner, text_with_matches,
-    title_with_subtitle, virtual_table,
+    ACTION_BUTTON_HEIGHT, ACTION_BUTTON_PADDING, CELL_PADDING, COLUMN_GAP, CommentResource,
+    CommentsView, DURATION_COLUMN_WIDTH, HEADER_HEIGHT, LIKE_COLUMN_WIDTH, ListMode,
+    ResizeDragPreview, SECONDARY_FONT_WEIGHT, SongDisplay, TabBar, TabChanged, TabItem,
+    TableColumn, artist_label, centered_empty, hovered_row_after, index_column_width,
+    like_icon_path, play_all_button, play_count_label, quality_badge_path, row_hover_icon,
+    search_clear_button, spinner, text_with_matches, title_with_subtitle, virtual_table,
 };
 use crate::ui::cover_color::{Backdrop, blend_color};
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
@@ -50,11 +55,13 @@ use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPA
 // 「更多」菜单里的三个命令。
 actions!(playlist, [Share, BatchOperation, AddAllToPlaylist]);
 
-#[derive(Clone, Copy)]
+/// 页签顺序与 TabBar 的下标一一对应，`as usize` 即选中位置。
+#[derive(Clone, Copy, PartialEq)]
+#[repr(usize)]
 enum PlaylistTab {
-    Songs,
-    Comments,
-    Collectors,
+    Songs = 0,
+    Comments = 1,
+    Collectors = 2,
 }
 
 impl PlaylistTab {
@@ -70,6 +77,12 @@ impl PlaylistTab {
 /// 所有歌单共享一个 View；歌单数据由独立的 Entity 管理。
 pub struct PlaylistPage {
     detail: Entity<PlaylistDetail>,
+    comments: Entity<CommentsView>,
+    comment_input: Entity<TextareaState>,
+    _comment_input_subscription: Subscription,
+    comment_input_y: Rc<Cell<Option<Pixels>>>,
+    /// 歌单页背景渐变（和 shell 画的是同一份）：吸顶条按自己位置取色。
+    backdrop: Backdrop,
     _detail_subscription: Subscription,
     playlist_id: Option<u64>,
     /// 导航意图：当前是否是「我喜欢的音乐」页。
@@ -254,9 +267,57 @@ impl PlaylistPage {
         window: &mut Window,
         library: Entity<MusicLibrary>,
         playback: Entity<PlaybackController>,
+        backdrop: Backdrop,
         cx: &mut Context<Self>,
     ) -> Self {
         let detail = cx.new(|_| PlaylistDetail::default());
+        let comments = cx.new(|_| CommentsView::new(None));
+        let page = cx.weak_entity();
+        comments.update(cx, |comments, cx| {
+            comments.set_header(
+                move |window, cx| {
+                    page.update(cx, |page, cx| page.render_comments_header(window, cx))
+                        .unwrap_or_else(|_| div().into_any_element())
+                },
+                cx,
+            );
+        });
+        let comment_input = cx.new(|cx| {
+            let mut input = TextareaState::new(window, cx)
+                .placeholder("说点什么吧")
+                .rows(2)
+                .scroll_beyond_last_line(Some(0));
+            let colors = Theme::global(cx).tokens.colors;
+            input.set_editor_style(InputEditorStyle {
+                foreground: colors.foreground,
+                muted_foreground: colors.muted_foreground,
+                selection: colors.selection,
+                ..Default::default()
+            });
+            input
+        });
+        let comment_input_subscription = cx.subscribe_in(
+            &comment_input,
+            window,
+            |_, input, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    input.update(cx, |input, cx| {
+                        let value = input.value();
+                        if let Some((end, _)) = value.char_indices().nth(comments::COMMENT_LIMIT) {
+                            let selection = input.selected_range();
+                            // 只裁掉超限尾部，保留编辑历史和当前选区。
+                            input.set_selected_range(end..value.len(), cx);
+                            input.replace("", window, cx);
+                            input.set_selected_range(
+                                selection.start.min(end)..selection.end.min(end),
+                                cx,
+                            );
+                        }
+                    });
+                }
+                cx.notify();
+            },
+        );
         let tabs = cx.new(|_| {
             TabBar::new(vec![
                 TabItem::new("歌曲"),
@@ -266,6 +327,23 @@ impl PlaylistPage {
         });
         let tabs_subscription = cx.subscribe(&tabs, |this, _, _: &TabChanged, cx| {
             this.measured_size.set(None);
+            // 同一资源重复设置不会重载，切回页签保留评论和滚动位置。
+            if this.tabs.read(cx).selected_index() == PlaylistTab::Comments as usize {
+                let (resource, total) = {
+                    let detail = this.detail.read(cx);
+                    let total = detail
+                        .playlist
+                        .as_ref()
+                        .and_then(|playlist| playlist.comment_count);
+                    (detail.id.map(CommentResource::Playlist), total)
+                };
+                this.comments.update(cx, |comments, cx| {
+                    comments.set_resource(resource, cx);
+                    // 详情里已经有评论数了，先用它渲染标题，别让标题空等到第一页回来。
+                    comments.set_estimated_total(total, cx);
+                    comments.configure(ListMode::Owned, cx);
+                });
+            }
             cx.notify();
         });
         let library_subscription = cx.observe(&library, |this, library, cx| {
@@ -324,6 +402,9 @@ impl PlaylistPage {
                 // 所以下面那次 `rebuild_display_order` 是这里唯一的重算入口，不能省。
                 this.search_input
                     .update(cx, |input, cx| input.set_value("", window, cx));
+                this.comment_input
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+                this.comment_input_y.set(None);
             }
             let detail = detail.read(cx);
             this.song_display = detail.songs.iter().map(SongDisplay::new).collect();
@@ -344,6 +425,10 @@ impl PlaylistPage {
                 for (index, count) in counts.into_iter().enumerate() {
                     tabs.set_count(index, count, cx);
                 }
+            });
+            this.comments.update(cx, |comments, cx| {
+                comments.scroll_state().remeasure_items(0..1);
+                cx.notify();
             });
             cx.notify();
         });
@@ -373,6 +458,11 @@ impl PlaylistPage {
         });
         Self {
             detail,
+            comments,
+            comment_input,
+            _comment_input_subscription: comment_input_subscription,
+            comment_input_y: Rc::new(Cell::new(None)),
+            backdrop,
             _detail_subscription: detail_subscription,
             playlist_id: None,
             is_favorite_view: false,
@@ -399,6 +489,10 @@ impl PlaylistPage {
 
     /// 缓存需要确定尺寸；首次布局或宽度改变时先正常测量，之后复用。
     pub fn content(view: Entity<Self>, width: Pixels, cx: &App) -> AnyElement {
+        // 评论视口随窗口高度变化，不能复用只按宽度校验的文档高度缓存。
+        if view.read(cx).comments_active(cx) {
+            return view.into_any_element();
+        }
         let measured = view.read(cx).measured_size.get();
         match measured {
             Some(size) if size.width == width => view
@@ -432,6 +526,10 @@ impl PlaylistPage {
     /// 没有时才回音乐库里找 —— 侧栏和收藏歌单的摘要本来就在库里。
     /// 给了摘要就先渲染页头，详情接口返回后再补齐歌曲列表。
     pub fn open(&mut self, id: Option<u64>, summary: Option<Playlist>, cx: &mut Context<Self>) {
+        if self.detail.read(cx).id != id {
+            self.comments
+                .update(cx, |comments, cx| comments.set_resource(None, cx));
+        }
         let summary = summary.or_else(|| {
             self.library
                 .read(cx)
@@ -633,6 +731,22 @@ impl PlaylistPage {
                         .unwrap_or_else(|| "歌单".into())
                 },
             )
+    }
+
+    /// 元数据下面那排控件：标签在左，`search` 在右。
+    ///
+    /// 三个页签共用同一份结构、同一个最小高度，否则切页签时这行会忽高忽低：
+    /// 标签本身比搜索框矮，得由 `min_h` 把行高钉住。
+    pub(super) fn header_controls_row(&self, search: Option<AnyElement>) -> Div {
+        div()
+            .mt(px(28.))
+            .min_h(SEARCH_BOX_HEIGHT)
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(16.))
+            .child(self.tabs.clone())
+            .children(search)
     }
 
     fn playlist_metadata(&self, colors: ColorTokens, cx: &Context<Self>) -> Div {
@@ -1241,96 +1355,6 @@ fn playlist_playback_state(playback: &PlaybackController) -> (Option<u64>, bool,
     )
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SongSort {
-    Title,
-    Artist,
-    Album,
-}
-
-// 标题循环：默认 → 标题升序 → 标题降序 → 歌手升序 → 歌手降序。
-fn next_sort(current: Option<(SongSort, bool)>, column: SongSort) -> Option<(SongSort, bool)> {
-    match (column, current) {
-        (SongSort::Title, Some((SongSort::Title, false))) => Some((SongSort::Title, true)),
-        (SongSort::Title, Some((SongSort::Title, true))) => Some((SongSort::Artist, false)),
-        (SongSort::Title, Some((SongSort::Artist, false))) => Some((SongSort::Artist, true)),
-        (SongSort::Title, Some((SongSort::Artist, true))) => None,
-        (SongSort::Album, Some((SongSort::Album, false))) => Some((SongSort::Album, true)),
-        (SongSort::Album, Some((SongSort::Album, true))) => None,
-        _ => Some((column, false)),
-    }
-}
-
-fn sort_label(current: Option<(SongSort, bool)>, column: SongSort) -> (&'static str, &'static str) {
-    let label = match (column, current) {
-        (SongSort::Title, Some((SongSort::Title, false))) => "标题升序",
-        (SongSort::Title, Some((SongSort::Title, true))) => "标题降序",
-        (SongSort::Title, Some((SongSort::Artist, false))) => "歌手升序",
-        (SongSort::Title, Some((SongSort::Artist, true))) => "歌手降序",
-        (SongSort::Album, Some((SongSort::Album, false))) => "升序",
-        (SongSort::Album, Some((SongSort::Album, true))) => "降序",
-        _ => "默认排序",
-    };
-    let icon = if label.ends_with("升序") {
-        "icons/列表排序/升序上箭头.svg"
-    } else if label.ends_with("降序") {
-        "icons/列表排序/降序下箭头.svg"
-    } else {
-        "icons/列表排序/默认排序.svg"
-    };
-    (icon, label)
-}
-
-/// 关键词命中：标题、任一歌手、专辑任一包含即算命中。
-///
-/// 判定直接复用 `keyword_ranges`，所以「过滤」和「高亮」是同一套匹配，
-/// 不会出现某行搜出来了、高亮却找不到位置的情况。搜的是子串不是前缀，
-/// 所以「周」能命中歌名中间带「周」字的那首。
-///
-/// `tns`（音译）和 `alia`（别名）也算：它们显示成标题的副标题，
-/// 用户看得到就一定会搜它 —— 用「daoxiang」搜「稻香」应该找得到。
-fn song_matches(song: &Song, keyword: &str) -> bool {
-    let hit = |text: &str| !keyword_ranges(text, keyword).is_empty();
-    hit(&song.name)
-        || song.tns.iter().any(|t| hit(t))
-        || song.alia.iter().any(|a| hit(a))
-        || song
-            .ar
-            .iter()
-            .any(|artist| artist.name.as_deref().is_some_and(hit))
-        || song.al.name.as_deref().is_some_and(hit)
-}
-
-/// 把给定的一批下标按列排序。
-///
-/// 过滤与排序拆成两步：过滤先决定「哪些行出现」，排序只在这批下标内部重排，
-/// 所以 `detail.songs` 的原始顺序始终不动，搜索结果也不会因为换排序而变多变少。
-fn sort_indices(
-    mut order: Vec<usize>,
-    songs: &[Song],
-    column: SongSort,
-    descending: bool,
-) -> Vec<usize> {
-    // ponytail: 按 Unicode 字符排序；需要拼音或语言区域排序时再接入 collation。
-    order.sort_by(|&left, &right| {
-        let ordering = match column {
-            SongSort::Title => songs[left].name.cmp(&songs[right].name),
-            SongSort::Artist => songs[left]
-                .ar
-                .iter()
-                .map(|artist| &artist.name)
-                .cmp(songs[right].ar.iter().map(|artist| &artist.name)),
-            SongSort::Album => songs[left].al.name.cmp(&songs[right].al.name),
-        };
-        if descending {
-            ordering.reverse()
-        } else {
-            ordering
-        }
-    });
-    order
-}
-
 fn resized_album_share(start: f32, movement: f32, available: f32) -> f32 {
     if available <= 0. {
         return start;
@@ -1371,6 +1395,14 @@ impl Render for PlaylistPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.playing_indicator.read(cx).placement.set(None);
         self.table_header_hidden.set(false);
+        if self.comments_active(cx) {
+            return div()
+                .size_full()
+                .relative()
+                .overflow_hidden()
+                .child(self.comments.clone())
+                .child(self.comment_input_overlay(cx));
+        }
         let colors = Theme::global(cx).tokens.colors;
         // 展开与否只由「有没有焦点」和「有没有字」决定：光标停在框里就该让用户看得见
         // 自己能往哪打字，输入过字就该留着结果让人对照，鼠标 hover 不算 —— 它只是探过来看一眼。
@@ -1465,15 +1497,12 @@ impl Render for PlaylistPage {
                     centered_empty("images/empty/cm_empty_wuzuopin.png", "空空如也", colors)
                         .into_any_element()
                 } else {
-                    div()
-                        .w_full()
-                        .py(px(36.))
-                        .flex()
-                        .justify_center()
-                        .text_size(px(13.))
-                        .text_color(colors.muted_foreground)
-                        .child(format!("没有找到与「{keyword}」相关的歌曲"))
-                        .into_any_element()
+                    centered_empty(
+                        "images/empty/cm_empty_fall.png",
+                        &format!("咱搜不到关于「{keyword}」的任何内容呀！"),
+                        colors,
+                    )
+                    .into_any_element()
                 }
             }
             PlaylistTab::Songs => {
@@ -1594,17 +1623,12 @@ impl Render for PlaylistPage {
         div()
             .relative()
             .child(self.playlist_metadata(colors, cx))
-            // 控件区域：标签在左、搜索在右，justify_between 让胶囊贴住右边缘，
-            // 展开时向左「长」出去，标签的位置不受影响。
             .child(
-                div()
-                    .mt(px(28.))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(16.))
-                    .child(self.tabs.clone())
-                    .child(self.search_box(progress, has_value, border, colors, cx)),
+                self.header_controls_row(
+                    // 搜索只服务歌曲列表：评论、收藏者切回来时不该看到它。
+                    (active_tab == PlaylistTab::Songs)
+                        .then(|| self.search_box(progress, has_value, border, colors, cx)),
+                ),
             )
             // 具体内容区域
             .when_some(library.likes_error.as_ref(), |page, message| {
@@ -1624,101 +1648,5 @@ impl Render for PlaylistPage {
                 .absolute()
                 .inset_0(),
             )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{Song, SongSort, next_sort, song_matches, sort_indices};
-
-    /// 全部下标，等价于「没有关键词」时的显示顺序。
-    fn song_order(songs: &[Song], column: SongSort, descending: bool) -> Vec<usize> {
-        sort_indices((0..songs.len()).collect(), songs, column, descending)
-    }
-
-    /// `Artist` / `Album` 没有从 `crate::models` 导出，测试就用最小 JSON 造条目，
-    /// 顺带也覆盖了真实响应的字段形状（和 playlist_detail 的测试同一套做法）。
-    fn song(name: &str, artist: &str, album: Option<&str>) -> Song {
-        serde_json::from_value(serde_json::json!({
-            "id": 1,
-            "name": name,
-            "ar": [{"id": 1, "name": artist}],
-            "al": {"id": 1, "name": album},
-            "dt": 0,
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn sorting_keeps_source_order_and_returns_to_default() {
-        let songs = vec![
-            Song {
-                id: 1,
-                name: "b".into(),
-                ..Default::default()
-            },
-            Song {
-                id: 2,
-                name: "a".into(),
-                ..Default::default()
-            },
-        ];
-        assert_eq!(song_order(&songs, SongSort::Title, false), [1, 0]);
-        assert_eq!(song_order(&songs, SongSort::Title, true), [0, 1]);
-        assert_eq!(songs[0].id, 1);
-        let mut sort = None;
-        for _ in 0..4 {
-            sort = next_sort(sort, SongSort::Title);
-            assert!(sort.is_some());
-        }
-        assert!(next_sort(sort, SongSort::Title).is_none());
-    }
-
-    #[test]
-    fn keyword_matches_title_artist_and_album_case_insensitively() {
-        let track = song("Sunny Day", "Taylor Swift", Some("Fearless"));
-        assert!(song_matches(&track, "sunny"));
-        assert!(song_matches(&track, "taylor"));
-        assert!(song_matches(&track, "fearless"));
-        // 专辑缺失不应 panic，只是不命中。
-        assert!(!song_matches(&song("a", "b", None), "fearless"));
-        assert!(!song_matches(&track, "周"));
-    }
-
-    #[test]
-    fn sorting_a_filtered_subset_only_reorders_matched_rows() {
-        let songs = vec![
-            song("b", "z", None),
-            song("a", "y", None),
-            song("c", "x", None),
-        ];
-        let matched: Vec<usize> = (0..songs.len()).filter(|&index| index != 1).collect();
-        // 排序只在筛出来的下标里重排，结果就是全量排序去掉被滤掉的那行 ——
-        // 被滤掉的歌不会因为换排序又冒回来。
-        assert_eq!(song_order(&songs, SongSort::Title, false), [1, 0, 2]);
-        assert_eq!(
-            sort_indices(matched.clone(), &songs, SongSort::Title, false),
-            [0, 2]
-        );
-        assert_eq!(sort_indices(matched, &songs, SongSort::Title, true), [2, 0]);
-    }
-
-    /// `tns`（音译）和 `alia`（别名）会显示成标题的副标题，用户看得见就一定会搜它。
-    /// 「稻香」的副标题是 `（daoxiang）`，所以 `daoxiang` 必须能搜到它。
-    #[test]
-    fn keyword_also_matches_the_rendered_subtitle() {
-        let mut track = song("稻香", "周杰伦", Some("叶惠美"));
-        track.tns = vec!["dao xiang".into()];
-        track.alia = vec!["稻香 Theme".into()];
-
-        // 标题 / 歌手 / 专辑照旧。
-        assert!(song_matches(&track, "稻香"));
-        assert!(song_matches(&track, "周杰伦"));
-        assert!(song_matches(&track, "叶惠美"));
-        // 副标题里的命中也算，大小写不敏感。
-        assert!(song_matches(&track, "xiang"));
-        assert!(song_matches(&track, "DAO"));
-        assert!(song_matches(&track, "theme"));
-        assert!(!song_matches(&track, "不存在"));
     }
 }

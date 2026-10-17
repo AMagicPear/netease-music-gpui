@@ -1,9 +1,12 @@
 //! 评论列表的单条评论：头像、昵称、正文、日期与点赞/回复图标。
 //! 任何展示 [`SongComment`] 列表的页面都能复用。
+//!
+//! 颜色全部取自调用方传入的 [`ColorTokens`]：正在播放页在深色封面上用
+//! `dark_colors`，歌单页用主题原色 —— 同一行组件在两处都不再需要特判。
 
 use gpui::prelude::*;
 use gpui::*;
-use gpui_kit::base::SelectableText;
+use gpui_kit::base::{ColorTokens, SelectableText};
 use gpui_kit::component::Sizable;
 use gpui_kit::component::avatar::Avatar;
 
@@ -11,7 +14,7 @@ use crate::models::SongComment;
 use crate::ui::assets::thumbnail_url;
 use crate::ui::theme::{DOLPHIN_FAMILY, link_blue};
 
-pub fn comment_row(comment: &SongComment) -> impl IntoElement {
+pub fn comment_row(comment: &SongComment, colors: ColorTokens) -> impl IntoElement {
     let now = time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
     let current_year = now.year();
     let date = time::OffsetDateTime::from_unix_timestamp(comment.time / 1000)
@@ -37,7 +40,7 @@ pub fn comment_row(comment: &SongComment) -> impl IntoElement {
         .pt(px(19.))
         .pb(px(17.))
         .border_b_1()
-        .border_color(white().alpha(0.08))
+        .border_color(colors.border)
         .child(
             Avatar::new()
                 .with_size(px(40.))
@@ -57,7 +60,7 @@ pub fn comment_row(comment: &SongComment) -> impl IntoElement {
                 )
                 .child(
                     div()
-                        .text_color(white().alpha(0.9))
+                        .text_color(colors.foreground.alpha(0.9))
                         .text_size(px(15.))
                         .line_height(px(23.))
                         .mb_1()
@@ -71,7 +74,7 @@ pub fn comment_row(comment: &SongComment) -> impl IntoElement {
                         .flex()
                         .items_center()
                         .text_size(px(12.))
-                        .text_color(white().alpha(0.45))
+                        .text_color(colors.muted_foreground)
                         .child(div().font_family(DOLPHIN_FAMILY).child(date))
                         .child(
                             div()
@@ -88,14 +91,14 @@ pub fn comment_row(comment: &SongComment) -> impl IntoElement {
                                     svg()
                                         .path("icons/点赞.svg")
                                         .size(px(17.))
-                                        .text_color(white().alpha(0.5)),
+                                        .text_color(colors.muted_foreground),
                                 )
                                 .child(
                                     svg()
                                         .path("icons/comment.svg")
                                         .size(px(17.))
                                         .ml_3()
-                                        .text_color(white().alpha(0.5)),
+                                        .text_color(colors.muted_foreground),
                                 ),
                         ),
                 ),
