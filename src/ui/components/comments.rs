@@ -14,8 +14,11 @@
 
 use gpui::prelude::*;
 use gpui::*;
-use gpui_kit::base::{Button, ColorTokens, Scrollbar, ScrollbarMode, TextSelectionLayer, Theme};
-use std::{collections::HashSet, rc::Rc};
+use gpui_kit::base::{Button, ColorTokens, Scrollbar, ScrollbarMode, TextSelectionHandle, Theme};
+use std::{
+    collections::{HashMap, HashSet},
+    rc::Rc,
+};
 
 use crate::api::MusicApi;
 use crate::models::{SongComment, SongComments};
@@ -30,6 +33,17 @@ const FOOTER_SPACING: Pixels = px(100.);
 const HOT_SECTION_MAX: usize = 5;
 
 type ListHeader = Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>;
+
+/// 一条评论的选中身份：`handle` 按评论 id 稳定持有（见 [`comment_row`] 的
+/// [`CommentSelection`]），`refresh` 订阅它的选区变化并强制窗口重绘。
+///
+/// 为什么需要订阅：`gpui::list` 的条目是有缓存视图的，鼠标拖动本身不会让它们
+/// 重绘，而 `SelectableText` 的高亮只在 paint 时投影。不主动刷新的话，拖选时
+/// 高亮要等下一次别的原因触发重绘才出现 —— 表现就是「选完了过一会儿才显示」。
+struct SelectionEntry {
+    handle: TextSelectionHandle,
+    refresh: Option<Subscription>,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CommentResource {
@@ -64,6 +78,8 @@ pub struct CommentsView {
     resource: Option<CommentResource>,
     generation: u64,
     comments: Vec<SongComment>,
+    /// 评论 id → 选中身份。随评论一起生长，切资源时整体丢弃。
+    selection: HashMap<u64, SelectionEntry>,
     /// 开头多少条热评进「精选评论」小节：实际入列的条数，最多
     /// [`HOT_SECTION_MAX`]；为 0 时整节（含标题）不出现。
     hot_rows: usize,
@@ -101,6 +117,7 @@ impl CommentsView {
             resource: None,
             generation: 0,
             comments: Vec::new(),
+            selection: HashMap::new(),
             hot_rows: 0,
             hot_total: 0,
             seen: HashSet::new(),
@@ -126,6 +143,7 @@ impl CommentsView {
         self.resource = resource;
         self.generation = self.generation.wrapping_add(1);
         self.comments.clear();
+        self.selection.clear();
         self.hot_rows = 0;
         self.hot_total = 0;
         self.seen.clear();
@@ -328,6 +346,28 @@ impl Render for CommentsView {
             ListMode::Parked => self.list.scroll_to(self.parked_at),
         }
 
+        // 每条评论一个稳定的选中身份。handle 必须跨帧复用：`SelectableText`
+        // 把拖拽锚点、runs 的几何存在 handle 里，每帧新建等于每帧丢锚点。
+        for index in 0..self.comments.len() {
+            let id = self.comments[index].id;
+            if !self.selection.contains_key(&id) {
+                let handle = TextSelectionHandle::new(self.comments[index].content.clone(), cx);
+                self.selection.insert(
+                    id,
+                    SelectionEntry {
+                        handle,
+                        refresh: None,
+                    },
+                );
+            }
+        }
+        // 只订阅一次：选区每变一次就让窗口重绘一帧，高亮跟着指针走。
+        for entry in self.selection.values_mut() {
+            if entry.refresh.is_none() {
+                entry.refresh = Some(entry.handle.refresh_window_on_change(window, cx));
+            }
+        }
+
         // render_item 闭包只有 App 上下文，数据经实体读出来。
         let entity = cx.entity();
         let list_el = list(self.list.clone(), move |ix, window, cx| {
@@ -344,7 +384,15 @@ impl Render for CommentsView {
             let item = match view.item_at(ix) {
                 Item::LatestHeading => heading(view.total, colors, view.hot_rows > 0),
                 Item::FeaturedHeading => featured_heading(view.hot_total, colors),
-                Item::Comment(row) => comment_row(&view.comments[row], colors).into_any_element(),
+                Item::Comment(row) => {
+                    let comment = &view.comments[row];
+                    // 顺序用评论在列表里的下标：热评在前、其余在后，与视觉顺序一致。
+                    let selection = view
+                        .selection
+                        .get(&comment.id)
+                        .map(|entry| (entry.handle.clone(), row as u64));
+                    comment_row(comment, colors, selection).into_any_element()
+                }
                 Item::Footer => footer(&entity, view, colors),
             };
             // 列表视口撑满整个区域（滚动条贴边），左右留白由每个条目自带。
@@ -369,7 +417,9 @@ impl Render for CommentsView {
         div()
             .size_full()
             .relative()
-            .child(TextSelectionLayer)
+            // 选择宿主由窗口根（gpui-kit 的 `Root`）统一安装一次。这里再挂一个
+            // `TextSelectionLayer` 会有两套 WindowSelectionState 同时接管鼠标：
+            // 一套收不到参与者，另一套又被抢事件，选中行为就不稳定。
             .child(
                 div()
                     .id("album-comments-region")
