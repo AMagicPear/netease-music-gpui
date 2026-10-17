@@ -215,13 +215,32 @@ impl NowPlayingPage {
 
     /// 只移动外层，评论内容保持原位一起退场。
     pub(super) fn return_to_song(&mut self, cx: &mut Context<Self>) {
+        self.scroll_to_screen(px(0.), cx);
+    }
+
+    /// 播放栏的评论按钮在展开态走这里：不导航，只在本页上下两屏之间翻。
+    ///
+    /// 「看评论」和「滚到评论区」本来就是一回事；整页已经铺满窗口时再去换一个
+    /// 评论页，只会把唱片页顶掉。停在评论区就回唱片页，其余情况（在唱片页或
+    /// 翻页途中）一律往评论区推。
+    pub(in crate::ui) fn toggle_comments_screen(&mut self, cx: &mut Context<Self>) {
+        // 页高由上一次渲染量出：还没量过就没有可翻的目标。
+        let Some(page_height) = self.page_height else {
+            return;
+        };
+        let target = toggle_target(-f32::from(self.scroll.offset().y), page_height);
+        self.scroll_to_screen(target, cx);
+    }
+
+    /// 程序化翻到某一屏：`0` 是唱片页，`-page_height` 是评论区。
+    fn scroll_to_screen(&mut self, target: Pixels, cx: &mut Context<Self>) {
         self.wheel_watch = WheelWatch::default();
         if cx.reduce_motion() {
             self.scroll_motion = ScrollMotion::default();
-            self.scroll.set_offset(point(px(0.), px(0.)));
+            self.scroll.set_offset(point(px(0.), target));
         } else {
             let now = cx.background_executor().now();
-            self.scroll_motion.command(&self.scroll, px(0.), now);
+            self.scroll_motion.command(&self.scroll, target, now);
         }
         cx.notify();
     }
@@ -266,6 +285,16 @@ pub(super) fn reached_comments(scrolled: f32, page_height: f32) -> bool {
     scrolled >= page_height - SCROLL_END_TOLERANCE
 }
 
+/// 播放栏评论按钮的翻屏目标：已经在评论区就回唱片页，否则去评论区。
+/// 翻页途中（两个静止点之间）算「没在评论区」，按钮再点一下就是往评论区推。
+pub(super) fn toggle_target(scrolled: f32, page_height: f32) -> Pixels {
+    if reached_comments(scrolled, page_height) {
+        px(0.)
+    } else {
+        px(-page_height)
+    }
+}
+
 fn settle_target(scrolled: f32, page_height: f32, direction: f32) -> Pixels {
     let (push_down, push_up) = SETTLE_COMMIT;
     let commit = if direction > 0. {
@@ -284,9 +313,19 @@ fn settle_target(scrolled: f32, page_height: f32, direction: f32) -> Pixels {
 
 #[cfg(test)]
 mod tests {
-    use super::{SETTLE_QUIET_FINE, ScrollMotion, WheelWatch, settle_target};
+    use super::{SETTLE_QUIET_FINE, ScrollMotion, WheelWatch, settle_target, toggle_target};
     use gpui::{ScrollDelta, ScrollHandle, ScrollWheelEvent, TouchPhase, point, px};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn comment_button_flips_between_the_two_screens() {
+        // 唱片页（含容差内的小抖动）→ 评论区。
+        assert_eq!(toggle_target(0., 700.), px(-700.));
+        assert_eq!(toggle_target(350., 700.), px(-700.));
+        // 已经停在评论区 → 回唱片页。
+        assert_eq!(toggle_target(700., 700.), px(0.));
+        assert_eq!(toggle_target(699.5, 700.), px(0.));
+    }
 
     #[test]
     fn settle_follows_wheel_direction_after_quiet_period() {

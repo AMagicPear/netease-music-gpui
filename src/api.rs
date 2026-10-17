@@ -507,21 +507,31 @@ fn song_comment_page(body: serde_json::Value, offset: usize) -> Result<SongComme
     } else {
         Vec::new()
     };
+    // 热评排在最前，去重后剩下多少条就是精选小节的行数；
+    // 热评内部也可能重复，所以数的是去重后真正入列的条数。
+    let mut hot_count = 0usize;
     let comments = hot
         .into_iter()
-        .chain(page.comments)
-        .filter(|comment| seen.insert(comment.comment_id))
-        .map(|comment| SongComment {
-            id: comment.comment_id,
-            nickname: comment.user.nickname,
-            avatar_url: comment.user.avatar_url,
-            content: comment.content,
-            time: comment.time,
-            liked_count: comment.liked_count,
+        .map(|comment| (comment, true))
+        .chain(page.comments.into_iter().map(|comment| (comment, false)))
+        .filter(|(comment, _)| seen.insert(comment.comment_id))
+        .map(|(comment, is_hot)| {
+            if is_hot {
+                hot_count += 1;
+            }
+            SongComment {
+                id: comment.comment_id,
+                nickname: comment.user.nickname,
+                avatar_url: comment.user.avatar_url,
+                content: comment.content,
+                time: comment.time,
+                liked_count: comment.liked_count,
+            }
         })
         .collect();
     Ok(SongComments {
         total: page.total,
+        hot_count,
         comments,
         more: page.more,
     })

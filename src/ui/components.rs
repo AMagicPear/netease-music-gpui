@@ -11,6 +11,7 @@ use std::ops::Range;
 use crate::ui::theme::{PRESSED_ICON_ALPHA, link_blue};
 
 mod collect_window;
+mod comment_composer;
 mod comment_row;
 mod comments;
 mod drag_preview;
@@ -29,12 +30,13 @@ mod virtual_table;
 mod volume_control;
 
 pub use collect_window::open_collect_window;
+pub(in crate::ui) use comment_composer::{CommentComposer, clamp_to_limit, new_input};
 pub use comment_row::comment_row;
 pub use comments::{CommentResource, CommentsView, ListMode};
 pub use drag_preview::ResizeDragPreview;
 pub use player_bar::{PLAYER_BAR_HEIGHT, PlayerBar};
 pub use side_panel::{SidePanel, SidePanelContent};
-pub use song_menu::{PlayNext, show_song_menu};
+pub use song_menu::{PlayNext, ViewSongComments, show_song_menu};
 // 播放队列浮层、音质弹窗、账号弹层共用同一份圆角与投影；
 // 子模块与 ui 模块（shell）都通过这里取名。
 pub(in crate::ui) use popover::{SURFACE_RADIUS, SurfacePopover, surface_shadow};
@@ -44,9 +46,10 @@ pub(in crate::ui) use vinyl::{RotationClock, Vinyl};
 pub use vinyl_stage::{Tonearm, vinyl_stage};
 pub use virtual_table::{
     ACTION_BUTTON_HEIGHT, ACTION_BUTTON_PADDING, CELL_PADDING, COLUMN_GAP, DURATION_COLUMN_WIDTH,
-    HEADER_HEIGHT, LIKE_COLUMN_WIDTH, PAGE_SIDE_PADDING, ROW_HEIGHT, SECONDARY_FONT_WEIGHT,
-    SongDisplay, TableColumn, centered_empty, hovered_row_after, index_column_width,
-    play_all_button, play_count_label, row_hover_icon, title_with_subtitle, virtual_table,
+    HEADER_HEIGHT, KeepRowHover, LIKE_COLUMN_WIDTH, PAGE_SIDE_PADDING, ROW_HEIGHT,
+    SECONDARY_FONT_WEIGHT, SongDisplay, TableColumn, centered_empty, hovered_row_after,
+    index_column_width, play_all_button, play_count_label, row_hover_icon, title_with_subtitle,
+    virtual_table,
 };
 
 // 浮层都用 deferred 绘制，数字大的画得更晚、盖在上面。

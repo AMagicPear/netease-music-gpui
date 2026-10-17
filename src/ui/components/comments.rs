@@ -8,8 +8,9 @@
 //! **外层翻到评论区（整屏到位）之前，一个像素都不给评论列表**。判定由外层算好
 //! 传进来（[`ListMode`]），这里只认它，不反推。
 //!
-//! 条目布局：可选页面头部、评论标题、评论、脚标（加载 / 重试 / 空态 / 留白）。
-//! 页面头部参与同一个滚动范围；脚标恒占一个条目，状态切换不改变条目数。
+//! 条目布局：可选页面头部、「精选评论」小节（有热评才出现）、「最新评论」小节、评论、
+//! 脚标（加载 / 重试 / 空态 / 留白）。页面头部参与同一个滚动范围；脚标恒占一个条目，
+//! 状态切换不改变条目数。
 
 use gpui::prelude::*;
 use gpui::*;
@@ -25,6 +26,8 @@ use crate::ui::theme::DOLPHIN_FAMILY;
 /// 底部留白：原来的 `pb(100.)`，现在由脚标条目的高度承担，
 /// 这样 `max_offset_for_scrollbar` 测出来的滚动范围和原来一致。
 const FOOTER_SPACING: Pixels = px(100.);
+/// 「精选评论」小节最多展示的热评条数。
+const HOT_SECTION_MAX: usize = 5;
 
 type ListHeader = Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>;
 
@@ -43,6 +46,16 @@ pub enum ListMode {
     Parked,
 }
 
+/// 列表里一个下标的角色。条目顺序：
+/// 精选标题（有热评才有）、热评行、最新评论标题、其余行、脚标。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Item {
+    FeaturedHeading,
+    LatestHeading,
+    Comment(usize),
+    Footer,
+}
+
 pub struct CommentsView {
     backdrop: Option<Backdrop>,
     /// 虚拟化列表状态：条目数由数据驱动（`splice`/`reset`），行高布局时实测。
@@ -51,6 +64,11 @@ pub struct CommentsView {
     resource: Option<CommentResource>,
     generation: u64,
     comments: Vec<SongComment>,
+    /// 开头多少条热评进「精选评论」小节：实际入列的条数，最多
+    /// [`HOT_SECTION_MAX`]；为 0 时整节（含标题）不出现。
+    hot_rows: usize,
+    /// 接口给的热评总数，只用于小节标题上的数字（小节最多只显 5 行）。
+    hot_total: u64,
     seen: HashSet<u64>,
     total: u64,
     offset: usize,
@@ -83,6 +101,8 @@ impl CommentsView {
             resource: None,
             generation: 0,
             comments: Vec::new(),
+            hot_rows: 0,
+            hot_total: 0,
             seen: HashSet::new(),
             total: 0,
             offset: 0,
@@ -106,6 +126,8 @@ impl CommentsView {
         self.resource = resource;
         self.generation = self.generation.wrapping_add(1);
         self.comments.clear();
+        self.hot_rows = 0;
+        self.hot_total = 0;
         self.seen.clear();
         self.total = 0;
         self.offset = 0;
@@ -145,6 +167,32 @@ impl CommentsView {
 
     pub fn scroll_state(&self) -> ListState {
         self.list.clone()
+    }
+
+    /// 条目下标 → 角色。只在「最新评论」标题那里把行下标让一位：它插在热评行
+    /// 与其余行之间；没有精选时它直接占 0，不需要让。
+    fn item_at(&self, ix: usize) -> Item {
+        let featured = self.hot_rows > 0;
+        if ix == if featured { self.hot_rows + 1 } else { 0 } {
+            return Item::LatestHeading;
+        }
+        if ix == 0 && featured {
+            return Item::FeaturedHeading;
+        }
+        // 让出「精选评论」标题；过了最新标题的行再让一个位置。
+        let Some(row) = ix.checked_sub(1) else {
+            return Item::Footer;
+        };
+        let row = if featured && row >= self.hot_rows {
+            row - 1
+        } else {
+            row
+        };
+        if row < self.comments.len() {
+            Item::Comment(row)
+        } else {
+            Item::Footer
+        }
     }
 
     /// 外层通知这一帧的归属；这一页只有这一个开关。
@@ -223,10 +271,19 @@ impl CommentsView {
                 if self.comments.len() == before {
                     self.more = false;
                 }
-                // 插在脚标之前，保留已有行的测量与滚动锚点。
+                // 热评只合并在第一页；行数以真正入列的为准（去重可能吃掉几条），
+                // 标题上的数字用总数——超出 5 条的热评只是不进精选小节，
+                // 它们留在列表里跟着进「最新评论」。
+                if offset == 0 {
+                    self.hot_rows = page.hot_count.min(HOT_SECTION_MAX).min(self.comments.len());
+                    self.hot_total = page.hot_count as u64;
+                }
+                // 精选小节标题插在行前面；脚标恒在末尾，插在它之前
+                // 保留已有行的测量与滚动锚点。
+                let section = usize::from(offset == 0 && self.hot_rows > 0);
                 let footer = before + 1 + usize::from(self.header.is_some());
                 self.list
-                    .splice(footer..footer, self.comments.len() - before);
+                    .splice(footer..footer, (self.comments.len() - before) + section);
                 self.layout_pending = true;
             }
             Err(error) => self.error = Some(error),
@@ -284,10 +341,11 @@ impl Render for CommentsView {
             let view = entity.read(cx);
             // 行组件颜色全部走 tokens：深色封面上的取值由 colors_for 统一改写。
             let colors = colors_for(view.backdrop.as_ref(), cx);
-            let item = match ix.checked_sub(1).and_then(|i| view.comments.get(i)) {
-                Some(comment) => comment_row(comment, colors).into_any_element(),
-                None if ix == 0 => heading(view.total, colors),
-                None => footer(&entity, view, colors),
+            let item = match view.item_at(ix) {
+                Item::LatestHeading => heading(view.total, colors, view.hot_rows > 0),
+                Item::FeaturedHeading => featured_heading(view.hot_total, colors),
+                Item::Comment(row) => comment_row(&view.comments[row], colors).into_any_element(),
+                Item::Footer => footer(&entity, view, colors),
             };
             // 列表视口撑满整个区域（滚动条贴边），左右留白由每个条目自带。
             // w_full：条目以独立布局根测量，flex 根的 auto 宽会收缩，必须显式拉满。
@@ -366,31 +424,41 @@ fn colors_for(backdrop: Option<&Backdrop>, cx: &App) -> ColorTokens {
     }
 }
 
-/// 标题行：跟随内容一起滚动（原来就在滚动容器里）。
-fn heading(total: u64, colors: ColorTokens) -> AnyElement {
-    div()
+/// 「最新评论」小节标题：跟随内容一起滚动（原来就在滚动容器里）。总数未知（0）时先不显数。
+/// `separated`：上面还有精选小节，要点一下间距，否则紧贴着热评行。
+fn heading(total: u64, colors: ColorTokens, separated: bool) -> AnyElement {
+    section("最新评论", (total > 0).then_some(total), colors)
+        .when(separated, |heading| heading.mt(px(12.)))
         .debug_selector(|| "album-comments-heading".into())
+        .into_any_element()
+}
+
+/// 「精选评论」小节标题：数字是热评总数，小节本身最多只列 [`HOT_SECTION_MAX`] 行。
+fn featured_heading(hot: u64, colors: ColorTokens) -> AnyElement {
+    section("精选评论", (hot > 0).then_some(hot), colors).into_any_element()
+}
+
+/// 小节标题。下面不额外留白：评论行自带 19px 顶内距，靠它顶开就够。
+fn section(text: &'static str, count: Option<u64>, colors: ColorTokens) -> Div {
+    div()
         .flex()
-        .items_center()
         .items_start()
-        .mb_4()
         .text_color(colors.foreground)
         .font_weight(FontWeight::SEMIBOLD)
         .child(
             div()
                 .text_size(px(16.))
                 .font_weight(FontWeight::SEMIBOLD)
-                .child("全部评论"),
+                .child(text),
         )
-        .child(
+        .children(count.map(|total| {
             div()
                 .ml(px(1.))
                 .text_size(px(13.))
                 .font_weight(FontWeight::BOLD)
                 .font_family(DOLPHIN_FAMILY)
-                .child(total.to_string()),
-        )
-        .into_any_element()
+                .child(total.to_string())
+        }))
 }
 
 /// 脚标条目：加载指示、重试按钮、空态；无事可示时退化为底部留白。
@@ -441,13 +509,14 @@ impl Drop for CommentsView {
 
 #[cfg(test)]
 mod tests {
-    use super::{CommentResource, CommentsView, SongComment, SongComments};
+    use super::{CommentResource, CommentsView, Item, SongComment, SongComments};
     use gpui::{IntoElement, div};
     use std::rc::Rc;
 
     fn page(ids: &[u64]) -> Result<SongComments, String> {
         Ok(SongComments {
             total: 100,
+            hot_count: 0,
             more: true,
             comments: ids
                 .iter()
@@ -461,6 +530,90 @@ mod tests {
                 })
                 .collect(),
         })
+    }
+
+    #[test]
+    fn hot_comments_get_their_own_section_header() {
+        let resource = CommentResource::Song(1);
+        let mut view = CommentsView::new(None);
+        view.resource = Some(resource);
+        let mut first = page(&[1, 2, 3]).unwrap();
+        first.hot_count = 2;
+        assert!(view.finish(resource, 0, 0, Ok(first)));
+        assert_eq!(view.hot_rows, 2);
+        // 精选标题 + 2 行热评 + 最新标题 + 1 行 + 脚标。
+        assert_eq!(view.list.item_count(), 6);
+        // 翻页不再带小节；重复的热评（id 2）被去重，只进一行新的。
+        assert!(view.finish(resource, 0, 20, page(&[2, 4])));
+        assert_eq!(view.list.item_count(), 7);
+        assert_eq!(
+            view.comments
+                .iter()
+                .map(|comment| comment.id)
+                .collect::<Vec<_>>(),
+            [1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn hot_section_keeps_at_most_five_rows() {
+        let resource = CommentResource::Song(1);
+        let mut view = CommentsView::new(None);
+        view.resource = Some(resource);
+        let mut first = page(&[1, 2, 3, 4, 5, 6, 7]).unwrap();
+        first.hot_count = 7;
+        assert!(view.finish(resource, 0, 0, Ok(first)));
+        // 小节里只列 5 行，标题上的数字是总数。
+        assert_eq!(view.hot_rows, 5);
+        assert_eq!(view.hot_total, 7);
+        // 精选标题 + 5 行热评 + 最新标题 + 剩下 2 行 + 脚标。
+        assert_eq!(view.list.item_count(), 10);
+    }
+
+    fn items(view: &CommentsView, len: usize) -> Vec<Item> {
+        (0..len).map(|ix| view.item_at(ix)).collect()
+    }
+
+    #[test]
+    fn items_are_two_sections_then_footer() {
+        let resource = CommentResource::Song(1);
+        let mut view = CommentsView::new(None);
+        view.resource = Some(resource);
+        let mut first = page(&[1, 2, 3, 4, 5]).unwrap();
+        first.hot_count = 2;
+        assert!(view.finish(resource, 0, 0, Ok(first)));
+        // 精选标题 → 2 行热评 → 最新标题 → 其余 3 行 → 脚标。
+        assert_eq!(
+            items(&view, 8),
+            [
+                Item::FeaturedHeading,
+                Item::Comment(0),
+                Item::Comment(1),
+                Item::LatestHeading,
+                Item::Comment(2),
+                Item::Comment(3),
+                Item::Comment(4),
+                Item::Footer,
+            ]
+        );
+    }
+
+    #[test]
+    fn no_hot_comments_means_a_single_latest_section() {
+        let resource = CommentResource::Playlist(1);
+        let mut view = CommentsView::new(None);
+        view.resource = Some(resource);
+        assert!(view.finish(resource, 0, 0, page(&[1, 2, 3])));
+        assert_eq!(
+            items(&view, 5),
+            [
+                Item::LatestHeading,
+                Item::Comment(0),
+                Item::Comment(1),
+                Item::Comment(2),
+                Item::Footer,
+            ]
+        );
     }
 
     #[test]

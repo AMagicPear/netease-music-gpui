@@ -21,6 +21,9 @@ pub struct SongComment {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SongComments {
     pub total: u64,
+    /// 第一页里热评的条数：`comments` 前 `hot_count` 条是精选评论，
+    /// UI 据此分出「精选评论」小节（最多取 5 条）；翻页请求里恒为 0。
+    pub hot_count: usize,
     pub comments: Vec<SongComment>,
     pub more: bool,
 }

@@ -6,14 +6,18 @@ use gpui::*;
 use super::assets::{CoverPrefetch, thumbnail_url, track_cover_url};
 use super::components::{
     PAGE_SIDE_PADDING, PLAYER_BAR_HEIGHT, PlayNext, PlayerBar, ResizeDragPreview, SidePanel,
-    SidePanelContent, SurfacePopover, icon_hover_color, search_clear_button, window_drag_area,
+    SidePanelContent, SurfacePopover, ViewSongComments, icon_hover_color, search_clear_button,
+    window_drag_area,
 };
 use super::cover_color::{Backdrop, CoverColor, CoverGradient, gradient_layer};
 use super::now_playing::{NowPlaying, NowPlayingPage};
 use super::pages::search::OpenPlaylist;
-use super::pages::{ContentPage, playlist::PlaylistPage, search::SearchPage};
+use super::pages::{
+    ContentPage, playlist::PlaylistPage, search::SearchPage, song_comments::SongCommentsPage,
+};
 use super::sidebar::{LoginRequested, SidebarChanged, SidebarPage};
 use super::theme::{IconSize, PRESSED_ICON_ALPHA};
+use crate::models::Song;
 use crate::playback::PlaybackController;
 use crate::state::account::AccountState;
 use crate::state::library::MusicLibrary;
@@ -147,6 +151,8 @@ impl Render for MainWindow {
         let colors = Theme::global(cx).tokens.colors;
         let tint = self.playlist_tint(window, cx);
         let playback = self.playback.clone();
+        let main_content = self.main_content.clone();
+        let now_playing_page = self.now_playing_page.clone();
         div()
             // 歌曲菜单的「下一首播放」：原生菜单把 action 派发到窗口，冒泡上来后由这个根
             // div 接住（元素级 on_action 在绘制阶段注册，避开「只能 paint 期间调用」的限制）。
@@ -154,6 +160,24 @@ impl Render for MainWindow {
             .on_action(move |action: &PlayNext, _window, cx| {
                 cx.update_entity(&playback, |controller, cx| {
                     controller.insert_next(action.0.clone(), cx);
+                });
+            })
+            // 「查看评论」（菜单、播放栏 / 歌曲行的评论图标都派发它）同一条链路：
+            // action 带着歌进来，导航、详情加载都归 MainContent。
+            //
+            // 例外是正在播放页开着的时候：那一页已经铺满窗口，评论按钮想看的评论
+            // 就在它的下半屏，该翻屏而不是再叠一个评论页上去（此时也只有播放栏上的
+            // 评论按钮点得到——浮层盖住了其余入口）。
+            .on_action(move |action: &ViewSongComments, window, cx| {
+                if now_playing_page.read(cx).is_expanded(cx) {
+                    cx.update_entity(&now_playing_page, |page, cx| {
+                        page.toggle_comments_screen(cx);
+                    });
+                    return;
+                }
+                let song = action.0.clone();
+                cx.update_entity(&main_content, |content, cx| {
+                    content.open_song_comments(song, window, cx);
                 });
             })
             .size_full()
@@ -223,6 +247,8 @@ pub struct MainContent {
     /// 每个导航项对应一个页面 View，一次创建后长期持有。
     pages: HashMap<ContentPage, AnyView>,
     playlist_page: Entity<PlaylistPage>,
+    /// 歌曲评论页：没有侧栏入口，评论图标进来，切歌换内容。
+    song_comments_page: Entity<SongCommentsPage>,
     /// 搜索结果页：没有侧栏入口，只在搜索框提交后展示。
     search_page: Entity<SearchPage>,
     search_results: Entity<SearchResults>,
@@ -281,6 +307,7 @@ impl MainContent {
                 cx.notify();
             }
         });
+        let song_comments_page = cx.new(|cx| SongCommentsPage::new(window, cx));
         let library_subscription = cx.observe(&library, |this, _, cx| {
             // 收藏歌单的 ID 要等账号索引返回后才能解析。
             this.open_playlist(this.active_page, cx);
@@ -346,6 +373,7 @@ impl MainContent {
             account_id: 0,
             pages,
             playlist_page,
+            song_comments_page,
             search_page,
             search_results,
             library,
@@ -420,6 +448,20 @@ impl MainContent {
             view.open(Some(event.id), Some(event.summary.clone()), cx)
         });
         self.navigate(ContentPage::Playlist(event.id), cx);
+    }
+
+    /// 评论图标（播放栏 / 歌曲行 / 右键菜单）统一从这里进歌曲评论页。
+    /// 先把歌交给页面，再导航：返回键沿历史退出，页面实体保留评论和滚动位置。
+    pub(super) fn open_song_comments(
+        &mut self,
+        song: Song,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let id = song.id;
+        self.song_comments_page
+            .update(cx, |page, cx| page.open(song, window, cx));
+        self.navigate(ContentPage::SongComments(id), cx);
     }
 
     fn open_playlist(&mut self, page: ContentPage, cx: &mut Context<Self>) {
@@ -811,6 +853,10 @@ impl Render for MainContent {
                 window.viewport_size().width - self.sidebar_width - px(80.),
                 cx,
             )),
+            // 歌曲评论页同样没有侧栏按钮，由评论图标的 action 导航进来。
+            ContentPage::SongComments(_) => {
+                Some(self.song_comments_page.clone().into_any_element())
+            }
             // 搜索结果页没有侧栏按钮，由搜索框提交时 navigate 进来。
             ContentPage::Search => Some(self.search_page.clone().into_any_element()),
             _ => self
@@ -823,8 +869,10 @@ impl Render for MainContent {
         // 搜索结果页自己管滚动：搜索词标题和分类 tab 要一直留在视野里，只有表格区域滚动。
         // 它连左右留白也不在这一层取——留在这里会被它自己的滚动容器挡在投影之外，
         // 行的 hover 阴影就被切出硬边了；它把留白加在自己的滚动容器上。
-        // 评论页把歌单头部也纳入虚拟列表，整页只保留列表自己的滚动条。
-        let page_scrolls = !matches!(active_page, ContentPage::Search) && !playlist_comments;
+        // 评论页把（歌单 / 歌曲）头部也纳入虚拟列表，整页只保留列表自己的滚动条。
+        let full_bleed_comments =
+            playlist_comments || matches!(active_page, ContentPage::SongComments(_));
+        let page_scrolls = !matches!(active_page, ContentPage::Search) && !full_bleed_comments;
 
         div()
             // cached 会独立布局这棵树，根节点需要占满缓存容器。
@@ -863,7 +911,7 @@ impl Render for MainContent {
                                     ))
                                     .flex_1()
                                     .min_h(px(0.))
-                                    .when(!playlist_comments, |content| content.py(px(18.)))
+                                    .when(!full_bleed_comments, |content| content.py(px(18.)))
                                     .when(page_scrolls, |content| {
                                         content
                                             .px(PAGE_SIDE_PADDING)

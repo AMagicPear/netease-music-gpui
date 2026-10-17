@@ -508,6 +508,24 @@ pub fn title_with_subtitle(
     }
 }
 
+/// 行内可点元素统一挂这个：拦下这次左键按下，不让它冒到整行。
+///
+/// 表格行为了右键菜单装了 aux-click 监听，行的「点击判定」因此会在按下时记下
+/// `pending_mouse_down`；而 gpui 的 `on_hover` 在按下期间一律报 false
+/// （见 `Interactivity` 的 hover listener：`has_mouse_down` 非空就不报 hover）。
+/// 于是按住一个图标稍稍移动，行 hover 就丢了，只在 hover 时渲染的图标当场消失。
+/// 图标自己先停传播，整行就不会记下这次按下；单击照旧，因为点击判定用的是
+/// 元素自己那份按下状态，它在同元素上比这层监听先执行。
+pub trait KeepRowHover: Sized {
+    fn keep_row_hover(self) -> Self;
+}
+
+impl<E: InteractiveElement + Sized> KeepRowHover for E {
+    fn keep_row_hover(self) -> Self {
+        self.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+    }
+}
+
 /// 行 hover 时才出现的图标：序号位置的播放键、标题右侧那排操作按钮，共用这一套样式。
 pub fn row_hover_icon(
     id: (&'static str, u64),

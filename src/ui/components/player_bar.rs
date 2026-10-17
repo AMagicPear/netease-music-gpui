@@ -8,7 +8,8 @@ use super::progress_bar::ProgressBar;
 use super::side_panel::{SidePanel, SidePanelContent};
 use super::volume_control::VolumeControl;
 use super::{
-    LAYER_PROGRESS_BAR, SurfacePopover, Vinyl, artist_label, icon_hover_color, like_icon_path,
+    LAYER_PROGRESS_BAR, SurfacePopover, ViewSongComments, Vinyl, artist_label, icon_hover_color,
+    like_icon_path,
 };
 use crate::api::MusicApi;
 use crate::models::AudioQualityLevel;
@@ -51,6 +52,13 @@ pub struct PlayerBar {
     _progress_subscription: Subscription,
     _library_subscription: Subscription,
     _now_playing_subscription: Subscription,
+}
+
+/// 互动区图标的点击行为：红心切喜欢，评论开评论页，其余图标还没接。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InteractionClick {
+    Like,
+    Comments,
 }
 
 impl PlayerBar {
@@ -212,15 +220,15 @@ impl PlayerBar {
     /// 没法用一个 `group` 的形状同时罩住它们。所以改用 view 里的悬停状态把两者绑在一起：
     /// 谁被悬停都算这块互动区被悬停，两边都按同一份状态取色。
     ///
-    /// 只有红心接了动作，它会在点击处理里停传播；评论还没接面板，那一下会照常冒到
-    /// 栏根，跟着整栏一起展开 / 收起。
+    /// 点击行为由 `click` 决定：红心切喜欢、评论进评论页，都会先停传播，
+    /// 否则那一下会冒到栏根，顺手把整栏展开 / 收起。
     fn interaction_count(
         &self,
         id: &'static str,
         path: &'static str,
         count: Option<u64>,
-        // 红心按钮传 true：点击时自己去取当时正在播放的那首歌，避免每帧克隆整首。
-        like_button: bool,
+        // 点击行为：红心取当时正在播放的那首歌，避免每帧克隆整首。
+        click: InteractionClick,
         color: Hsla,
         hover_color: Hsla,
         pressed_color: Hsla,
@@ -242,16 +250,23 @@ impl PlayerBar {
             .on_hover(cx.listener(move |this, hovered, _, cx| {
                 this.set_interaction_hover((id, INTERACTION_AREA), *hovered, cx);
             }))
-            .when(like_button, |element| {
+            .when(click == InteractionClick::Like, |element| {
                 element.on_click(cx.listener(|this, _, _, cx| {
-                    // 整条栏现在是一个"展开/收起"的点击区（见 render 里栏根的 on_click），
-                    // 自带行为的部件都要先停传播，否则点红心会顺手把歌词页也收起。
                     cx.stop_propagation();
                     let Some(song) = this.playback.read(cx).snapshot().current_song.clone() else {
                         return;
                     };
                     this.library
                         .update(cx, |library, cx| library.toggle_like(song, cx));
+                }))
+            })
+            .when(click == InteractionClick::Comments, |element| {
+                element.on_click(cx.listener(|this, _, window, cx| {
+                    cx.stop_propagation();
+                    let Some(song) = this.playback.read(cx).snapshot().current_song.clone() else {
+                        return;
+                    };
+                    window.dispatch_action(Box::new(ViewSongComments(song)), cx);
                 }))
             })
             .child(
@@ -830,7 +845,7 @@ impl Render for PlayerBar {
                                 "player-like-button",
                                 like_icon_path(liked),
                                 self.counts[0],
-                                song_id.is_some(),
+                                InteractionClick::Like,
                                 if liked {
                                     theme_colors.primary
                                 } else {
@@ -853,7 +868,7 @@ impl Render for PlayerBar {
                                 "player-comment-button",
                                 "icons/comment.svg",
                                 self.counts[1],
-                                false,
+                                InteractionClick::Comments,
                                 colors.muted_foreground,
                                 icon_hover_color(colors.muted_foreground, colors),
                                 colors.foreground,

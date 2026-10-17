@@ -210,7 +210,7 @@ impl NowPlayingPage {
     }
 
     /// 这一页是否展开。只读单一状态源，页面自己不再存副本。
-    fn is_expanded(&self, cx: &App) -> bool {
+    pub(in crate::ui) fn is_expanded(&self, cx: &App) -> bool {
         self.now_playing.read(cx).is_expanded()
     }
 

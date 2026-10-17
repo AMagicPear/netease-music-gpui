@@ -10,7 +10,7 @@ use crate::state::library::MusicLibrary;
 use crate::state::search_results::SearchResults;
 use crate::ui::assets::{track_cover_image, track_cover_url};
 use crate::ui::components::{
-    ACTION_BUTTON_HEIGHT, CELL_PADDING, DURATION_COLUMN_WIDTH, LIKE_COLUMN_WIDTH,
+    ACTION_BUTTON_HEIGHT, CELL_PADDING, DURATION_COLUMN_WIDTH, KeepRowHover, LIKE_COLUMN_WIDTH,
     PAGE_SIDE_PADDING, ROW_HEIGHT, SECONDARY_FONT_WEIGHT, SongDisplay, TabBar, TabChanged, TabItem,
     TableColumn, artist_label, centered_empty, hovered_row_after, index_column_width,
     like_icon_path, play_all_button, play_count_label, quality_badge_path, row_hover_icon, spinner,
@@ -581,6 +581,7 @@ impl SearchPage {
                     .child(
                         div()
                             .id(("search-pause-song", song_id))
+                            .keep_row_hover()
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.playback.update(cx, |playback, cx| playback.pause(cx));
                             }))
@@ -599,6 +600,7 @@ impl SearchPage {
                     .child(
                         div()
                             .id(("search-select-song", song_id))
+                            .keep_row_hover()
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.play_from(song_id, cx)),
                             )
@@ -652,6 +654,7 @@ impl SearchPage {
                 })
                 .id(("search-song-like", song_id))
                 .aria_label(if liked { "已喜欢" } else { "未喜欢" })
+                .keep_row_hover()
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.library
                         .update(cx, |library, cx| library.toggle_like(song.clone(), cx));

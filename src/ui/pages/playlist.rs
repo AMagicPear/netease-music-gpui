@@ -42,12 +42,13 @@ use crate::playback::PlaybackController;
 use crate::state::{library::MusicLibrary, playlist_detail::PlaylistDetail};
 use crate::ui::assets::thumbnail_url;
 use crate::ui::components::{
-    ACTION_BUTTON_HEIGHT, ACTION_BUTTON_PADDING, CELL_PADDING, COLUMN_GAP, CommentResource,
-    CommentsView, DURATION_COLUMN_WIDTH, HEADER_HEIGHT, LIKE_COLUMN_WIDTH, ListMode,
-    ResizeDragPreview, SECONDARY_FONT_WEIGHT, SongDisplay, TabBar, TabChanged, TabItem,
-    TableColumn, artist_label, centered_empty, hovered_row_after, index_column_width,
-    like_icon_path, play_all_button, play_count_label, quality_badge_path, row_hover_icon,
-    search_clear_button, spinner, text_with_matches, title_with_subtitle, virtual_table,
+    ACTION_BUTTON_HEIGHT, ACTION_BUTTON_PADDING, CELL_PADDING, COLUMN_GAP, CommentComposer,
+    CommentResource, CommentsView, DURATION_COLUMN_WIDTH, HEADER_HEIGHT, KeepRowHover,
+    LIKE_COLUMN_WIDTH, ListMode, ResizeDragPreview, SECONDARY_FONT_WEIGHT, SongDisplay, TabBar,
+    TabChanged, TabItem, TableColumn, ViewSongComments, artist_label, centered_empty,
+    clamp_to_limit, hovered_row_after, index_column_width, like_icon_path, new_input,
+    play_all_button, play_count_label, quality_badge_path, row_hover_icon, search_clear_button,
+    spinner, text_with_matches, title_with_subtitle, virtual_table,
 };
 use crate::ui::cover_color::{Backdrop, blend_color};
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
@@ -80,9 +81,10 @@ pub struct PlaylistPage {
     comments: Entity<CommentsView>,
     comment_input: Entity<TextareaState>,
     _comment_input_subscription: Subscription,
-    comment_input_y: Rc<Cell<Option<Pixels>>>,
-    /// 歌单页背景渐变（和 shell 画的是同一份）：吸顶条按自己位置取色。
-    backdrop: Backdrop,
+    /// 吸顶编辑框：占位参与列表布局，实际框画在覆盖层，逻辑全在组件里。
+    composer: CommentComposer,
+    /// 列表滚动 / 翻页时覆盖层要跟着重新定位；gpui 不会自动通知父 view，显式接一条。
+    _comments_subscription: Subscription,
     _detail_subscription: Subscription,
     playlist_id: Option<u64>,
     /// 导航意图：当前是否是「我喜欢的音乐」页。
@@ -160,6 +162,8 @@ fn row_actions(index: u64, song: &Song, colors: ColorTokens) -> AnyElement {
             .id((id, index))
             .role(Role::Button)
             .aria_label(label)
+            // 这排图标只在行 hover 时挂载，按下不能冒到整行，否则按住移动就消失。
+            .keep_row_hover()
             .active(|style| style.text_color(colors.foreground.alpha(PRESSED_ICON_ALPHA)))
     };
     div()
@@ -179,11 +183,14 @@ fn row_actions(index: u64, song: &Song, colors: ColorTokens) -> AnyElement {
             action_icon("playlist-song-collect", "icons/collect.svg", "收藏")
                 .on_click(|_, window, cx| crate::ui::components::open_collect_window(window, cx)),
         )
-        .child(action_icon(
-            "playlist-song-comment",
-            "icons/comment.svg",
-            "评论",
-        ))
+        .child(
+            action_icon("playlist-song-comment", "icons/comment.svg", "评论").on_click({
+                let song = song.clone();
+                move |_, window, cx| {
+                    window.dispatch_action(Box::new(ViewSongComments(song.clone())), cx);
+                }
+            }),
+        )
         // 最右侧的「更多」弹出原生菜单。
         .child(
             action_icon("playlist-song-more", "icons/xpoint.svg", "更多").on_click({
@@ -282,42 +289,23 @@ impl PlaylistPage {
                 cx,
             );
         });
-        let comment_input = cx.new(|cx| {
-            let mut input = TextareaState::new(window, cx)
-                .placeholder("说点什么吧")
-                .rows(2)
-                .scroll_beyond_last_line(Some(0));
-            let colors = Theme::global(cx).tokens.colors;
-            input.set_editor_style(InputEditorStyle {
-                foreground: colors.foreground,
-                muted_foreground: colors.muted_foreground,
-                selection: colors.selection,
-                ..Default::default()
-            });
-            input
-        });
+        let comment_input = new_input(window, cx);
         let comment_input_subscription = cx.subscribe_in(
             &comment_input,
             window,
             |_, input, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::Change) {
-                    input.update(cx, |input, cx| {
-                        let value = input.value();
-                        if let Some((end, _)) = value.char_indices().nth(comments::COMMENT_LIMIT) {
-                            let selection = input.selected_range();
-                            // 只裁掉超限尾部，保留编辑历史和当前选区。
-                            input.set_selected_range(end..value.len(), cx);
-                            input.replace("", window, cx);
-                            input.set_selected_range(
-                                selection.start.min(end)..selection.end.min(end),
-                                cx,
-                            );
-                        }
-                    });
+                    input.update(cx, |input, cx| clamp_to_limit(input, window, cx));
                 }
                 cx.notify();
             },
         );
+        let composer = CommentComposer::new(
+            comment_input.clone(),
+            comments.clone(),
+            Some(backdrop.clone()),
+        );
+        let comments_subscription = cx.observe(&comments, |_, _, cx| cx.notify());
         let tabs = cx.new(|_| {
             TabBar::new(vec![
                 TabItem::new("歌曲"),
@@ -404,7 +392,7 @@ impl PlaylistPage {
                     .update(cx, |input, cx| input.set_value("", window, cx));
                 this.comment_input
                     .update(cx, |input, cx| input.set_value("", window, cx));
-                this.comment_input_y.set(None);
+                this.composer.reset();
             }
             let detail = detail.read(cx);
             this.song_display = detail.songs.iter().map(SongDisplay::new).collect();
@@ -461,8 +449,8 @@ impl PlaylistPage {
             comments,
             comment_input,
             _comment_input_subscription: comment_input_subscription,
-            comment_input_y: Rc::new(Cell::new(None)),
-            backdrop,
+            composer,
+            _comments_subscription: comments_subscription,
             _detail_subscription: detail_subscription,
             playlist_id: None,
             is_favorite_view: false,
@@ -1231,6 +1219,7 @@ impl PlaylistPage {
                     .child(
                         div()
                             .id(("playlist-pause-song", song_id))
+                            .keep_row_hover()
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.playback.update(cx, |playback, cx| {
                                     playback.pause(cx);
@@ -1251,6 +1240,7 @@ impl PlaylistPage {
                     .child(
                         div()
                             .id(("playlist-select-song", song_id))
+                            .keep_row_hover()
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.select_song(song_id, cx)),
                             )
@@ -1321,6 +1311,7 @@ impl PlaylistPage {
                 })
                 .id(("playlist-song-like", song_id))
                 .aria_label(if liked { "已喜欢" } else { "未喜欢" })
+                .keep_row_hover()
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.library
                         .update(cx, |library, cx| library.toggle_like(like_song.clone(), cx));
@@ -1401,7 +1392,7 @@ impl Render for PlaylistPage {
                 .relative()
                 .overflow_hidden()
                 .child(self.comments.clone())
-                .child(self.comment_input_overlay(cx));
+                .child(self.composer.overlay());
         }
         let colors = Theme::global(cx).tokens.colors;
         // 展开与否只由「有没有焦点」和「有没有字」决定：光标停在框里就该让用户看得见

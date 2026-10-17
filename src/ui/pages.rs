@@ -8,6 +8,7 @@ mod recent;
 mod recommend;
 mod roaming;
 pub(super) mod search;
+pub(super) mod song_comments;
 
 use gpui::*;
 
@@ -21,6 +22,8 @@ pub(super) enum ContentPage {
     Following,
     FavoriteMusic,
     Playlist(u64),
+    /// 歌曲评论页：评论图标进来，侧栏没有对应按钮。
+    SongComments(u64),
     Recent,
     MyPodcast,
     MyCollection,
@@ -60,6 +63,7 @@ impl ContentPage {
             Self::Following => "following",
             Self::FavoriteMusic => "favorite-music",
             Self::Playlist(id) => return format!("playlist-{id}").into(),
+            Self::SongComments(id) => return format!("song-comments-{id}").into(),
             Self::Recent => "recent",
             Self::MyPodcast => "my-podcast",
             Self::MyCollection => "my-collection",
@@ -79,6 +83,7 @@ impl ContentPage {
             Self::Following => "关注",
             Self::FavoriteMusic => "我喜欢的音乐",
             Self::Playlist(_) => "歌单",
+            Self::SongComments(_) => "歌曲评论",
             Self::Recent => "最近播放",
             Self::MyPodcast => "我的播客",
             Self::MyCollection => "我的收藏",
@@ -97,6 +102,7 @@ impl ContentPage {
             Self::Following => "icons/sidebar/sidebar_community.svg",
             Self::FavoriteMusic => "icons/sidebar/sidebar_like.svg",
             Self::Playlist(_) => "icons/playlist.svg",
+            Self::SongComments(_) => "icons/comment.svg",
             Self::Recent => "icons/sidebar/sidebar_history.svg",
             Self::MyPodcast => "icons/sidebar/sidebar_my_podcast.svg",
             Self::MyCollection => "icons/sidebar/sidebar_favourite.svg",
@@ -126,7 +132,9 @@ impl ContentPage {
             Self::Podcast => cx.new(|_| podcast::PodcastPage).into(),
             Self::Roaming => cx.new(|_| roaming::RoamingPage).into(),
             Self::Following => cx.new(|_| following::FollowingPage).into(),
-            Self::FavoriteMusic | Self::Playlist(_) | Self::Search => return None,
+            Self::FavoriteMusic | Self::Playlist(_) | Self::SongComments(_) | Self::Search => {
+                return None;
+            }
             Self::Recent => cx.new(|_| recent::RecentPage).into(),
             Self::MyPodcast => cx.new(|_| my_podcast::MyPodcastPage).into(),
             Self::MyCollection => cx.new(|_| my_collection::MyCollectionPage).into(),
