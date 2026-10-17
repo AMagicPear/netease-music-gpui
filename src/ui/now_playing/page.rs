@@ -146,6 +146,11 @@ impl ScrollMotion {
     }
 
     /// 推进运动；还在动就顺带要下一帧。
+    ///
+    /// 这里只能续上「已经在飞」的运动：起跑的那一帧必须由起跑处自己要帧，见
+    /// [`Self::settle`] 调用点。`Motion::Command` 的起跑点在点击回调里（绘制之外），
+    /// 那次 notify 已经把窗口弄脏了，第一帧自然会有；`Motion::Settle` 的起跑点在
+    /// `render` 里，绘制之内 notify 不作数，只能 `request_animation_frame`。
     fn step(&mut self, handle: &ScrollHandle, window: &mut Window, now: Instant) -> bool {
         let running = self.advance(handle, now);
         if running {
@@ -503,7 +508,20 @@ impl NowPlayingPage {
         } else {
             self.scroll_motion.settle(&self.scroll, target, now);
         }
-        cx.notify();
+        // 起跑的这一帧得由这里自己要到下一帧，而且**不能**写成 `cx.notify()`。
+        //
+        // 本页是 cached 视图（shell 里 `.cached(..)`），cached 视图的 `render` 跑在
+        // prepaint 而不是 layout 阶段；GPUI 此时 `WindowInvalidator` 的 draw_phase 是
+        // `Prepaint`，`cx.notify()` 走不到「窗口脏了、下一帧重画」那一支——它只把本页
+        // 记进 `dirty_views`，而那份记录在本次绘制结束时就被清掉了。于是没有人再画一帧，
+        // `render` 没有下一次，弹簧永远停在起点：弹簧的初始位置就是手停下的那个偏移，
+        // 看上去正好是「吸附卡在半路」。
+        //
+        // `window.request_animation_frame()` 才是这里能用的那句：它把回调排到本帧
+        // 渲染之后（跑在绘制之外），回调里再 notify，窗口就真的脏了、真的会有下一帧。
+        // 同理，暂停播放时看不出问题——播放 tick 每 100ms 从绘制之外通知一次，顺手
+        // 把帧喂上了，弹簧被推着走完；一暂停就再没人喂帧，卡在原地。
+        window.request_animation_frame();
     }
 
     /// 这一页是否展开。只读单一状态源，页面自己不再存副本。

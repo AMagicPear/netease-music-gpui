@@ -1,5 +1,6 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use gpui_kit::base::input::{Input, InputEditorStyle, InputEvent, InputState};
 use gpui_kit::base::{Button, ColorTokens, Theme, Transition, transition};
 use gpui_kit::component::Sizable;
 use gpui_kit::component::avatar::Avatar;
@@ -16,6 +17,16 @@ const ALBUM_SHARE_MAX: f32 = 0.8;
 /// 两处必须完全一致 `group_hover` 才会响应，所以抽成常量而不是写两遍字面量。
 const DIVIDER_ID: &str = "playlist-title-divider";
 
+/// 搜索框收起时的宽度：只够放下放大镜和左右各 8px 留白，输入区被裁到看不见。
+const SEARCH_COLLAPSED_WIDTH: Pixels = px(40.);
+/// 搜索框展开后的宽度，和官方「歌单内搜索」一致。
+const SEARCH_EXPANDED_WIDTH: Pixels = px(200.);
+const SEARCH_BOX_HEIGHT: Pixels = px(30.);
+/// 收起 / 展开的时长。宽度是位移量，给足时间胶囊才像「长」出来而不是跳一下。
+const SEARCH_EXPAND_DURATION: Duration = Duration::from_millis(220);
+/// 边框变色比宽度快一档：先把边界交代清楚，宽度再跟上，读起来是两个动作。
+const SEARCH_BORDER_DURATION: Duration = Duration::from_millis(150);
+
 /// 起拖时的鼠标 x、专辑占比、两列可用宽度。
 type DividerDragAnchor = Rc<Cell<(Pixels, f32, Pixels)>>;
 
@@ -30,7 +41,7 @@ use crate::ui::components::{
     index_column_width, like_icon_path, play_all_button, play_count_label, quality_badge_path,
     row_hover_icon, spinner, title_with_subtitle, virtual_table,
 };
-use crate::ui::cover_color::Backdrop;
+use crate::ui::cover_color::{Backdrop, blend_color};
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
 
 // 「更多」菜单里的三个命令。
@@ -71,6 +82,9 @@ pub struct PlaylistPage {
     display_order: Vec<usize>,
     /// 按原始歌曲索引缓存；排序只改变 display_order，不复制展示数据。
     song_display: Vec<SongDisplay>,
+    /// 歌单内搜索。只过滤已加载的歌曲，不发请求。
+    search_input: Entity<InputState>,
+    _search_subscription: Subscription,
     columns: Rc<Vec<TableColumn>>,
     sort: Option<(SongSort, bool)>,
     album_share: f32,
@@ -230,6 +244,7 @@ impl Render for PlayingIndicator {
 
 impl PlaylistPage {
     pub fn new(
+        window: &mut Window,
         library: Entity<MusicLibrary>,
         playback: Entity<PlaybackController>,
         cx: &mut Context<Self>,
@@ -277,21 +292,34 @@ impl PlaylistPage {
                 cx.notify();
             }
         });
-        let detail_subscription = cx.observe(&detail, |this, detail, cx| {
+        // 用带窗口的 `observe_in` 而不是 `observe`：换歌单要清空搜索框，
+        // 而 `InputState::set_value` 需要窗口 —— 这是唯一能同时拿到「详情变了」
+        // 和「窗口」的地方，不用把 window 一路穿过 `open` / `navigate`。
+        let detail_subscription = cx.observe_in(&detail, window, |this, detail, window, cx| {
             this.measured_size.set(None);
-            let detail = detail.read(cx);
-            let changed = this.playlist_id != detail.id;
+            // 「换没换歌单」要先问出来：清空搜索框要 `&mut App`（`Entity::update`），
+            // 那个借用和下面 detail 的读借用不能共存，所以这段读锁单独开一个作用域，
+            // 出了作用域就还回去了。
+            let (changed, id) = {
+                let detail = detail.read(cx);
+                (this.playlist_id != detail.id, detail.id)
+            };
             if changed {
-                this.playlist_id = detail.id;
+                this.playlist_id = id;
                 this.sort = None;
                 this.hovered_row = None;
+                // 换歌单就把关键词一起清掉：留着上一个歌单的词，新页面会显示一份
+                // 「搜过但没搜到」的结果，看起来像这个歌单没有歌。
+                //
+                // `set_value` 会发出 `Change`，而订阅是延迟执行的，所以这里不会
+                // 在本观察者还没跑完时重入 `rebuild_display_order`。
+                this.search_input
+                    .update(cx, |input, cx| input.set_value("", window, cx));
             }
-            this.display_order = this.sort.map_or_else(
-                || (0..detail.songs.len()).collect(),
-                |(key, descending)| song_order(&detail.songs, key, descending),
-            );
+            let detail = detail.read(cx);
             this.song_display = detail.songs.iter().map(SongDisplay::new).collect();
-            this.columns = table_columns(this.display_order.len(), this.album_share);
+            // 列宽跟着显示行数走（序号列按位数定宽），过滤后也要重算。
+            this.rebuild_display_order(cx);
             let playlist = detail.playlist.as_ref();
             let counts = [
                 playlist.map(|playlist| playlist.track_count.to_string()),
@@ -314,6 +342,26 @@ impl PlaylistPage {
             placement: Rc::new(Cell::new(None)),
             started_at: Instant::now(),
         });
+        // 搜索框的状态交给 `InputState` 自己管：它内部已经建好 `FocusHandle`
+        // 并登记为 tab stop，聚焦、选中、输入法都归它，这里不重复造。
+        let search_input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx).placeholder("在歌单中搜索");
+            state.set_editor_style(InputEditorStyle {
+                selection: Theme::global(cx).tokens.colors.selection,
+                ..Default::default()
+            });
+            state
+        });
+        // 只用到 `Change`：输入即过滤，纯本地计算，不发请求。
+        // `Focus` / `Blur` 不需要在这里处理 —— 展开与否在 `render` 里直接读
+        // `focus_handle().is_focused(window)`，那才是唯一真值，少存一份状态就不会失同步。
+        let search_subscription = cx.subscribe(&search_input, |this, _, _: &InputEvent, cx| {
+            // 过滤会让「列表」和「没搜到」两种空态互换，页面高度会变；
+            // 缓存的 measured_size 得丢掉，下一帧才会按真实高度重新量。
+            this.measured_size.set(None);
+            this.rebuild_display_order(cx);
+            cx.notify();
+        });
         Self {
             detail,
             _detail_subscription: detail_subscription,
@@ -327,6 +375,8 @@ impl PlaylistPage {
             _library_subscription: library_subscription,
             display_order: Vec::new(),
             song_display: Vec::new(),
+            search_input,
+            _search_subscription: search_subscription,
             columns: table_columns(0, 0.35),
             sort: None,
             album_share: 0.35,
@@ -710,14 +760,111 @@ impl PlaylistPage {
         )
     }
 
+    /// 显示顺序 = 命中关键词的行，按当前排序排好。
+    ///
+    /// 过滤和排序都只改 `display_order`（`detail.songs` 的下标），歌曲数据本身
+    /// 不动：行内的收藏、播放、「更多」菜单继续按原始下标取，行对象也不会被复制一份。
+    /// 列宽跟着显示行数重算，序号列因此在过滤后自动收窄。
+    fn rebuild_display_order(&mut self, cx: &App) {
+        let sort = self.sort;
+        // 空关键词等价于不过滤，走快路径时也省掉每首歌的小写转换。
+        let keyword = self.search_input.read(cx).value().trim().to_lowercase();
+        let songs = &self.detail.read(cx).songs;
+        let matched = (0..songs.len())
+            .filter(|&index| keyword.is_empty() || song_matches(&songs[index], &keyword))
+            .collect();
+        self.display_order = match sort {
+            Some((column, descending)) => sort_indices(matched, songs, column, descending),
+            None => matched,
+        };
+        self.columns = table_columns(self.display_order.len(), self.album_share);
+    }
+
     fn toggle_sort(&mut self, column: SongSort, cx: &mut Context<Self>) {
         self.sort = next_sort(self.sort, column);
-        let songs = &self.detail.read(cx).songs;
-        self.display_order = self.sort.map_or_else(
-            || (0..songs.len()).collect(),
-            |(key, descending)| song_order(songs, key, descending),
-        );
+        // 排序只在「已经筛出来的行」里重排，搜索结果不会因为换排序而忽多忽少。
+        self.rebuild_display_order(cx);
         cx.notify();
+    }
+
+    /// 歌单内搜索框：白底胶囊，左边放大镜、右边输入区。
+    ///
+    /// `progress` 是 0（收起）到 1（展开）的动画进度，宽度和文字淡入都由它派生，
+    /// 共用一条 transition 通道，所以两者天然同步、不会出现「框变宽了字还是隐的」。
+    fn search_box(
+        &self,
+        progress: f32,
+        border: Hsla,
+        colors: ColorTokens,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let view = cx.entity();
+        div()
+            .id("playlist-search-box")
+            .occlude()
+            .h(SEARCH_BOX_HEIGHT)
+            .w(
+                SEARCH_COLLAPSED_WIDTH
+                    + (SEARCH_EXPANDED_WIDTH - SEARCH_COLLAPSED_WIDTH) * progress,
+            )
+            // 固定宽度、只由动画改：flex_none 免得行内 flex 把它当可伸缩项重新分配。
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .px(px(8.))
+            .bg(white())
+            .border_1()
+            .border_color(border)
+            .rounded_full()
+            // 收到 40px 时输入区只剩 2px，靠这里裁掉，
+            // 否则会从圆角边上漏出半个占位符。
+            .overflow_hidden()
+            // 边框比宽度先变白：胶囊底色本来就是白的，边框退成背景色，
+            // 视觉上就是这排控件被「托起来」了。
+            .hover(|style| style.border_color(white()))
+            // 点胶囊外面失焦。这一条得自己写：GPUI 从不在按下时清焦点，
+            // `Window::blur` 只有 a11y 动作才会调，所以不写的话焦点会一直挂着，
+            // 点去别的搜索框才「顺便」失焦。`on_mouse_down_out` 走 capture 阶段
+            // 且只做几何判定，点在胶囊外（含被 occlude 挡住的地方）就回调。
+            .on_mouse_down_out({
+                let focus = self.search_input.focus_handle(cx);
+                move |_, window, cx| {
+                    // 只在自己真有焦点时才放手。这个监听器对任何外部点击都会触发，
+                    // 无差别 blur 会顺手清掉播放条、登录窗等别处的焦点。
+                    if focus.is_focused(window) {
+                        window.blur(cx);
+                    }
+                }
+            })
+            // 整颗胶囊都是点击热区。收起时输入区被裁到几乎没有，
+            // 这里把焦点转交给真正的 InputState，胶囊才会展开。
+            .on_click(move |_, window, cx| {
+                view.update(cx, |this, cx| {
+                    window.focus(&this.search_input.focus_handle(cx), cx);
+                });
+            })
+            .child(
+                svg()
+                    .path("icons/search.svg")
+                    .size(px(16.))
+                    .flex_none()
+                    .text_color(colors.muted_foreground)
+                    .hover(|style| style.text_color(colors.foreground)),
+            )
+            .child(
+                // 输入区宽度跟着胶囊走；用同一个进度淡入，
+                // 收起后彻底看不见文字，展开过程中才逐渐显出来。
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .h_full()
+                    .opacity(progress)
+                    .text_size(px(13.))
+                    .text_color(colors.foreground)
+                    .child(Input::new(&self.search_input)),
+            )
+            .into_any_element()
     }
 
     fn select_song(&mut self, song_id: u64, cx: &mut Context<Self>) {
@@ -1099,8 +1246,31 @@ fn sort_label(current: Option<(SongSort, bool)>, column: SongSort) -> (&'static 
     (icon, label)
 }
 
-fn song_order(songs: &[Song], column: SongSort, descending: bool) -> Vec<usize> {
-    let mut order: Vec<_> = (0..songs.len()).collect();
+/// 关键词命中：标题、任一歌手、专辑任一包含即算命中。
+///
+/// `keyword` 传小写（`rebuild_display_order` 里已经折好），这里逐段小写后做子串比较 ——
+/// 英文大小写不敏感，中文不受影响。搜的是子串而不是前缀，所以「周杰伦」能命中
+/// 歌名中间的「周」字所在的那首。
+fn song_matches(song: &Song, keyword: &str) -> bool {
+    let hit = |text: &str| text.to_lowercase().contains(keyword);
+    hit(&song.name)
+        || song
+            .ar
+            .iter()
+            .any(|artist| artist.name.as_deref().is_some_and(hit))
+        || song.al.name.as_deref().is_some_and(hit)
+}
+
+/// 把给定的一批下标按列排序。
+///
+/// 过滤与排序拆成两步：过滤先决定「哪些行出现」，排序只在这批下标内部重排，
+/// 所以 `detail.songs` 的原始顺序始终不动，搜索结果也不会因为换排序而变多变少。
+fn sort_indices(
+    mut order: Vec<usize>,
+    songs: &[Song],
+    column: SongSort,
+    descending: bool,
+) -> Vec<usize> {
     // ponytail: 按 Unicode 字符排序；需要拼音或语言区域排序时再接入 collation。
     order.sort_by(|&left, &right| {
         let ordering = match column {
@@ -1158,10 +1328,35 @@ fn icon_action_button(
 }
 
 impl Render for PlaylistPage {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.playing_indicator.read(cx).placement.set(None);
         self.table_header_hidden.set(false);
         let colors = Theme::global(cx).tokens.colors;
+        // 展开与否只由「有没有焦点」和「有没有字」决定：光标停在框里就该让用户看得见
+        // 自己能往哪打字，输入过字就该留着结果让人对照，鼠标 hover 不算 —— 它只是探过来看一眼。
+        let keyword = self.search_input.read(cx).value().trim().to_owned();
+        let expanded = self.search_input.focus_handle(cx).is_focused(window) || !keyword.is_empty();
+        // 一条进度通道同时驱动宽度和文字淡入，两者不会错拍；
+        // 库自己处理 reduced motion 和掉帧重绘，这里只管给目标值。
+        let progress = transition(
+            "playlist-search",
+            if expanded { 1. } else { 0. },
+            Transition::new(SEARCH_EXPAND_DURATION).ease(ease_out_quint()),
+            window,
+            cx,
+        );
+        // 边框走独立通道、时长更短：先把边界交代清楚，宽度再跟上，读起来是两个动作。
+        let border = blend_color(
+            colors.border,
+            white(),
+            transition(
+                "playlist-search-border",
+                if expanded { 1. } else { 0. },
+                Transition::new(SEARCH_BORDER_DURATION).ease(ease_out_quint()),
+                window,
+                cx,
+            ),
+        );
         let active_tab = [
             PlaylistTab::Songs,
             PlaylistTab::Comments,
@@ -1218,9 +1413,23 @@ impl Render for PlaylistPage {
                 centered_empty("images/empty/cm_empty_wuzuopin.png", "空空如也", colors)
                     .into_any_element()
             }
+            // 「歌单本身是空的」和「搜了但没搜到」要说两句话：
+            // 混成同一句「空空如也」会让人以为歌单被清空了，进而去找重试按钮。
             PlaylistTab::Songs if self.display_order.is_empty() => {
-                centered_empty("images/empty/cm_empty_wuzuopin.png", "空空如也", colors)
-                    .into_any_element()
+                if keyword.is_empty() {
+                    centered_empty("images/empty/cm_empty_wuzuopin.png", "空空如也", colors)
+                        .into_any_element()
+                } else {
+                    div()
+                        .w_full()
+                        .py(px(36.))
+                        .flex()
+                        .justify_center()
+                        .text_size(px(13.))
+                        .text_color(colors.muted_foreground)
+                        .child(format!("没有找到与「{keyword}」相关的歌曲"))
+                        .into_any_element()
+                }
             }
             PlaylistTab::Songs => {
                 let header_layout = Rc::new(Cell::new([Bounds::default(); 2]));
@@ -1340,8 +1549,18 @@ impl Render for PlaylistPage {
         div()
             .relative()
             .child(self.playlist_metadata(colors, cx))
-            // 控件区域
-            .child(div().mt(px(28.)).child(self.tabs.clone()))
+            // 控件区域：标签在左、搜索在右，justify_between 让胶囊贴住右边缘，
+            // 展开时向左「长」出去，标签的位置不受影响。
+            .child(
+                div()
+                    .mt(px(28.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(16.))
+                    .child(self.tabs.clone())
+                    .child(self.search_box(progress, border, colors, cx)),
+            )
             // 具体内容区域
             .when_some(library.likes_error.as_ref(), |page, message| {
                 page.child(
@@ -1365,7 +1584,25 @@ impl Render for PlaylistPage {
 
 #[cfg(test)]
 mod tests {
-    use super::{Song, SongSort, next_sort, song_order};
+    use super::{Song, SongSort, next_sort, song_matches, sort_indices};
+
+    /// 全部下标，等价于「没有关键词」时的显示顺序。
+    fn song_order(songs: &[Song], column: SongSort, descending: bool) -> Vec<usize> {
+        sort_indices((0..songs.len()).collect(), songs, column, descending)
+    }
+
+    /// `Artist` / `Album` 没有从 `crate::models` 导出，测试就用最小 JSON 造条目，
+    /// 顺带也覆盖了真实响应的字段形状（和 playlist_detail 的测试同一套做法）。
+    fn song(name: &str, artist: &str, album: Option<&str>) -> Song {
+        serde_json::from_value(serde_json::json!({
+            "id": 1,
+            "name": name,
+            "ar": [{"id": 1, "name": artist}],
+            "al": {"id": 1, "name": album},
+            "dt": 0,
+        }))
+        .unwrap()
+    }
 
     #[test]
     fn sorting_keeps_source_order_and_returns_to_default() {
@@ -1390,5 +1627,34 @@ mod tests {
             assert!(sort.is_some());
         }
         assert!(next_sort(sort, SongSort::Title).is_none());
+    }
+
+    #[test]
+    fn keyword_matches_title_artist_and_album_case_insensitively() {
+        let track = song("Sunny Day", "Taylor Swift", Some("Fearless"));
+        assert!(song_matches(&track, "sunny"));
+        assert!(song_matches(&track, "taylor"));
+        assert!(song_matches(&track, "fearless"));
+        // 专辑缺失不应 panic，只是不命中。
+        assert!(!song_matches(&song("a", "b", None), "fearless"));
+        assert!(!song_matches(&track, "周"));
+    }
+
+    #[test]
+    fn sorting_a_filtered_subset_only_reorders_matched_rows() {
+        let songs = vec![
+            song("b", "z", None),
+            song("a", "y", None),
+            song("c", "x", None),
+        ];
+        let matched: Vec<usize> = (0..songs.len()).filter(|&index| index != 1).collect();
+        // 排序只在筛出来的下标里重排，结果就是全量排序去掉被滤掉的那行 ——
+        // 被滤掉的歌不会因为换排序又冒回来。
+        assert_eq!(song_order(&songs, SongSort::Title, false), [1, 0, 2]);
+        assert_eq!(
+            sort_indices(matched.clone(), &songs, SongSort::Title, false),
+            [0, 2]
+        );
+        assert_eq!(sort_indices(matched, &songs, SongSort::Title, true), [2, 0]);
     }
 }

@@ -261,7 +261,8 @@ impl MainContent {
                     super::login::open(window, this.user_profile.clone(), this.login_window, cx);
             },
         );
-        let playlist_page = cx.new(|cx| PlaylistPage::new(library.clone(), playback.clone(), cx));
+        let playlist_page =
+            cx.new(|cx| PlaylistPage::new(window, library.clone(), playback.clone(), cx));
         let library_subscription = cx.observe(&library, |this, _, cx| {
             // 收藏歌单的 ID 要等账号索引返回后才能解析。
             this.open_playlist(this.active_page, cx);
