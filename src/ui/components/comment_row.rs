@@ -121,7 +121,9 @@ pub fn comment_row(
 /// 元素自带的独立 handle —— 后者仍可选，只是拿不到「选区变化时刷新」的订阅。
 fn body(comment: &SongComment, selection: Option<CommentSelection>) -> SelectableText {
     let id = ("comment-content", comment.id);
-    let text = comment.content.clone();
+    // 表情在文本层就换成 Unicode 字符：选中、复制、换行都由文字系统统一处理，
+    // 不需要在文本流里插图片。handle 里的文本必须与这里一致，否则选区偏移会错位。
+    let text = crate::ui::emoji::expand(&comment.content).into_owned();
     match selection {
         Some((handle, order)) => {
             SelectableText::with_handle(id, handle, text).document_order(order)

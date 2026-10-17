@@ -7,3 +7,9 @@ __pycache__/
 /vendor/gpui-pre-wgpu/
 /vendor/.gpui-patch-id
 .workbuddy/
+
+# 评论表情的本地调查产物：抓图脚本、对照页和图片不随仓库提交
+/assets/images/emoji/
+/docs/emoji-sheet.html
+/scripts/fetch_emoji_assets.py
+/scripts/import_app_emoji.py

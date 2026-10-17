@@ -351,7 +351,10 @@ impl Render for CommentsView {
         for index in 0..self.comments.len() {
             let id = self.comments[index].id;
             if !self.selection.contains_key(&id) {
-                let handle = TextSelectionHandle::new(self.comments[index].content.clone(), cx);
+                // 与 `comment_row::body` 渲染的文本保持一致：handle 存的是展开后的
+                // 文本，表情已变成 Unicode 字符，复制出来也是 emoji 而不是 `[大笑]`。
+                let text = crate::ui::emoji::expand(&self.comments[index].content).into_owned();
+                let handle = TextSelectionHandle::new(text, cx);
                 self.selection.insert(
                     id,
                     SelectionEntry {
