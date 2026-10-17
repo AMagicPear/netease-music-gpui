@@ -797,6 +797,10 @@ async fn full_song_download_continues_without_consuming_pcm_and_seek_reuses_disk
     .await
     .unwrap();
     assert!(audio.download_complete());
+    assert!(
+        !audio.stalled(Duration::ZERO),
+        "已下完的歌不再需要网络，不能判为停摆"
+    );
     assert!(server.requests.try_recv().is_err());
     let mut reader = CacheReader {
         cache: audio.cache.clone(),
@@ -884,9 +888,69 @@ async fn truncated_large_range_reports_error_when_reader_is_waiting_in_its_middl
     }
     assert_eq!(
         requests,
-        [0, 0, 0],
+        [0, 0],
         "应在同一个大区间重试，而读者已经推进到区间中部"
     );
+}
+
+/// 休眠或断网之后，下载任务往往既不报错也不再产出数据，只是停在那里。
+/// 只有能检测出这种「数据停摆」，恢复播放时才知道要重建音源。
+#[tokio::test]
+async fn hung_download_is_detected_as_stalled_before_it_ever_fails() {
+    let server = serve(
+        wav(60),
+        true,
+        None,
+        Some((2 * BLOCK_BYTES, Arc::new(tokio::sync::Notify::new()))),
+    )
+    .await;
+    let (audio, mut output) = open(&server).await;
+    let mut buffer = [0.; 4800];
+    for _ in 0..20 {
+        output.write(&mut buffer, 1.);
+    }
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(audio.error().is_none(), "{:?}", audio.error());
+    assert!(
+        audio.stalled(Duration::from_millis(200)),
+        "数据停摆必须可检测"
+    );
+    assert!(!audio.download_complete());
+    assert!(audio.source_age() < Duration::from_secs(30));
+}
+
+/// 后台块的下载失败原本会被完全吞掉：失败后任务停在等待需求上，
+/// 而暂停时没人再提交需求。现在必须留下记录，供恢复播放时判断。
+#[tokio::test]
+async fn background_download_failure_is_recorded_without_interrupting_playback() {
+    let mut server = serve(wav(60), true, None, None).await;
+    let (audio, mut output) = open(&server).await;
+    let mut buffer = [0.; 4800];
+    for _ in 0..20 {
+        output.write(&mut buffer, 1.);
+    }
+    // 播放位置还在第 0 块，而下载已经跑到 4 MB 之外；那里的失败与播放无关。
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while server
+            .requests
+            .recv()
+            .await
+            .is_some_and(|offset| offset < 16 * BLOCK_BYTES)
+        {}
+    })
+    .await
+    .expect("下载应推进到 4 MB 之后");
+    drop(server);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !audio.download_failed() {
+            assert!(audio.error().is_none(), "{:?}", audio.error());
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("后台下载失败必须留下记录，不能被静默吞掉");
+    assert!(!audio.download_complete());
+    assert!(audio.error().is_none(), "与播放位置无关的失败不应打断播放");
 }
 
 #[tokio::test]

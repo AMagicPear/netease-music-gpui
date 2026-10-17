@@ -116,6 +116,23 @@ impl PlayerEngine {
             .is_some_and(StreamingAudio::download_complete)
     }
 
+    pub fn download_failed(&self) -> bool {
+        self.audio
+            .as_ref()
+            .is_some_and(StreamingAudio::download_failed)
+    }
+
+    pub fn stalled(&self, timeout: Duration) -> bool {
+        self.audio
+            .as_ref()
+            .is_some_and(|audio| audio.stalled(timeout))
+    }
+
+    /// 播放地址已使用的时长；没有音源时为 None。
+    pub fn source_age(&self) -> Option<Duration> {
+        self.audio.as_ref().map(StreamingAudio::source_age)
+    }
+
     pub fn pause(&self) {
         self.control.playing.store(false, Ordering::Release);
     }

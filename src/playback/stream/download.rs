@@ -15,7 +15,11 @@ use symphonia::core::io::MediaSource;
 
 pub(super) const BLOCK_BYTES: u64 = 256 * 1024;
 const RANGE_BYTES: u64 = 4 * 1024 * 1024;
-const NETWORK_TIMEOUT: Duration = Duration::from_secs(20);
+/// 单个请求的连接与数据超时。失败后下载任务会停在等待需求上不再重试，
+/// 所以整体等待窗口必须短；彻底恢复由控制器按「数据停摆」重建音源完成。
+const NETWORK_TIMEOUT: Duration = Duration::from_secs(10);
+/// 同一区间的重试次数：连续失败基本意味着连接已断或地址过期，再多重试无益。
+const MAX_ATTEMPTS: usize = 2;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct Demand {
@@ -43,7 +47,19 @@ pub(super) struct CacheData {
     pub blocks: BTreeMap<u64, usize>,
     pub byte_len: Option<u64>,
     pub error: Option<DownloadError>,
+    /// 最近一次下载失败的原因。后台块的失败不必打断正在播放的数据，
+    /// 但必须留下痕迹：下载任务失败后就不再自行重试了。
+    pub failure: Option<String>,
+    /// 最后一次成功落盘的墙钟时刻（毫秒）。休眠和断网都会让它长时间不前进。
+    pub progress_ms: u64,
     pub complete: bool,
+}
+
+/// 墙钟毫秒：休眠期间它照常前进，恢复后才能一眼看出「已经很久没有新数据」。
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as u64)
 }
 
 /// 下载与解码共享的磁盘文件；只发布写入成功的区间，缺失区间优先于后台整曲下载。
@@ -81,6 +97,8 @@ impl Cache {
                         .collect(),
                     byte_len: Some(total),
                     error: None,
+                    failure: None,
+                    progress_ms: now_ms(),
                     complete: true,
                 }),
                 changed: Condvar::new(),
@@ -125,6 +143,8 @@ impl Cache {
                 blocks: BTreeMap::new(),
                 byte_len,
                 error: None,
+                failure: None,
+                progress_ms: now_ms(),
                 complete: false,
             }),
             changed: Condvar::new(),
@@ -179,6 +199,7 @@ impl Cache {
             *available = (*available).max((position - block + count) as usize);
             position += count;
         }
+        data.progress_ms = now_ms();
         self.changed.notify_all();
         Ok(())
     }
@@ -242,6 +263,33 @@ impl Cache {
             .try_lock()
             .ok()
             .and_then(|data| data.error.as_ref().map(|error| error.message().to_owned()))
+    }
+
+    /// 记录一次下载失败。读者不需要这段数据时不能中断播放，但也不能当作没发生：
+    /// 下载任务失败后会停在等待需求上，只能由上层重建音源或新的需求唤醒。
+    fn record_failure(&self, message: &str) {
+        self.data.lock().unwrap().failure = Some(message.to_owned());
+    }
+
+    fn clear_failure(&self) {
+        self.data.lock().unwrap().failure = None;
+    }
+
+    /// 最近一次下载是否失败且尚未恢复；与 `error` 不同，它不打断正在播放的数据。
+    pub fn failure(&self) -> Option<String> {
+        self.data
+            .try_lock()
+            .ok()
+            .and_then(|data| data.failure.clone())
+    }
+
+    /// 距最后一次成功落盘已超过 `timeout`：连接多半已经在休眠或断网时被掐断。
+    /// 已下完的文件不再需要网络，因此永远不会判为停摆。
+    pub fn stalled(&self, timeout: Duration) -> bool {
+        self.data.try_lock().is_ok_and(|data| {
+            !data.complete
+                && now_ms().saturating_sub(data.progress_ms) >= timeout.as_millis() as u64
+        })
     }
 
     async fn sequential(self: Arc<Self>, mut response: reqwest::Response) -> Result<(), String> {
@@ -385,7 +433,7 @@ async fn download_ranges(
             if let Some(offset) = offset {
                 let fetch = async {
                     let mut last_error = String::new();
-                    for attempt in 0..3 {
+                    for attempt in 0..MAX_ATTEMPTS {
                         let response = if offset == 0
                             && let Some(response) = initial.take()
                         {
@@ -401,7 +449,7 @@ async fn download_ranges(
                             Ok(()) => return Ok(()),
                             Err(error) => last_error = error,
                         }
-                        if attempt < 2 {
+                        if attempt + 1 < MAX_ATTEMPTS {
                             tokio::time::sleep(Duration::from_millis(250 << attempt)).await;
                         }
                     }
@@ -445,7 +493,10 @@ async fn download_ranges(
                     }
                 };
                 match result {
-                    Ok(()) => continue,
+                    Ok(()) => {
+                        cache.clear_failure();
+                        continue;
+                    }
                     Err(error) => {
                         // 一个请求覆盖多个块：读者可能已推进到本请求后半段。
                         // 若它正等该请求内的缺失数据，必须唤醒报错，不能双方都干等。
@@ -458,6 +509,9 @@ async fn download_ranges(
                                     (*length as u64) < BLOCK_BYTES.min(total.saturating_sub(start))
                                 })
                         });
+                        // 后台块的失败同样要留下记录：休眠或断网后下载任务会停在
+                        // 等待需求上，只有上层重建音源才能把它救回来。
+                        cache.record_failure(&error);
                         if needed {
                             cache.fail(requested.generation, error);
                         }

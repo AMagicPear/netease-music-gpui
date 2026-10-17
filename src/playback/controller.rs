@@ -64,6 +64,11 @@ pub struct PlaybackController {
 /// 播放中周期性落盘的间隔（tick 数）。暂停时 tick 不再写盘。
 const SAVE_INTERVAL_TICKS: u32 = 50;
 const PRELOAD_REMAINING: Duration = Duration::from_secs(60);
+/// 下载停摆多久就判定连接已经断掉。下载任务失败后会停在等待需求上不再重试，
+/// 休眠或断网之后，只有重建音源才能把它救回来。
+const STALL_TIMEOUT: Duration = Duration::from_secs(5);
+/// 播放地址的有效期余量。地址过期后重试多少次都拿不到数据，恢复播放时先换地址。
+const SOURCE_MAX_AGE: Duration = Duration::from_secs(30 * 60);
 
 impl PlaybackController {
     /// 仅构造空控制器；存储由调用方明确注入，不启动 UI、网络或播放任务。
@@ -637,11 +642,15 @@ impl PlaybackController {
     pub fn resume(&mut self, cx: &mut Context<Self>) {
         self.play_when_ready = true;
         if !self.state.loading {
-            if self.engine.resume() {
+            // 休眠或断网之后，下载任务可能已经停摆或地址已经过期。
+            // 此时「继续」只是把输出端的门打开，门后面已经没水了，必须重建管道。
+            let unusable = self.source_unusable();
+            if !unusable && self.engine.resume() {
                 self.state.is_playing = true;
                 self.state.buffering = self.engine.buffering();
             } else if let Some(song) = self.state.current_song.clone() {
-                let position = if self.state.error.is_some() {
+                // 停摆或地址过期保留进度重建；播完或报错仍沿用原来的定位规则。
+                let position = if unusable || self.state.error.is_some() {
                     self.state.position
                 } else {
                     Duration::ZERO
@@ -652,6 +661,21 @@ impl PlaybackController {
         }
         self.save_cache();
         cx.notify();
+    }
+
+    /// 下载已经不再产出新数据：失败后不会再自行重试，或者已经很久没有新字节。
+    fn download_stalled(&self) -> bool {
+        self.engine.download_failed() || self.engine.stalled(STALL_TIMEOUT)
+    }
+
+    /// 恢复播放时额外考虑播放地址过期：没下完的歌一旦地址过期就再也补不上数据。
+    fn source_unusable(&self) -> bool {
+        self.download_stalled()
+            || !self.engine.download_complete()
+                && self
+                    .engine
+                    .source_age()
+                    .is_some_and(|age| age >= SOURCE_MAX_AGE)
     }
 
     pub fn toggle(&mut self, cx: &mut Context<Self>) {
@@ -792,6 +816,14 @@ impl PlaybackController {
             self.state.is_playing = false;
             self.state.buffering = false;
             self.advance_on_finished(cx);
+        } else if self.state.buffering && self.download_stalled() {
+            // 输出端在等数据而下载已经停摆：原地重建音源并保留进度，
+            // 否则界面会一直显示「正在播放」，进度条却再也不动。
+            if let Some(song) = self.state.current_song.clone() {
+                let position = self.engine.position().min(self.state.duration);
+                self.load_song(song, position, true, cx);
+                return;
+            }
         } else {
             // 从真实 PCM 消费量取进度，等待数据的静音不计入歌曲时间。
             self.state.position = self.engine.position().min(self.state.duration);

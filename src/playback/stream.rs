@@ -15,7 +15,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 /// 单个音源的生命周期：一次 seek 使旧读取器和旧 PCM 过期；取消则终止整个音源。
@@ -38,6 +38,8 @@ pub struct StreamingAudio {
     cache: Arc<Cache>,
     pcm: Arc<Pcm>,
     download: tokio::task::AbortHandle,
+    /// 取得播放地址的时刻；地址会过期，长时间暂停后必须重新向接口取一次。
+    opened: SystemTime,
     pub duration: Option<Duration>,
     pub quality: Option<AudioQualityLevel>,
 }
@@ -75,6 +77,7 @@ impl StreamingAudio {
             cache: cache.clone(),
             pcm: pcm.clone(),
             download,
+            opened: SystemTime::now(),
             duration: source.duration,
             quality: source.quality,
         };
@@ -124,6 +127,24 @@ impl StreamingAudio {
 
     pub fn download_complete(&self) -> bool {
         self.cache.data.try_lock().is_ok_and(|data| data.complete)
+    }
+
+    /// 下载已经失败，且失败后不会再自行重试。
+    pub fn download_failed(&self) -> bool {
+        self.cache.failure().is_some()
+    }
+
+    /// 距最后一次成功落盘已超过 `timeout`：休眠或断网后不会再有新数据。
+    /// 只要数据还在流动，即使很慢也不会被判为停摆。
+    pub fn stalled(&self, timeout: Duration) -> bool {
+        self.cache.stalled(timeout)
+    }
+
+    /// 播放地址的年龄。地址过期后重试多少次都拿不到数据，只能重新取地址。
+    pub fn source_age(&self) -> Duration {
+        SystemTime::now()
+            .duration_since(self.opened)
+            .unwrap_or_default()
     }
 
     pub fn error(&self) -> Option<String> {
