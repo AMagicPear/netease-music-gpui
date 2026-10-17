@@ -1,7 +1,14 @@
 use crate::models::AudioQualityLevel;
-use gpui::{Div, Hsla, InteractiveElement, MouseButton, Stateful, WindowControlArea, div, img, px};
+use gpui::{
+    Div, Entity, Hsla, InteractiveElement, IntoElement, MouseButton, Role, SharedString, Stateful,
+    StatefulInteractiveElement, WindowControlArea, div, img, px, svg,
+};
 use gpui::{ParentElement as _, Styled as _};
 use gpui_kit::base::ColorTokens;
+use gpui_kit::base::input::InputState;
+use std::ops::Range;
+
+use crate::ui::theme::{PRESSED_ICON_ALPHA, link_blue};
 
 mod collect_window;
 mod comment_row;
@@ -140,6 +147,121 @@ pub(super) fn empty_state(image: &'static str, tip: &str, colors: ColorTokens) -
         )
 }
 
+/// 关键词在 `text` 里命中的字节区间：有序、不重叠、端点在字符边界上，
+/// 即 `StyledText::with_highlights` 要求的样子。空关键词返回空。
+///
+/// 匹配和大小写折叠都在这里做，过滤（`song_matches`）与高亮共用同一套语义。
+/// **不能**写成 `text.to_lowercase().match_indices(keyword)`：小写化会改变部分字符的
+/// 字节长度（`İ` 2 字节 → `i̇` 3 字节），拿小写串的偏移当原文用会错位，
+/// 所以折叠路径要维护一张「小写串字节 → 原文偏移」的映射表。
+pub(super) fn keyword_ranges(text: &str, keyword: &str) -> Vec<Range<usize>> {
+    let keyword = keyword.trim();
+    if keyword.is_empty() || text.is_empty() {
+        return Vec::new();
+    }
+    // 原文直接命中（CJK 常见）时 `match_indices` 给的就是原文偏移，不必付折叠的代价。
+    let direct: Vec<_> = text
+        .match_indices(keyword)
+        .map(|(start, matched)| start..start + matched.len())
+        .collect();
+    if !direct.is_empty() {
+        return direct;
+    }
+    let mut lowered = String::with_capacity(text.len());
+    // `origins[i]` = `lowered` 第 i 个字节所属原文字符的起始偏移，按字节补齐。
+    let mut origins: Vec<usize> = Vec::with_capacity(text.len());
+    for (index, ch) in text.char_indices() {
+        for folded in ch.to_lowercase() {
+            lowered.push(folded);
+            origins.resize(origins.len() + folded.len_utf8(), index);
+        }
+    }
+    lowered
+        .match_indices(&keyword.to_lowercase())
+        .map(|(start, matched)| {
+            let from = origins[start];
+            // 命中到末尾时没有「下一个字节」可查，退回原文长度。
+            let to = origins
+                .get(start + matched.len())
+                .copied()
+                .unwrap_or(text.len());
+            if to > from {
+                return from..to;
+            }
+            // 命中落在一个原文字符内部（小写化变长时区间塌成 `from == to`），
+            // 标整个原文字符，别让这行「搜得到、却看不到高亮」。
+            let width = text[from..]
+                .chars()
+                .next()
+                .map(char::len_utf8)
+                .unwrap_or_default();
+            from..from + width
+        })
+        .collect()
+}
+
+/// 命中片段的样式：文字染成蓝而不是铺底色 —— 「正在播放」的行文字本来就是主色红，
+/// 叠红底等于什么信息都没加。用昵称的蓝而不用红：红已经是「正在播放」的专用信号，
+/// 搜索命中再占用它会稀释语义。带 `color` 的样式不能和副标题的灰丢给
+/// `combine_highlights`（它是 blend 不是覆盖），详见 `title_segments` 的说明。
+fn match_highlight() -> gpui::HighlightStyle {
+    gpui::HighlightStyle {
+        color: Some(link_blue()),
+        ..Default::default()
+    }
+}
+
+/// `text` 的命中区间平移 `offset` 字节后，配上命中样式。
+///
+/// 拼接多段文本（歌手名、标题 + 副标题）时，各段单独算出的区间只在本段内有效，
+/// 要挪到整串里的位置才对得上最终渲染的那段文本。
+pub(super) fn match_highlights(
+    text: &str,
+    offset: usize,
+    keyword: &str,
+) -> Vec<(Range<usize>, gpui::HighlightStyle)> {
+    let style = match_highlight();
+    keyword_ranges(text, keyword)
+        .into_iter()
+        .map(|range| (range.start + offset..range.end + offset, style))
+        .collect()
+}
+
+/// 纯文本 + 命中高亮。专辑格、时长这类没有副标题、单一字段的行用它。
+pub(super) fn text_with_matches(text: SharedString, keyword: &str) -> gpui::StyledText {
+    let hits = match_highlights(&text, 0, keyword);
+    gpui::StyledText::new(text).with_highlights(hits)
+}
+
+/// 搜索框右侧的「清空」按钮：点了把输入框置空。顶栏全局搜索和歌单内搜索共用，
+/// 显不显示由调用方决定（约定：输入框有内容才出现）。
+///
+/// 常态 45% 前景色：比 `PRESSED_ICON_ALPHA`（0.4）深、比 `muted_foreground`（0.6）浅，
+/// 满足「按下最浅 < 常态 < hover」的三态次序，hover 才有一档可见的变化。
+pub(super) fn search_clear_button(
+    input: Entity<InputState>,
+    id: &'static str,
+    colors: ColorTokens,
+) -> impl IntoElement {
+    svg()
+        .path("icons/clear.svg")
+        // 18px：唯一的「删除」入口，事候区太小难点中，宁可略大于放大镜。
+        .size(px(18.))
+        .flex_none()
+        .text_color(colors.foreground.alpha(0.45))
+        .hover(|style| style.text_color(colors.muted_foreground))
+        .id(id)
+        .role(Role::Button)
+        .aria_label("清空搜索")
+        // active 属于 StatefulInteractiveElement，必须跟在 `.id()` 之后（此时是 Stateful<Svg>）。
+        .active(|style| style.text_color(colors.foreground.alpha(PRESSED_ICON_ALPHA)))
+        // `replace_all` 而不是 `set_value`：后者不发 `InputEvent::Change`，
+        // 靠订阅驱动的过滤不会重算；前者照常发出，且记进撤销栈可 Cmd+Z 找回。
+        .on_click(move |_, window, cx| {
+            input.update(cx, |input, cx| input.replace_all("", window, cx));
+        })
+}
+
 /// 音质徽章的图标，素材与官方「音质选项」一一对应。
 /// 标准 / 较高 / 极高 共用 HQ，其余档位各有专属素材。
 pub(super) fn quality_badge_path(quality: AudioQualityLevel) -> &'static str {
@@ -173,12 +295,15 @@ pub(super) fn format_duration(duration: std::time::Duration) -> String {
 }
 
 /// 未知歌手单独变灰，多歌手中已有的名字保持原色。
+/// `keyword` 非空时把命中的片段标出来，让「这一行为什么被搜出来」看得见。
 pub(super) fn artist_label(
     song: &crate::models::Song,
+    keyword: &str,
     colors: gpui_kit::base::ColorTokens,
 ) -> gpui::StyledText {
     let mut text = String::new();
-    let mut highlights = Vec::new();
+    let mut hits = Vec::new();
+    let mut grays = Vec::new();
     let names = song.ar.iter().map(|artist| artist.name.as_deref());
     // 空歌手列表也显示一个「未知歌手」。
     for name in names.chain(song.ar.is_empty().then_some(None)) {
@@ -187,10 +312,14 @@ pub(super) fn artist_label(
         }
         let start = text.len();
         match name.filter(|name| !name.trim().is_empty()) {
-            Some(name) => text.push_str(name),
+            Some(name) => {
+                text.push_str(name);
+                // 每段单独算区间再平移到整串：拼接多段时各段偏移不同。
+                hits.extend(match_highlights(name, start, keyword));
+            }
             None => {
                 text.push_str("未知歌手");
-                highlights.push((
+                grays.push((
                     start..text.len(),
                     gpui::HighlightStyle {
                         color: Some(colors.foreground.alpha(1.)),
@@ -201,5 +330,6 @@ pub(super) fn artist_label(
             }
         }
     }
-    gpui::StyledText::new(text).with_highlights(highlights)
+    gpui::StyledText::new(text)
+        .with_highlights(gpui::combine_highlights(hits, grays).collect::<Vec<_>>())
 }

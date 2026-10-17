@@ -6,7 +6,7 @@ use gpui::*;
 use super::assets::{CoverPrefetch, thumbnail_url, track_cover_url};
 use super::components::{
     PAGE_SIDE_PADDING, PLAYER_BAR_HEIGHT, PlayNext, PlayerBar, ResizeDragPreview, SidePanel,
-    SidePanelContent, SurfacePopover, icon_hover_color, window_drag_area,
+    SidePanelContent, SurfacePopover, icon_hover_color, search_clear_button, window_drag_area,
 };
 use super::cover_color::{Backdrop, CoverColor, CoverGradient, gradient_layer};
 use super::now_playing::{NowPlaying, NowPlayingPage};
@@ -434,8 +434,10 @@ impl MainContent {
 
 /// 搜索框：左边放大镜图标，右边文本输入框，宽度可被压缩。
 /// 放大镜是第二个提交入口，与输入框回车走同一份提交逻辑。
+/// `has_value` 决定要不要挂清空按钮（歌单内搜索框同款约定）。
 fn search_box(
     input: Entity<InputState>,
+    has_value: bool,
     on_submit: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     colors: ColorTokens,
 ) -> impl IntoElement {
@@ -470,6 +472,15 @@ fn search_box(
                 .active(|style| style.text_color(colors.foreground.alpha(PRESSED_ICON_ALPHA))),
         )
         .child(Input::new(&input))
+        // 判断用原始内容（trim 过的空串对用户来说「看不见但删不掉」）；
+        // 按钮 `flex_none`，框被压缩时先压输入区、按钮始终完整。
+        .when(has_value, |box_| {
+            box_.child(search_clear_button(
+                input.clone(),
+                "search-box-clear",
+                colors,
+            ))
+        })
 }
 
 pub(super) fn hover_icon(
@@ -726,6 +737,7 @@ impl MainContent {
             )
             .child(search_box(
                 self.search_input.clone(),
+                !self.search_input.read(cx).value().is_empty(),
                 cx.listener(|this, _, _, cx| this.submit_current_input(cx)),
                 colors,
             ))

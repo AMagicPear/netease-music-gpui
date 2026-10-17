@@ -5,6 +5,8 @@ use gpui_kit::component::Theme;
 ///
 /// 文本系统按这个名字查找字体，与文件名无关；文件名是 `dolphin.ttf`，
 /// 但内部的 family 是 `Dolphin`，而且匹配是大小写敏感的，写错就静默回退到系统字体。
+///
+/// 用于特殊位置都数字和部分字母，例如封面上的播放量
 pub const DOLPHIN_FAMILY: &str = "Dolphin";
 
 #[derive(Clone, Copy)]
@@ -38,6 +40,15 @@ pub const PRESSED_OPACITY: f32 = 0.8;
 /// 这里给 alpha 而不是整体 `opacity`——图标没有底色，叠 `opacity` 会在
 /// 「按住后把鼠标移出图标」时因失去 hover、退回更浅的底色而双重变淡。
 pub const PRESSED_ICON_ALPHA: f32 = 0.4;
+
+/// 评论区昵称、搜索命中这类「点进去会到另一个地方」的文字用的蓝，
+/// 照搬官方设计稿的值（偏灰的蓝，不是纯蓝）。
+///
+/// 写成函数而不是 `const`：`Hsla` 只有 `From<Rgba>` 实现，编译期求不了值。
+/// 不放进 `ColorTokens`：token 随主题切换整体换掉，而这个蓝不跟随明暗主题。
+pub fn link_blue() -> Hsla {
+    rgb(0x5975B2).into()
+}
 
 /// 从与图标相同的资源目录读取并注册字体。
 ///

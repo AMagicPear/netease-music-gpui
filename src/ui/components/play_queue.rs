@@ -525,7 +525,7 @@ fn row_content(
                         } else {
                             colors.muted_foreground
                         })
-                        .child(artist_label(song, colors)),
+                        .child(artist_label(song, "", colors)),
                 ),
         )
         .into_any_element();

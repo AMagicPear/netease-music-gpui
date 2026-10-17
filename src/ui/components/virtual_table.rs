@@ -430,25 +430,82 @@ impl SongDisplay {
     }
 }
 
-/// 使用同一段 StyledText，标题和副标题一起截断；颜色随当前主题计算。
-pub fn title_with_subtitle(display: &SongDisplay, colors: ColorTokens) -> StyledText {
-    if display.subtitle.is_empty() {
-        return StyledText::new(display.title.clone());
-    }
-
-    // highlight 先 blend 再 fade_out：先替换 RGB，再恢复 alpha。
-    // 因此播放中的红色标题不会污染副标题，也无需预合成背景色。
+/// 副标题自身的样子：灰字 + 细字重。
+///
+/// highlight 先 blend 再 fade_out：先替换 RGB，再恢复 alpha。所以播放中的红色标题
+/// 不会污染副标题，也无需预合成颜色。
+fn subtitle_style(colors: ColorTokens) -> HighlightStyle {
     let subtitle_color = colors.muted_foreground;
+    HighlightStyle {
+        color: Some(subtitle_color.alpha(1.)),
+        font_weight: Some(SECONDARY_FONT_WEIGHT),
+        fade_out: Some(1. - subtitle_color.a),
+        ..Default::default()
+    }
+}
 
-    StyledText::new(display.title.clone()).with_highlights([(
-        display.subtitle.clone(),
-        HighlightStyle {
-            color: Some(subtitle_color.alpha(1.)),
-            font_weight: Some(SECONDARY_FONT_WEIGHT),
-            fade_out: Some(1. - subtitle_color.a),
-            ..Default::default()
-        },
-    )])
+/// 把标题切成「有序、不重叠、样式已调和好」的区间列表。
+///
+/// 命中区间和副标题区间会重叠，而 `combine_highlights` 的 `color` 语义是
+/// **blend 不是覆盖**（且重叠样式的遍历顺序不确定），两个都带 `color` 的样式
+/// 叠出来是个随机的中间色。所以这里把副标题区间按命中切开：命中段用命中色，
+/// 其余段保持灰字。
+///
+/// 单独抽出来是因为 `StyledText` 的 highlights 是只写字段（`with_highlights` 之后
+/// 读不回来），不抽出来就没法直接测切分结果。
+fn title_segments(
+    title: &str,
+    subtitle: &std::ops::Range<usize>,
+    keyword: &str,
+    colors: ColorTokens,
+) -> Vec<(std::ops::Range<usize>, HighlightStyle)> {
+    let subtitle_style = subtitle_style(colors);
+    let hit_style = super::match_highlight();
+
+    let mut segments: Vec<(std::ops::Range<usize>, HighlightStyle)> = Vec::new();
+    // `cursor` 标记副标题里还没归置到的位置，命中之间空出来的部分补回副标题样式。
+    // 副标题永远是标题的结尾（`SongDisplay` 就这么拼的），所以命中不会整段落在它之后。
+    let mut cursor = subtitle.start;
+    for range in super::keyword_ranges(title, keyword) {
+        if range.end <= subtitle.start {
+            // 完全在歌名里，直接命中色。
+            segments.push((range, hit_style));
+            continue;
+        }
+        let from = range.start.max(subtitle.start);
+        let to = range.end.min(subtitle.end);
+        // 命中跨过歌名/副标题边界时，歌名侧那一截也要标上，
+        // 否则 `keyword_ranges` 给的整段区间被截断后就静默丢了。
+        if range.start < subtitle.start {
+            segments.push((range.start..subtitle.start, hit_style));
+        }
+        if cursor < from {
+            segments.push((cursor..from, subtitle_style));
+        }
+        segments.push((from..to, hit_style));
+        cursor = to;
+    }
+    if cursor < subtitle.end {
+        segments.push((cursor..subtitle.end, subtitle_style));
+    }
+    segments.sort_by_key(|(range, _)| range.start);
+    segments
+}
+
+/// 使用同一段 StyledText，标题和副标题一起截断；颜色随当前主题计算。
+/// `keyword` 非空时标出命中片段（搜索结果里传真实关键词，其余地方传空串）。
+pub fn title_with_subtitle(
+    display: &SongDisplay,
+    keyword: &str,
+    colors: ColorTokens,
+) -> StyledText {
+    let text = StyledText::new(display.title.clone());
+    let segments = title_segments(&display.title, &display.subtitle, keyword, colors);
+    if segments.is_empty() {
+        text
+    } else {
+        text.with_highlights(segments)
+    }
 }
 
 /// 行 hover 时才出现的图标：序号位置的播放键、标题右侧那排操作按钮，共用这一套样式。
@@ -534,12 +591,195 @@ pub fn centered_empty(image: &'static str, tip: &str, colors: ColorTokens) -> im
 
 #[cfg(test)]
 mod tests {
-    use gpui::px;
+    use gpui::{HighlightStyle, Hsla, px, rgb};
+    use gpui_kit::base::ColorTokens;
 
     use super::{
-        PAGE_SIDE_PADDING, ROW_HOVER_SHADOW_BLUR, ROW_HOVER_SHADOW_TAIL_SIGMAS, hovered_row_after,
-        index_column_width, play_count_label, visible_rows,
+        PAGE_SIDE_PADDING, ROW_HOVER_SHADOW_BLUR, ROW_HOVER_SHADOW_TAIL_SIGMAS, SongDisplay,
+        hovered_row_after, index_column_width, play_count_label, title_segments, visible_rows,
     };
+    use crate::models::Song;
+    use crate::ui::components::keyword_ranges;
+    use crate::ui::theme::link_blue;
+
+    /// 命中区间直接喂给 `StyledText::with_highlights`，它要求有序、不重叠、
+    /// 端点在字符边界上；错位的后果是文本被整段替换，所以要逐条盯住偏移。
+    #[test]
+    fn keyword_ranges_point_at_original_offsets() {
+        // CJK：原文直接命中，偏移就是字节偏移（一个汉字 3 字节）。
+        assert_eq!(keyword_ranges("稻香", "稻"), vec![0..3]);
+        assert_eq!(keyword_ranges("稻香", "香"), vec![3..6]);
+        // 多次命中不重叠且有序："ababa"/"aba" 只报 0..3，不算 2..5（重叠段
+        // 会让 `compute_runs` 算出非法 run）。
+        assert_eq!(keyword_ranges("ababa", "aba"), vec![0..3]);
+        assert_eq!(keyword_ranges("哈哈哈", "哈"), vec![0..3, 3..6, 6..9]);
+        assert_eq!(keyword_ranges("aXbXc", "X"), vec![1..2, 3..4]);
+        // 前后缀混入时只截关键词本身，不能把整段都标上。
+        assert_eq!(keyword_ranges("Love Song", "ve S"), vec![2..6]);
+        // 空关键词 / 空文本不返回 0..0 这种空区间。
+        assert!(keyword_ranges("稻香", "").is_empty());
+        assert!(keyword_ranges("稻香", "   ").is_empty());
+        assert!(keyword_ranges("", "稻").is_empty());
+        assert!(keyword_ranges("稻香", "不存在").is_empty());
+    }
+
+    /// `combine_highlights` 里 `color: None` 的一侧用 `.or()` 让另一侧原样保留，
+    /// 与合并顺序无关 —— 这是它唯一能安全共存的样式组合。两个都带 `color` 时
+    /// 做的是 blend 且顺序不确定，没法写成断言，所以 `title_segments` 才要自己切区间。
+    /// 这里只钉住可确定的那一半行为（拆 run 而不丢区间）。
+    #[test]
+    fn combine_highlights_splits_runs_and_a_none_color_does_not_clobber() {
+        let no_color = HighlightStyle {
+            background_color: Some(Hsla {
+                a: 0.16,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let gray = HighlightStyle {
+            color: Some(Hsla {
+                a: 0.4,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        // 完全重合：合成一段，两个字段都保住（`color: None` 的一侧不冲掉对方的颜色）。
+        let combined: Vec<_> =
+            gpui::combine_highlights([(0..3, no_color)], [(0..3, gray)]).collect();
+        assert_eq!(combined.len(), 1);
+        assert_eq!(combined[0].0, 0..3);
+        assert_eq!(combined[0].1.background_color, no_color.background_color);
+        assert_eq!(combined[0].1.color, gray.color);
+
+        // 反过来给（None 的一侧在第二个迭代器）结果相同：这一条与顺序无关。
+        let reversed: Vec<_> =
+            gpui::combine_highlights([(0..3, gray)], [(0..3, no_color)]).collect();
+        assert_eq!(reversed, combined);
+
+        // 部分重叠：拆成三段而不是丢掉中间那段。
+        let combined: Vec<_> =
+            gpui::combine_highlights([(1..4, no_color)], [(0..6, gray)]).collect();
+        assert_eq!(
+            combined.iter().map(|(r, _)| r.clone()).collect::<Vec<_>>(),
+            [0..1, 1..4, 4..6]
+        );
+        assert!(combined[1].1.background_color.is_some());
+        assert!(combined[0].1.background_color.is_none());
+        assert!(combined[2].1.background_color.is_none());
+    }
+
+    /// 大小写不敏感的那条路径要自己映射回原文偏移：小写化会改变字节长度，
+    /// 直接拿小写串的偏移会错位或切在非字符边界上。
+    #[test]
+    fn keyword_ranges_are_case_insensitive_but_stay_on_original_bytes() {
+        assert_eq!(keyword_ranges("Sunny Day", "sunny"), vec![0..5]);
+        assert_eq!(keyword_ranges("SUNNY DAY", "sunny"), vec![0..5]);
+        assert_eq!(keyword_ranges("Taylor Swift", "taylor"), vec![0..6]);
+        // 大小写混排：命中片段的字节宽度按**原文**算，不是按小写串算。
+        assert_eq!(keyword_ranges("ÄBC", "äbc"), vec![0..4]);
+        // `İ` 小写化成 `i̇` 是 2 字节 → 3 字节。区间要覆盖整个原文字符，
+        // 不能只取小写串的首字节变成 0..0。
+        assert_eq!(keyword_ranges("İstanbul", "i"), vec![0..2]);
+        // 端点必须落在字符边界上。
+        let text = "Ωİstanbul Straße";
+        for range in keyword_ranges(text, "i") {
+            assert!(text.is_char_boundary(range.start));
+            assert!(text.is_char_boundary(range.end));
+        }
+    }
+
+    /// 回归：「字节 → 原文偏移」映射表必须和 `lowered` 等长。之前 `origins` 按字符
+    /// push、下标却按字节查，非 ASCII 文本 + 大小写不一致的关键词时越界 panic
+    /// （全 ASCII 时 `len_utf8() == 1`，两张表恰好一样长，测不出来）。
+    #[test]
+    fn keyword_ranges_survive_multibyte_text_with_a_non_literal_keyword() {
+        // 「稻香（daoxiang）」：全角括号各 3 字节，搜 "DAO" 走小写化分支。
+        let title = "稻香（daoxiang）";
+        let ranges = keyword_ranges(title, "DAO");
+        assert_eq!(ranges, vec![9..12]);
+        assert!(title.is_char_boundary(ranges[0].start));
+        assert!(title.is_char_boundary(ranges[0].end));
+
+        // 再叠上小写化会变长的字符（`İ` 2 字节 → 3 字节），确认表长仍对得上：
+        // "İstanbul" 9 字节 + 全角左括号 3 字节 = 12，"live" 落在 12..16。
+        assert_eq!(keyword_ranges("İstanbul（live）", "LIVE"), vec![12..16]);
+        // 命中在多字节字符之后：下标要跨过前面的 3 字节括号，不能错位。
+        assert_eq!(keyword_ranges("（live）稻香", "LIVE"), vec![3..7]);
+        // 纯 ASCII + 大小写不一致（表长天然相等，作为对照）。
+        assert_eq!(keyword_ranges("Sunny Day", "DAY"), vec![6..9]);
+    }
+
+    /// 标题要输出「一组有序、不重叠、样式已调和好」的区间：副标题按命中切开，
+    /// 命中段是命中蓝、其余段是副标题的灰。区间算错时 `compute_runs` 会算出
+    /// 非法的 run，文字直接不显示。
+    #[test]
+    fn title_segments_split_the_subtitle_around_hits() {
+        let colors = ColorTokens {
+            foreground: rgb(0x283248).into(),
+            muted_foreground: Hsla {
+                a: 0.6,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // 「稻香（daoxiang）」：稻/香 各 3 字节，全角括号各 3 字节。
+        // 歌名 0..6，副标题 6..20（结尾的「）」也是 3 字节）。
+        let display = SongDisplay::new(&song_with_subtitle("稻香", "daoxiang"));
+        let subtitle = display.subtitle.clone();
+        assert_eq!(&display.title, "稻香（daoxiang）");
+        assert_eq!(subtitle, 6..20);
+        let shape = |keyword: &str| {
+            title_segments(&display.title, &subtitle, keyword, colors)
+                .into_iter()
+                .map(|(range, style)| (range, style.color == Some(link_blue())))
+                .collect::<Vec<_>>()
+        };
+
+        // 命中落在副标题里：副标题被切成「灰 / 蓝 / 灰」三段。
+        // 「daoxiang」占 9..17，其中 "xiang" 是 12..17。
+        assert_eq!(
+            shape("xiang"),
+            vec![(6..12, false), (12..17, true), (17..20, false)]
+        );
+        // 命中在歌名里：歌名那一段蓝，副标题仍是一整段灰。
+        assert_eq!(shape("稻"), vec![(0..3, true), (6..20, false)]);
+        // 无命中：只剩副标题那一整段灰。
+        assert_eq!(shape(""), vec![(6..20, false)]);
+        // 跨副标题首尾（"香（"）：歌名尾部 3..6 和副标题头部 6..9 都算命中，
+        // 中间不留灰段，歌名侧那一截也不能丢。
+        assert_eq!(
+            shape("香（"),
+            vec![(3..6, true), (6..9, true), (9..20, false)]
+        );
+
+        // 不管哪种关键词，产出都必须有序、不重叠、且端点落在字符边界上。
+        for keyword in ["xiang", "稻", "", "g", "稻香", "dao", "a", "香", "（", "）"] {
+            let segments = shape(keyword);
+            for pair in segments.windows(2) {
+                assert!(
+                    pair[0].0.end <= pair[1].0.start,
+                    "区间重叠或乱序: {pair:?}（keyword={keyword:?}）"
+                );
+            }
+            for (range, _) in &segments {
+                assert!(display.title.is_char_boundary(range.start), "{keyword:?}");
+                assert!(display.title.is_char_boundary(range.end), "{keyword:?}");
+            }
+        }
+    }
+
+    fn song_with_subtitle(name: &str, tns: &str) -> Song {
+        serde_json::from_value(serde_json::json!({
+            "id": 1,
+            "name": name,
+            "ar": [{"id": 1, "name": "周杰伦"}],
+            "al": {"id": 1, "name": "叶惠美"},
+            "dt": 0,
+            "tns": [tns],
+        }))
+        .unwrap()
+    }
 
     #[test]
     fn visible_range_tracks_outer_viewport() {

@@ -710,7 +710,9 @@ impl SearchPage {
                                     colors.foreground
                                 })
                                 .truncate()
-                                .child(title_with_subtitle(display, colors)),
+                                // 搜索页的「命中」是服务端的模糊匹配，没有用户输入的
+                                // 关键词可标，所以传空串只保留副标题样式。
+                                .child(title_with_subtitle(display, "", colors)),
                         )
                         .child(
                             div()
@@ -731,7 +733,7 @@ impl SearchPage {
                                         } else {
                                             colors.muted_foreground
                                         })
-                                        .child(artist_label(song, colors)),
+                                        .child(artist_label(song, "", colors)),
                                 ),
                         ),
                 ),

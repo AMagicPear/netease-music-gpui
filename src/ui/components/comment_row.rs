@@ -9,7 +9,7 @@ use gpui_kit::component::avatar::Avatar;
 
 use crate::models::SongComment;
 use crate::ui::assets::thumbnail_url;
-use crate::ui::theme::DOLPHIN_FAMILY;
+use crate::ui::theme::{DOLPHIN_FAMILY, link_blue};
 
 pub fn comment_row(comment: &SongComment) -> impl IntoElement {
     let now = time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
@@ -51,7 +51,7 @@ pub fn comment_row(comment: &SongComment) -> impl IntoElement {
                 .child(
                     div()
                         .mt(px(-3.))
-                        .text_color(rgb(0x5975B2))
+                        .text_color(link_blue())
                         .text_size(px(15.))
                         .child(comment.nickname.clone()),
                 )

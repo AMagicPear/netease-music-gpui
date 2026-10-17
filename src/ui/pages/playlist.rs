@@ -17,8 +17,10 @@ const ALBUM_SHARE_MAX: f32 = 0.8;
 /// 两处必须完全一致 `group_hover` 才会响应，所以抽成常量而不是写两遍字面量。
 const DIVIDER_ID: &str = "playlist-title-divider";
 
-/// 搜索框收起时的宽度：只够放下放大镜和左右各 8px 留白，输入区被裁到看不见。
-const SEARCH_COLLAPSED_WIDTH: Pixels = px(40.);
+/// 搜索框收起时的宽度。刚好放下「放大镜 + 搜索」：8 留白、16 图标、6 间距、
+/// 26 文字、8 留白，另留 8px 余量。占位文字走系统字体，汉字步进宽度等于字号，
+/// 即 13px × 2 字 = 26px。
+const SEARCH_COLLAPSED_WIDTH: Pixels = px(72.);
 /// 搜索框展开后的宽度，和官方「歌单内搜索」一致。
 const SEARCH_EXPANDED_WIDTH: Pixels = px(200.);
 const SEARCH_BOX_HEIGHT: Pixels = px(30.);
@@ -38,8 +40,9 @@ use crate::ui::components::{
     ACTION_BUTTON_HEIGHT, ACTION_BUTTON_PADDING, CELL_PADDING, COLUMN_GAP, DURATION_COLUMN_WIDTH,
     HEADER_HEIGHT, LIKE_COLUMN_WIDTH, ResizeDragPreview, SECONDARY_FONT_WEIGHT, SongDisplay,
     TabBar, TabChanged, TabItem, TableColumn, artist_label, centered_empty, hovered_row_after,
-    index_column_width, like_icon_path, play_all_button, play_count_label, quality_badge_path,
-    row_hover_icon, spinner, title_with_subtitle, virtual_table,
+    index_column_width, keyword_ranges, like_icon_path, play_all_button, play_count_label,
+    quality_badge_path, row_hover_icon, search_clear_button, spinner, text_with_matches,
+    title_with_subtitle, virtual_table,
 };
 use crate::ui::cover_color::{Backdrop, blend_color};
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
@@ -85,6 +88,10 @@ pub struct PlaylistPage {
     /// 歌单内搜索。只过滤已加载的歌曲，不发请求。
     search_input: Entity<InputState>,
     _search_subscription: Subscription,
+    /// 当前生效的关键词（trim 过，大小写折叠由 `keyword_ranges` 做）。
+    /// 和 `display_order` 同一次 `rebuild_display_order` 写入，两者永远一致；
+    /// 存一份是因为每个可见行都要拿它算高亮，现读输入框会逐行分配字符串。
+    search_keyword: SharedString,
     columns: Rc<Vec<TableColumn>>,
     sort: Option<(SongSort, bool)>,
     album_share: f32,
@@ -311,8 +318,10 @@ impl PlaylistPage {
                 // 换歌单就把关键词一起清掉：留着上一个歌单的词，新页面会显示一份
                 // 「搜过但没搜到」的结果，看起来像这个歌单没有歌。
                 //
-                // `set_value` 会发出 `Change`，而订阅是延迟执行的，所以这里不会
-                // 在本观察者还没跑完时重入 `rebuild_display_order`。
+                // 这里**故意**用 `set_value` 而不是清除按钮那边的 `replace_all`：
+                // 导航不是一次可撤销的编辑，Cmd+Z 不该把上一个歌单的关键词拽回来，
+                // 而 `set_value` 正好清空编辑历史。代价是它不发 `InputEvent::Change`，
+                // 所以下面那次 `rebuild_display_order` 是这里唯一的重算入口，不能省。
                 this.search_input
                     .update(cx, |input, cx| input.set_value("", window, cx));
             }
@@ -345,7 +354,7 @@ impl PlaylistPage {
         // 搜索框的状态交给 `InputState` 自己管：它内部已经建好 `FocusHandle`
         // 并登记为 tab stop，聚焦、选中、输入法都归它，这里不重复造。
         let search_input = cx.new(|cx| {
-            let mut state = InputState::new(window, cx).placeholder("在歌单中搜索");
+            let mut state = InputState::new(window, cx).placeholder("搜索");
             state.set_editor_style(InputEditorStyle {
                 selection: Theme::global(cx).tokens.colors.selection,
                 ..Default::default()
@@ -377,6 +386,7 @@ impl PlaylistPage {
             song_display: Vec::new(),
             search_input,
             _search_subscription: search_subscription,
+            search_keyword: SharedString::default(),
             columns: table_columns(0, 0.35),
             sort: None,
             album_share: 0.35,
@@ -762,13 +772,14 @@ impl PlaylistPage {
 
     /// 显示顺序 = 命中关键词的行，按当前排序排好。
     ///
-    /// 过滤和排序都只改 `display_order`（`detail.songs` 的下标），歌曲数据本身
-    /// 不动：行内的收藏、播放、「更多」菜单继续按原始下标取，行对象也不会被复制一份。
+    /// 过滤和排序都只改 `display_order`（`detail.songs` 的下标），歌曲数据本身不动，
     /// 列宽跟着显示行数重算，序号列因此在过滤后自动收窄。
+    ///
+    /// 顺带把 trim 后的关键词存进 `search_keyword` 供高亮用。保持原始大小写：
+    /// 「没有找到『X』」要照用户输入的样子显示，大小写折叠统一由 `keyword_ranges` 负责。
     fn rebuild_display_order(&mut self, cx: &App) {
         let sort = self.sort;
-        // 空关键词等价于不过滤，走快路径时也省掉每首歌的小写转换。
-        let keyword = self.search_input.read(cx).value().trim().to_lowercase();
+        let keyword: SharedString = self.search_input.read(cx).value().trim().into();
         let songs = &self.detail.read(cx).songs;
         let matched = (0..songs.len())
             .filter(|&index| keyword.is_empty() || song_matches(&songs[index], &keyword))
@@ -777,6 +788,7 @@ impl PlaylistPage {
             Some((column, descending)) => sort_indices(matched, songs, column, descending),
             None => matched,
         };
+        self.search_keyword = keyword;
         self.columns = table_columns(self.display_order.len(), self.album_share);
     }
 
@@ -789,11 +801,15 @@ impl PlaylistPage {
 
     /// 歌单内搜索框：白底胶囊，左边放大镜、右边输入区。
     ///
-    /// `progress` 是 0（收起）到 1（展开）的动画进度，宽度和文字淡入都由它派生，
-    /// 共用一条 transition 通道，所以两者天然同步、不会出现「框变宽了字还是隐的」。
+    /// `progress` 是 0（收起）到 1（展开）的动画进度，只用来插值宽度。
+    /// 占位文字两种状态都显示 —— 收起时也看得见「搜索」，胶囊才像个能被认出来的
+    /// 搜索框而不是一颗没来由的圆点。
+    ///
+    /// `has_value` 由 `render` 算好传进来：宽度和清空按钮要基于同一个判断。
     fn search_box(
         &self,
         progress: f32,
+        has_value: bool,
         border: Hsla,
         colors: ColorTokens,
         cx: &Context<Self>,
@@ -817,8 +833,8 @@ impl PlaylistPage {
             .border_1()
             .border_color(border)
             .rounded_full()
-            // 收到 40px 时输入区只剩 2px，靠这里裁掉，
-            // 否则会从圆角边上漏出半个占位符。
+            // 收起时宽度仍够放下占位文字，所以这里不淡出；留着它是为了输入了
+            // 文字又失焦时（收起态仍显示有内容），长文本在圆角处裁得干净。
             .overflow_hidden()
             // 边框比宽度先变白：胶囊底色本来就是白的，边框退成背景色，
             // 视觉上就是这排控件被「托起来」了。
@@ -837,8 +853,8 @@ impl PlaylistPage {
                     }
                 }
             })
-            // 整颗胶囊都是点击热区。收起时输入区被裁到几乎没有，
-            // 这里把焦点转交给真正的 InputState，胶囊才会展开。
+            // 整颗胶囊都是点击热区：`Input` 自己只占中间那截，点图标或两侧留白
+            // 不会命中它。这里把焦点转交给真正的 InputState，胶囊才会展开。
             .on_click(move |_, window, cx| {
                 view.update(cx, |this, cx| {
                     window.focus(&this.search_input.focus_handle(cx), cx);
@@ -853,17 +869,25 @@ impl PlaylistPage {
                     .hover(|style| style.text_color(colors.foreground)),
             )
             .child(
-                // 输入区宽度跟着胶囊走；用同一个进度淡入，
-                // 收起后彻底看不见文字，展开过程中才逐渐显出来。
+                // 输入区宽度跟着胶囊走。占位文字在收起态就要露出来（收起宽度
+                // 本来就够放它），所以不做淡入淡出，只让宽度动画负责「长出来」。
                 div()
                     .flex_1()
                     .min_w(px(0.))
                     .h_full()
-                    .opacity(progress)
                     .text_size(px(13.))
                     .text_color(colors.foreground)
                     .child(Input::new(&self.search_input)),
             )
+            // 清空按钮贴在胶囊内侧右端。有内容时框必然是展开的（宽度和这个按钮
+            // 共用 `has_value` 判断），所以这里不会挤到收起的 72px 上。
+            .when(has_value, |box_| {
+                box_.child(search_clear_button(
+                    self.search_input.clone(),
+                    "playlist-search-clear",
+                    colors,
+                ))
+            })
             .into_any_element()
     }
 
@@ -1012,7 +1036,11 @@ impl PlaylistPage {
                                         colors.foreground
                                     })
                                     .truncate()
-                                    .child(title_with_subtitle(display, colors)),
+                                    .child(title_with_subtitle(
+                                        display,
+                                        &self.search_keyword,
+                                        colors,
+                                    )),
                             )
                             .child(
                                 div()
@@ -1036,7 +1064,11 @@ impl PlaylistPage {
                                             } else {
                                                 colors.muted_foreground
                                             })
-                                            .child(artist_label(song, colors)),
+                                            .child(artist_label(
+                                                song,
+                                                &self.search_keyword,
+                                                colors,
+                                            )),
                                     ),
                             ),
                     )
@@ -1149,7 +1181,10 @@ impl PlaylistPage {
                 } else {
                     colors.foreground.alpha(0.45)
                 })
-                .child(display.album.clone())
+                .child(text_with_matches(
+                    display.album.clone(),
+                    &self.search_keyword,
+                ))
                 .into_any_element(),
             // 裸 SVG，没有圆形底色：已喜欢是实心红心，未喜欢是勾线灰心。
             svg()
@@ -1248,12 +1283,17 @@ fn sort_label(current: Option<(SongSort, bool)>, column: SongSort) -> (&'static 
 
 /// 关键词命中：标题、任一歌手、专辑任一包含即算命中。
 ///
-/// `keyword` 传小写（`rebuild_display_order` 里已经折好），这里逐段小写后做子串比较 ——
-/// 英文大小写不敏感，中文不受影响。搜的是子串而不是前缀，所以「周杰伦」能命中
-/// 歌名中间的「周」字所在的那首。
+/// 判定直接复用 `keyword_ranges`，所以「过滤」和「高亮」是同一套匹配，
+/// 不会出现某行搜出来了、高亮却找不到位置的情况。搜的是子串不是前缀，
+/// 所以「周」能命中歌名中间带「周」字的那首。
+///
+/// `tns`（音译）和 `alia`（别名）也算：它们显示成标题的副标题，
+/// 用户看得到就一定会搜它 —— 用「daoxiang」搜「稻香」应该找得到。
 fn song_matches(song: &Song, keyword: &str) -> bool {
-    let hit = |text: &str| text.to_lowercase().contains(keyword);
+    let hit = |text: &str| !keyword_ranges(text, keyword).is_empty();
     hit(&song.name)
+        || song.tns.iter().any(|t| hit(t))
+        || song.alia.iter().any(|a| hit(a))
         || song
             .ar
             .iter()
@@ -1334,8 +1374,13 @@ impl Render for PlaylistPage {
         let colors = Theme::global(cx).tokens.colors;
         // 展开与否只由「有没有焦点」和「有没有字」决定：光标停在框里就该让用户看得见
         // 自己能往哪打字，输入过字就该留着结果让人对照，鼠标 hover 不算 —— 它只是探过来看一眼。
-        let keyword = self.search_input.read(cx).value().trim().to_owned();
-        let expanded = self.search_input.focus_handle(cx).is_focused(window) || !keyword.is_empty();
+        //
+        // 「有字」看原始内容（哪怕只有一个空格），过滤用的关键词才是 trim 结果：
+        // 宽度和清空按钮共用 `has_value`，若看 trim 后的，只输入一个空格时
+        // 按钮会挤进收起的 72px 里。
+        let has_value = !self.search_input.read(cx).value().is_empty();
+        let keyword = self.search_keyword.clone();
+        let expanded = self.search_input.focus_handle(cx).is_focused(window) || has_value;
         // 一条进度通道同时驱动宽度和文字淡入，两者不会错拍；
         // 库自己处理 reduced motion 和掉帧重绘，这里只管给目标值。
         let progress = transition(
@@ -1559,7 +1604,7 @@ impl Render for PlaylistPage {
                     .justify_between()
                     .gap(px(16.))
                     .child(self.tabs.clone())
-                    .child(self.search_box(progress, border, colors, cx)),
+                    .child(self.search_box(progress, has_value, border, colors, cx)),
             )
             // 具体内容区域
             .when_some(library.likes_error.as_ref(), |page, message| {
@@ -1656,5 +1701,24 @@ mod tests {
             [0, 2]
         );
         assert_eq!(sort_indices(matched, &songs, SongSort::Title, true), [2, 0]);
+    }
+
+    /// `tns`（音译）和 `alia`（别名）会显示成标题的副标题，用户看得见就一定会搜它。
+    /// 「稻香」的副标题是 `（daoxiang）`，所以 `daoxiang` 必须能搜到它。
+    #[test]
+    fn keyword_also_matches_the_rendered_subtitle() {
+        let mut track = song("稻香", "周杰伦", Some("叶惠美"));
+        track.tns = vec!["dao xiang".into()];
+        track.alia = vec!["稻香 Theme".into()];
+
+        // 标题 / 歌手 / 专辑照旧。
+        assert!(song_matches(&track, "稻香"));
+        assert!(song_matches(&track, "周杰伦"));
+        assert!(song_matches(&track, "叶惠美"));
+        // 副标题里的命中也算，大小写不敏感。
+        assert!(song_matches(&track, "xiang"));
+        assert!(song_matches(&track, "DAO"));
+        assert!(song_matches(&track, "theme"));
+        assert!(!song_matches(&track, "不存在"));
     }
 }

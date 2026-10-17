@@ -668,7 +668,7 @@ impl Render for PlayerBar {
                 .map(|song| {
                     (
                         song.name.clone(),
-                        artist_label(song, colors),
+                        artist_label(song, "", colors),
                         Some(song.id),
                         playback.is_play_requested(),
                     )
