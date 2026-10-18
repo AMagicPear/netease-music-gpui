@@ -22,7 +22,7 @@ use crate::models::{Playlist, Song};
 use crate::playback::{PlaybackController, PlaybackEvent};
 use crate::state::account::AccountState;
 use crate::state::library::MusicLibrary;
-use crate::state::recommend::RecommendedPlaylists;
+use crate::state::recommend::RecommendStore;
 use crate::state::search_results::SearchResults;
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::base::{Button, ColorTokens, History, Scrollbar, ScrollbarMode, Theme};
@@ -368,7 +368,7 @@ impl MainContent {
             });
         let song_comments_page = cx.new(|cx| SongCommentsPage::new(window, cx));
         // 推荐页的歌单数据：跟着登录状态加载，过期结果由 store 自己丢弃。
-        let recommended = cx.new(|cx| RecommendedPlaylists::new(user_profile.clone(), cx));
+        let recommended = cx.new(|cx| RecommendStore::new(user_profile.clone(), cx));
         let recommend_page = cx.new(|_| RecommendPage::new(recommended));
         let library_subscription = cx.observe(&library, |this, _, cx| {
             // 收藏歌单的 ID 要等账号索引返回后才能解析。

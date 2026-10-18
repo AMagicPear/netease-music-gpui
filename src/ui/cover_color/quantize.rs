@@ -67,7 +67,10 @@ fn to_hsl([r, g, b]: [u8; 3]) -> Hsla {
 
 fn allowed(color: [u8; 3]) -> bool {
     let color = to_hsl(color);
-    color.l > 0.1 && !(color.l >= 0.85 && color.s <= 0.1)
+    // 亮白底海报的主色桶几乎是中性灰，按人口选会得到一条灰带（看起来像“没取到色”）。
+    // 这里连低饱和的中间调一起排除，让海报里面积小但有彩的像素去竞争；灰度封面
+    // 仍然会在 `dominant` 里回退到未过滤的调色板，不会取不到色。
+    color.l > 0.1 && color.l < 0.85 && color.s > 0.12
 }
 
 fn dominant(histogram: &[u32], limit: usize) -> Option<[u8; 3]> {

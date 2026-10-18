@@ -50,11 +50,12 @@ pub struct TrackId {
     pub id: u64,
 }
 
-/// 「推荐歌单」条目（`/recommend/resource`）：只带推荐页卡片需要的字段。
+/// 推荐页卡片上的歌单摘要：只带卡片需要的字段。
 ///
-/// 不复用 [`Playlist`]：这个接口给的是摘要形态（`picUrl`、小写的 `playcount`，
-/// 没有创建者、标签、trackIds），硬塞进 `Playlist` 只会得到一堆空字段；
-/// 点开歌单时按 id 走 `playlist/detail` 拿完整数据，这里不必冒充详情。
+/// 官方 3.1.41 的推荐歌单接口给的是 creative（`uiElement` + `resources`），
+/// store 从 creative 映射成这个结构；字段名仍兼容老接口的 `picUrl` / `playcount`。
+/// 不复用 [`Playlist`]：这里没有创建者、标签、trackIds，点开歌单时按 id 走
+/// `playlist/detail` 拿完整数据，不必冒充详情。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecommendedPlaylist {

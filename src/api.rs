@@ -7,9 +7,11 @@ use ncm_api_rs::{ApiResponse, NcmError, Query, create_client};
 use tokio::runtime::Runtime;
 
 use crate::models::{
-    AudioQualityLevel, AudioSourceInfo, LyricLine, MessageItem, Playlist, Privilege,
-    RecommendedPlaylist, Song, SongComments, TrackId, UserProfile, VipInfo, parse_comment_page,
-    parse_comments, parse_forwards, parse_notices, parse_private,
+    AudioQualityLevel, AudioSourceInfo, FeaturedActivity, HomepageBlock, LyricLine, MessageItem,
+    Playlist, Privilege, RecommendEntry, RecommendedPlaylist, Song, SongComments, TrackId,
+    UserProfile, VipInfo, parse_activities, parse_comment_page, parse_comments, parse_entries,
+    parse_forwards, parse_homepage_blocks, parse_notices, parse_playlists, parse_private,
+    parse_radar,
 };
 
 /// GPUI 负责界面，Tokio 负责 SDK 的网络请求。客户端和运行时在应用内复用。
@@ -240,17 +242,45 @@ impl MusicApi {
             .map_err(|_| "喜欢的歌曲列表格式无效".to_string())
     }
 
+    /// 推荐页顶部入口：官方把「每日推荐 + 多种风格日推」混排在一个区块里，
+    /// 走新的首屏聚合接口，不必为每个入口单独发请求。
+    pub async fn recommend_entries(client: ApiClient) -> Result<Vec<RecommendEntry>, String> {
+        let response =
+            Self::request(client.pc_rcmd_resource_show(&Query::new())).await?;
+        Ok(parse_entries(&response.body))
+    }
+
     /// 推荐歌单（推荐页的「推荐歌单」区块）。
     ///
-    /// 和 [`Self::user_playlists`] 是两回事：那个是账号自己的歌单，
-    /// 这个是登录后的个性化推荐，接口本身要求登录态（未登录时直接失败，
-    /// 由 store 决定要不要显示空状态）。
-    pub async fn recommend_playlists(
+    /// 官方 3.1.41 换成了 `/pc/personal/page/playlist/rcmd`：一次返回 12 条，
+    /// creative 的深链里带 `referLog=HOMEPAGE_BLOCK_PLAYLIST_RCMD`。
+    pub async fn recommended_playlists(
         client: ApiClient,
     ) -> Result<Vec<RecommendedPlaylist>, String> {
-        let mut response = Self::request(client.recommend_resource(&Query::new())).await?;
-        serde_json::from_value(response.body["recommend"].take())
-            .map_err(|error| format!("推荐歌单格式无效：{error}"))
+        let response =
+            Self::request(client.personal_page_playlist_rcmd(&Query::new())).await?;
+        Ok(parse_playlists(&response.body))
+    }
+
+    /// 雷达歌单：`/pc/customize/block/page` 一次给全歌单 id、封面、文案、播放量，
+    /// 不需要再发歌单详情去补第一首歌封面。
+    pub async fn radar_playlists(client: ApiClient) -> Result<Vec<RecommendedPlaylist>, String> {
+        let response = Self::request(client.customize_block_page(&Query::new())).await?;
+        Ok(parse_radar(&response.body))
+    }
+
+    /// 精选活动：运营位大图。官方主页面也会从首屏聚合接口里拿 banner 块，
+    /// 这里用独立的 `/banner/get`，两者返回的是同一批运营内容。
+    pub async fn featured_activities(client: ApiClient) -> Result<Vec<FeaturedActivity>, String> {
+        // `banner()` 的默认 `type=0` 就是 `clientType=pc`。
+        let response = Self::request(client.banner(&Query::new())).await?;
+        Ok(parse_activities(&response.body))
+    }
+
+    /// 首页区块。游客也能取（未登录时是公开推荐），推荐歌单在未登录时用它兜底。
+    pub async fn homepage_blocks(client: ApiClient) -> Result<Vec<HomepageBlock>, String> {
+        let response = Self::request(client.homepage_block_page(&Query::new())).await?;
+        Ok(parse_homepage_blocks(&response.body["data"]["blocks"]))
     }
 
     /// 私信会话列表（消息面板·私信 tab）。同时带回账号总未读数，用于 tab 角标。
@@ -542,6 +572,7 @@ fn attach_privileges(songs: &mut [Song], privileges: Vec<Privilege>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{CreativeTarget, PLAYLIST_BLOCK_CODE};
     use futures::AsyncReadExt;
     use gpui::http_client::HttpClient;
 
@@ -742,11 +773,45 @@ mod tests {
 
     #[test]
     #[ignore = "需要登录会话（或 COOKIE 环境变量）和网络连接"]
-    fn recommend_playlists_can_parse_real_results() {
+    fn recommend_entries_can_parse_real_results() {
+        let api = MusicApi::from_env().expect("无法获取登录会话");
+        let entries = api
+            .runtime
+            .block_on(MusicApi::recommend_entries(api.client.clone()))
+            .expect("推荐入口失败");
+        assert!(!entries.is_empty());
+        // 官方首屏至少有一条每日推荐；风格日推随账号口味出现。
+        let daily = entries
+            .iter()
+            .find(|entry| entry.sub_resource_type == "dailySong")
+            .expect("推荐入口里应当有每日推荐");
+        assert!(!daily.title.is_empty());
+        assert!(daily.cover_url.is_some());
+        for entry in &entries {
+            assert!(entry.resource_id > 0);
+            assert!(!entry.resource_type.is_empty());
+        }
+        // 顶部入口的封面也要能通过应用客户端下载（取色和卡片共用这份图）。
+        let http = api.http_client();
+        for entry in entries.iter().filter(|entry| entry.cover_url.is_some()) {
+            let cover = crate::ui::assets::thumbnail_url(entry.cover_url.as_deref().unwrap(), 300);
+            api.runtime.block_on(async {
+                let response = http
+                    .get(&cover, ().into(), true)
+                    .await
+                    .expect("入口封面下载失败");
+                assert!(response.status().is_success(), "入口封面状态码异常");
+            });
+        }
+    }
+
+    #[test]
+    #[ignore = "需要登录会话（或 COOKIE 环境变量）和网络连接"]
+    fn recommended_playlists_can_parse_real_results() {
         let api = MusicApi::from_env().expect("无法获取登录会话");
         let playlists = api
             .runtime
-            .block_on(MusicApi::recommend_playlists(api.client.clone()))
+            .block_on(MusicApi::recommended_playlists(api.client.clone()))
             .expect("推荐歌单失败");
         assert!(!playlists.is_empty());
         for playlist in &playlists {
@@ -761,6 +826,129 @@ mod tests {
             .expect("歌单详情失败");
         assert_eq!(detail.name, playlists[0].name);
         assert!(!songs.is_empty());
+    }
+
+    #[test]
+    #[ignore = "临时探针：把首页区块整个翻一遍"]
+    fn probe_homepage_all_blocks() {
+        let api = MusicApi::from_env().expect("无法获取登录会话");
+        let mut cursor = String::new();
+        for page in 0..2 {
+            let query = Query::new().param("cursor", &cursor);
+            let home = api
+                .runtime
+                .block_on(MusicApi::request(
+                    api.client.clone().homepage_block_page(&query),
+                ))
+                .expect("首页失败");
+            let data = &home.body["data"];
+            let blocks = data["blocks"].as_array().cloned().unwrap_or_default();
+            println!(
+                "=== page {page} blocks={} hasMore={} ===",
+                blocks.len(),
+                data["hasMore"]
+            );
+            for block in &blocks {
+                let code = block["blockCode"].as_str().unwrap_or("?");
+                let creatives = block["creatives"].as_array().cloned().unwrap_or_default();
+                let ui = &block["uiElement"];
+                println!(
+                    "[{code}] creatives={} uiKeys={:?} title={:?} sub={:?}",
+                    creatives.len(),
+                    ui.as_object()
+                        .map(|ui| ui.keys().cloned().collect::<Vec<_>>()),
+                    ui["mainTitle"]["title"],
+                    ui["subTitle"]["title"],
+                );
+                if let Some(first) = creatives.first() {
+                    let ui = &first["uiElement"];
+                    println!(
+                        "    first type={:?} title={:?} sub={} img={:?} action={:?} actionType={:?} keys={:?}",
+                        first["creativeType"],
+                        ui["mainTitle"]["title"],
+                        serde_json::to_string(&ui["subTitle"]).unwrap(),
+                        ui["image"]["imageUrl"],
+                        first["action"],
+                        first["actionType"],
+                        ui.as_object().map(|ui| ui.keys().cloned().collect::<Vec<_>>()),
+                    );
+                }
+            }
+            let next = data["cursor"].as_str().unwrap_or("");
+            if next.is_empty() {
+                break;
+            }
+            cursor = next.to_owned();
+        }
+    }
+
+    #[test]
+    #[ignore = "需要登录会话（或 COOKIE 环境变量）和网络连接"]
+    fn radar_playlists_can_parse_real_results() {
+        let api = MusicApi::from_env().expect("无法获取登录会话");
+        let playlists = api
+            .runtime
+            .block_on(MusicApi::radar_playlists(api.client.clone()))
+            .expect("雷达歌单失败");
+        assert!(!playlists.is_empty());
+        let first = &playlists[0];
+        assert!(first.id > 0);
+        assert!(!first.name.is_empty());
+        assert!(
+            playlists.iter().all(|playlist| playlist.pic_url.is_some()),
+            "雷达歌单每一张卡片都应当有封面"
+        );
+        // 文案里的 `|私人雷达` 后缀不该进卡片标题。
+        assert!(!first.name.contains("|私人雷达"));
+        // 雷达封面带 `imageView`/水印查询串，`thumbnail_url` 不能把它重新编码：
+        // 参数值里的 `=` 被编码成 `%3D` 后 CDN 会直接 400，卡片和取色都会拿到默认图。
+        let http = api.http_client();
+        let cover = crate::ui::assets::thumbnail_url(first.pic_url.as_deref().unwrap(), 300);
+        api.runtime.block_on(async {
+            let response = http
+                .get(&cover, ().into(), true)
+                .await
+                .expect("雷达封面下载失败");
+            assert!(response.status().is_success(), "雷达封面状态码异常");
+        });
+    }
+
+    #[test]
+    #[ignore = "需要网络连接（不需要登录）"]
+    fn featured_activities_can_parse_real_results() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let activities = runtime
+            .block_on(MusicApi::featured_activities(create_client(None)))
+            .expect("精选活动失败");
+        assert!(!activities.is_empty());
+        for activity in &activities {
+            assert!(!activity.title.is_empty());
+            assert!(activity.image_url.is_some());
+        }
+    }
+
+    /// 首页区块游客也能取：卡片行的「推荐歌单」来自其中的
+    /// `HOMEPAGE_BLOCK_PLAYLIST_RCMD`，条目带封面、播放量和歌单深链。
+    #[test]
+    #[ignore = "需要网络连接（不需要登录）"]
+    fn homepage_blocks_can_parse_real_results() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let blocks = runtime
+            .block_on(MusicApi::homepage_blocks(create_client(None)))
+            .expect("首页区块失败");
+        assert!(!blocks.is_empty());
+        let card_block = blocks
+            .iter()
+            .find(|block| block.code == PLAYLIST_BLOCK_CODE)
+            .expect("首页应当有推荐歌单区块");
+        assert_eq!(card_block.title, "推荐歌单");
+        assert!(!card_block.creatives.is_empty());
+        assert!(
+            card_block
+                .creatives
+                .iter()
+                .any(|creative| matches!(creative.target, Some(CreativeTarget::Playlist(_))))
+        );
     }
 
     #[test]
@@ -933,4 +1121,5 @@ mod temp_probe {
             .expect("清空未读计数失败");
         println!("{}", serde_json::to_string_pretty(&response.body).unwrap());
     }
+
 }

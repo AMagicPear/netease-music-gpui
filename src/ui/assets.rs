@@ -176,16 +176,22 @@ pub fn thumbnail_url(url: &str, pixels: u32) -> String {
         // 只有「特殊协议 ↔ 非特殊协议」互转才会失败，http → https 不会。
         let _ = parsed.set_scheme("https");
     }
-    let parameters: Vec<_> = parsed
-        .query_pairs()
-        .filter(|(key, _)| key != "param")
-        .map(|pair| (pair.0.into_owned(), pair.1.into_owned()))
+    // 这里不能用 `query_pairs_mut()` 重写：它会把已有参数值里的 `=` 再编码一次
+    // （`...%7CimageView=1` → `...%7CimageView%3D1`），网易 CDN 对雷达封面的
+    // 水印参数会直接返回 400。保留原始查询串，只替换/追加 `param`。
+    let parameters: Vec<&str> = parsed
+        .query()
+        .unwrap_or_default()
+        .split('&')
+        .filter(|pair| !pair.is_empty() && !pair.starts_with("param="))
         .collect();
-    parsed
-        .query_pairs_mut()
-        .clear()
-        .extend_pairs(parameters)
-        .append_pair("param", &format!("{pixels}y{pixels}"));
+    let size = format!("param={pixels}y{pixels}");
+    let query = if parameters.is_empty() {
+        size
+    } else {
+        format!("{}&{size}", parameters.join("&"))
+    };
+    parsed.set_query(Some(&query));
     parsed.into()
 }
 
@@ -274,6 +280,20 @@ mod tests {
         assert_eq!(
             thumbnail_url("https://example.com/cover.jpg", 72),
             "https://example.com/cover.jpg"
+        );
+    }
+
+    #[test]
+    fn thumbnail_keeps_existing_query_encoding_intact() {
+        // 雷达封面的 `enlarge=1%7CimageView=1` 里有一个未编码的 `=`；用
+        // `query_pairs_mut` 重写会把它变成 `%3D`，CDN 直接 400。
+        let url = thumbnail_url(
+            "https://p1.music.126.net/cover.jpg?imageView=1&enlarge=1%7CimageView=1&param=1000y1000",
+            300,
+        );
+        assert_eq!(
+            url,
+            "https://p1.music.126.net/cover.jpg?imageView=1&enlarge=1%7CimageView=1&param=300y300"
         );
     }
 
