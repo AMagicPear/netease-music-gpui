@@ -11,9 +11,11 @@ use super::components::{
 };
 use super::cover_color::{Backdrop, CoverColor, CoverGradient, gradient_layer};
 use super::events::{
-    ContentLayoutChanged, OpenSongComments, PlaylistCommentsTab, PlaylistMetadataChanged,
+    ContentLayoutChanged, OpenRecommendedPlaylist, OpenSongComments, PlaylistCommentsTab,
+    PlaylistMetadataChanged,
 };
 use super::now_playing::{NowPlaying, NowPlayingPage};
+use super::pages::recommend::RecommendPage;
 use super::pages::search::OpenPlaylist;
 use super::pages::{ContentPage, playlist::PlaylistPage, search::SearchPage};
 use super::sidebar::{LoginRequested, SidebarChanged, SidebarPage};
@@ -22,6 +24,7 @@ use crate::models::Song;
 use crate::playback::{PlaybackController, PlaybackEvent};
 use crate::state::account::AccountState;
 use crate::state::library::MusicLibrary;
+use crate::state::recommend::RecommendedPlaylists;
 use crate::state::search_results::SearchResults;
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::base::{Button, ColorTokens, History, Scrollbar, ScrollbarMode, Theme};
@@ -284,6 +287,8 @@ pub struct MainContent {
     account_id: u64,
     /// 每个导航项对应一个页面 View，一次创建后长期持有。
     pages: HashMap<ContentPage, AnyView>,
+    /// 推荐页：没有侧栏按钮之外的入口问题，但它要持有推荐歌单 store，所以在这里创建。
+    recommend_page: Entity<RecommendPage>,
     playlist_page: Entity<PlaylistPage>,
     /// 歌曲评论页：没有侧栏入口，评论图标进来，切歌换内容。
     song_comments_page: Entity<SongCommentsPage>,
@@ -301,6 +306,8 @@ pub struct MainContent {
     _library_subscription: Subscription,
     _search_subscription: Subscription,
     _search_page_subscription: Subscription,
+    /// 推荐歌单卡片点开：页面只发 id，这里负责导航与详情加载。
+    _recommend_subscription: Subscription,
     _playlist_subscription: Subscription,
     _playlist_comments_subscription: Subscription,
 }
@@ -355,6 +362,17 @@ impl MainContent {
             },
         );
         let song_comments_page = cx.new(|cx| SongCommentsPage::new(window, cx));
+        // 推荐页的歌单数据：跟着登录状态加载，过期结果由 store 自己丢弃。
+        let recommended = cx.new(|cx| RecommendedPlaylists::new(user_profile.clone(), cx));
+        let recommend_page = cx.new(|_| RecommendPage::new(recommended));
+        // 推荐歌单卡片：页面只发 id（消息层），导航和详情加载归这里——
+        // 和搜索页的 OpenPlaylist 同一套路，详情按 id 现取。
+        let recommend_subscription = cx.subscribe(
+            &recommend_page,
+            |this, _, event: &OpenRecommendedPlaylist, cx| {
+                this.navigate(ContentPage::Playlist(event.0), cx);
+            },
+        );
         let library_subscription = cx.observe(&library, |this, _, cx| {
             // 收藏歌单的 ID 要等账号索引返回后才能解析。
             this.open_playlist(this.active_page, cx);
@@ -419,6 +437,7 @@ impl MainContent {
             profile_menu_open: false,
             account_id: 0,
             pages,
+            recommend_page,
             playlist_page,
             song_comments_page,
             search_page,
@@ -435,6 +454,7 @@ impl MainContent {
             _library_subscription: library_subscription,
             _search_subscription: search_subscription,
             _search_page_subscription: search_page_subscription,
+            _recommend_subscription: recommend_subscription,
             _playlist_subscription: playlist_subscription,
             _playlist_comments_subscription: playlist_comments_subscription,
         }
@@ -900,6 +920,15 @@ impl Render for MainContent {
         ) && self.playlist_page.read(cx).comments_active(cx);
         let page_scroll = &self.page_scroll[&active_page];
         let page = match active_page {
+            // 推荐页持有推荐歌单 store，不在 `pages` 预建表里；卡片布局随内容区
+            // 宽度变化（官方客户端同款：852 宽 5 张、1307 宽 7 张），宽度从这里传进去。
+            // window 用于给顶部入口的封面取色（caption 区底色）。
+            ContentPage::Recommend => Some(RecommendPage::content(
+                self.recommend_page.clone(),
+                window.viewport_size().width - self.sidebar_width - PAGE_SIDE_PADDING * 2.,
+                window,
+                cx,
+            )),
             ContentPage::FavoriteMusic | ContentPage::Playlist(_) => Some(PlaylistPage::content(
                 self.playlist_page.clone(),
                 window.viewport_size().width - self.sidebar_width - px(80.),

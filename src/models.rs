@@ -13,7 +13,7 @@ pub use comment::{SongComment, SongComments};
 pub use message::MessageItem;
 pub(crate) use message::{parse_comments, parse_forwards, parse_notices, parse_private};
 pub use play_mode::PlayMode;
-pub use playlist::{Playlist, TrackId};
+pub use playlist::{Playlist, RecommendedPlaylist, TrackId};
 pub use song::{Privilege, Song};
 pub use song_detail::LyricLine;
 pub use user::{UserProfile, VipInfo};

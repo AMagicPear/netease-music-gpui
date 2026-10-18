@@ -24,6 +24,11 @@ pub(in crate::ui) struct OpenSongComments(pub Song);
 #[derive(Clone, Copy)]
 pub(in crate::ui) struct PlaylistCommentsTab;
 
+/// 「打开推荐页的一张推荐歌单」：卡片只发 id（消息层），导航和详情加载归
+/// `MainContent`——详情按 id 现取，卡片上没有完整摘要可传。
+#[derive(Clone, Copy)]
+pub(in crate::ui) struct OpenRecommendedPlaylist(pub u64);
+
 /// 歌单元数据更新，窗口需要重新读取封面颜色；行 hover 和列表滚动不影响窗口背景。
 pub(in crate::ui) struct PlaylistMetadataChanged;
 

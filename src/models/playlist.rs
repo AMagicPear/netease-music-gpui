@@ -50,9 +50,64 @@ pub struct TrackId {
     pub id: u64,
 }
 
+/// 「推荐歌单」条目（`/recommend/resource`）：只带推荐页卡片需要的字段。
+///
+/// 不复用 [`Playlist`]：这个接口给的是摘要形态（`picUrl`、小写的 `playcount`，
+/// 没有创建者、标签、trackIds），硬塞进 `Playlist` 只会得到一堆空字段；
+/// 点开歌单时按 id 走 `playlist/detail` 拿完整数据，这里不必冒充详情。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecommendedPlaylist {
+    pub id: u64,
+    pub name: String,
+    /// 封面地址；接口可能给 `picUrl` 也可能给 `coverImgUrl`，都收进这一个字段。
+    #[serde(alias = "coverImgUrl")]
+    pub pic_url: Option<String>,
+    /// 播放量。这个接口用的是小写的 `playcount`，`playCount` 写法一并兼容；
+    /// 整个缺省时按 0 算——卡片显示「0」也比解析失败、整页没内容好。
+    #[serde(default, alias = "playcount")]
+    pub play_count: u64,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Playlist;
+    use super::{Playlist, RecommendedPlaylist};
+
+    /// 照抄 `/recommend/resource` 的真实响应：封面叫 `picUrl`、播放量叫小写的
+    /// `playcount`，且没有创建者 / 标签 / trackIds。字段名写错（比如按 `Playlist`
+    /// 的 `coverImgUrl` / `playCount` 解析）会在这里静默丢成默认值。
+    #[test]
+    fn recommended_playlist_parses_recommend_resource_shape() {
+        let playlist: RecommendedPlaylist = serde_json::from_value(serde_json::json!({
+            "id": 1476194476_u64,
+            "type": 1,
+            "name": "恢复能量歌单",
+            "copywriter": "恢复能量歌单",
+            "picUrl": "http://p2.music.126.net/cover.jpg?imageView&thumbnail=252x0",
+            "canDislike": true,
+            "playcount": 5182
+        }))
+        .expect("夹具应当能解析");
+        assert_eq!(playlist.id, 1476194476);
+        assert_eq!(playlist.name, "恢复能量歌单");
+        assert_eq!(
+            playlist.pic_url.as_deref(),
+            Some("http://p2.music.126.net/cover.jpg?imageView&thumbnail=252x0")
+        );
+        assert_eq!(playlist.play_count, 5182);
+    }
+
+    /// 封面与播放量都允许缺省：卡片有兜底封面，播放量缺了就当 0，
+    /// 不该让整个列表解析失败。
+    #[test]
+    fn recommended_playlist_falls_back_on_missing_cover_and_count() {
+        let playlist: RecommendedPlaylist = serde_json::from_value(serde_json::json!({
+            "id": 1, "name": "歌单"
+        }))
+        .expect("夹具应当能解析");
+        assert_eq!(playlist.pic_url, None);
+        assert_eq!(playlist.play_count, 0);
+    }
 
     /// 照抄搜索歌单（cloudsearch type=1000）的真实响应：没有 `createTime` / `trackIds` /
     /// `tags`，收藏数叫 `bookCount`，创建者头像是 `null`。任何一项变回必填都会在这里解析失败。

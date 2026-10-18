@@ -7,9 +7,9 @@ use ncm_api_rs::{ApiResponse, NcmError, Query, create_client};
 use tokio::runtime::Runtime;
 
 use crate::models::{
-    AudioQualityLevel, AudioSourceInfo, LyricLine, MessageItem, Playlist, Privilege, Song,
-    SongComments, TrackId, UserProfile, VipInfo, parse_comment_page, parse_comments,
-    parse_forwards, parse_notices, parse_private,
+    AudioQualityLevel, AudioSourceInfo, LyricLine, MessageItem, Playlist, Privilege,
+    RecommendedPlaylist, Song, SongComments, TrackId, UserProfile, VipInfo, parse_comment_page,
+    parse_comments, parse_forwards, parse_notices, parse_private,
 };
 
 /// GPUI 负责界面，Tokio 负责 SDK 的网络请求。客户端和运行时在应用内复用。
@@ -238,6 +238,19 @@ impl MusicApi {
         let mut likes = Self::request(client.likelist(&like_query)).await?;
         serde_json::from_value(likes.body["ids"].take())
             .map_err(|_| "喜欢的歌曲列表格式无效".to_string())
+    }
+
+    /// 推荐歌单（推荐页的「推荐歌单」区块）。
+    ///
+    /// 和 [`Self::user_playlists`] 是两回事：那个是账号自己的歌单，
+    /// 这个是登录后的个性化推荐，接口本身要求登录态（未登录时直接失败，
+    /// 由 store 决定要不要显示空状态）。
+    pub async fn recommend_playlists(
+        client: ApiClient,
+    ) -> Result<Vec<RecommendedPlaylist>, String> {
+        let mut response = Self::request(client.recommend_resource(&Query::new())).await?;
+        serde_json::from_value(response.body["recommend"].take())
+            .map_err(|error| format!("推荐歌单格式无效：{error}"))
     }
 
     /// 私信会话列表（消息面板·私信 tab）。同时带回账号总未读数，用于 tab 角标。
@@ -724,6 +737,29 @@ mod tests {
             .expect("歌单详情失败");
         assert_eq!(detail.name, playlists[0].name);
         assert!(detail.create_time.is_some());
+        assert!(!songs.is_empty());
+    }
+
+    #[test]
+    #[ignore = "需要登录会话（或 COOKIE 环境变量）和网络连接"]
+    fn recommend_playlists_can_parse_real_results() {
+        let api = MusicApi::from_env().expect("无法获取登录会话");
+        let playlists = api
+            .runtime
+            .block_on(MusicApi::recommend_playlists(api.client.clone()))
+            .expect("推荐歌单失败");
+        assert!(!playlists.is_empty());
+        for playlist in &playlists {
+            assert!(playlist.id > 0);
+            assert!(!playlist.name.is_empty());
+            assert!(playlist.pic_url.is_some());
+        }
+        // 推荐卡片点进去走的是同一条详情链路：摘要里的 id 必须能打开歌单。
+        let (detail, songs) = api
+            .runtime
+            .block_on(MusicApi::playlist(api.client.clone(), playlists[0].id))
+            .expect("歌单详情失败");
+        assert_eq!(detail.name, playlists[0].name);
         assert!(!songs.is_empty());
     }
 

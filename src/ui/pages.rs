@@ -5,7 +5,8 @@ mod my_podcast;
 pub(super) mod playlist;
 mod podcast;
 mod recent;
-mod recommend;
+// 推荐页持有推荐歌单 store（由 MainContent 创建注入），同歌单页 / 搜索页。
+pub(super) mod recommend;
 mod roaming;
 pub(super) mod search;
 
@@ -124,14 +125,18 @@ impl ContentPage {
     /// 创建该导航项对应的页面 View。
     ///
     /// 静态页面长期持有；带 ID 的歌单和搜索结果页由 MainContent 的单个 View 承接。
+    /// 推荐页同理：它要持有推荐歌单 store，也在 MainContent 里创建。
     pub(super) fn build(self, cx: &mut App) -> Option<AnyView> {
         Some(match self {
-            Self::Recommend => cx.new(|_| recommend::RecommendPage).into(),
             Self::Featured => cx.new(|_| featured::FeaturedPage).into(),
             Self::Podcast => cx.new(|_| podcast::PodcastPage).into(),
             Self::Roaming => cx.new(|_| roaming::RoamingPage).into(),
             Self::Following => cx.new(|_| following::FollowingPage).into(),
-            Self::FavoriteMusic | Self::Playlist(_) | Self::SongComments(_) | Self::Search => {
+            Self::Recommend
+            | Self::FavoriteMusic
+            | Self::Playlist(_)
+            | Self::SongComments(_)
+            | Self::Search => {
                 return None;
             }
             Self::Recent => cx.new(|_| recent::RecentPage).into(),
