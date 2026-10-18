@@ -8,13 +8,13 @@ use super::progress_bar::ProgressBar;
 use super::side_panel::{SidePanel, SidePanelContent};
 use super::volume_control::VolumeControl;
 use super::{
-    LAYER_PROGRESS_BAR, SurfacePopover, ViewSongComments, Vinyl, artist_label, icon_hover_color,
-    like_icon_path,
+    LAYER_PROGRESS_BAR, SurfacePopover, Vinyl, artist_label, icon_hover_color, like_icon_path,
 };
 use crate::api::MusicApi;
 use crate::models::AudioQualityLevel;
 use crate::playback::PlaybackController;
 use crate::state::library::MusicLibrary;
+use crate::ui::comments::ViewSongComments;
 use crate::ui::cover_color::{blend_color, blend_colors, dark_colors};
 use crate::ui::now_playing::NowPlaying;
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};

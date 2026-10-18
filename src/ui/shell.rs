@@ -4,17 +4,15 @@ use gpui::prelude::{FluentBuilder, StatefulInteractiveElement};
 use gpui::*;
 
 use super::assets::{CoverPrefetch, thumbnail_url, track_cover_url};
+use super::comments::{SongCommentsPage, ViewSongComments};
 use super::components::{
     PAGE_SIDE_PADDING, PLAYER_BAR_HEIGHT, PlayNext, PlayerBar, ResizeDragPreview, SidePanel,
-    SidePanelContent, SurfacePopover, ViewSongComments, icon_hover_color, search_clear_button,
-    window_drag_area,
+    SidePanelContent, SurfacePopover, icon_hover_color, search_clear_button, window_drag_area,
 };
 use super::cover_color::{Backdrop, CoverColor, CoverGradient, gradient_layer};
 use super::now_playing::{NowPlaying, NowPlayingPage};
 use super::pages::search::OpenPlaylist;
-use super::pages::{
-    ContentPage, playlist::PlaylistPage, search::SearchPage, song_comments::SongCommentsPage,
-};
+use super::pages::{ContentPage, playlist::PlaylistPage, search::SearchPage};
 use super::sidebar::{LoginRequested, SidebarChanged, SidebarPage};
 use super::theme::{IconSize, PRESSED_ICON_ALPHA};
 use crate::models::Song;

@@ -11,9 +11,6 @@ use std::ops::Range;
 use crate::ui::theme::{PRESSED_ICON_ALPHA, link_blue};
 
 mod collect_window;
-mod comment_composer;
-mod comment_row;
-mod comments;
 mod drag_preview;
 mod message_panel;
 mod play_queue;
@@ -30,13 +27,10 @@ mod virtual_table;
 mod volume_control;
 
 pub use collect_window::open_collect_window;
-pub(in crate::ui) use comment_composer::{CommentComposer, clamp_to_limit, new_input};
-pub use comment_row::comment_row;
-pub use comments::{CommentResource, CommentsView, ListMode};
 pub use drag_preview::ResizeDragPreview;
 pub use player_bar::{PLAYER_BAR_HEIGHT, PlayerBar};
 pub use side_panel::{SidePanel, SidePanelContent};
-pub use song_menu::{PlayNext, ViewSongComments, show_song_menu};
+pub use song_menu::{PlayNext, show_song_menu};
 // 播放队列浮层、音质弹窗、账号弹层共用同一份圆角与投影；
 // 子模块与 ui 模块（shell）都通过这里取名。
 pub(in crate::ui) use popover::{SURFACE_RADIUS, SurfacePopover, surface_shadow};

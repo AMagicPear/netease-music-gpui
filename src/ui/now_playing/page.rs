@@ -11,10 +11,8 @@ use super::NowPlaying;
 use crate::playback::PlaybackController;
 use crate::state::library::MusicLibrary;
 use crate::ui::assets::track_cover_url;
-use crate::ui::components::{
-    CommentResource, CommentsView, ListMode, PLAYER_BAR_HEIGHT, Tonearm, Vinyl, format_duration,
-    window_drag_area,
-};
+use crate::ui::comments::{CommentResource, CommentsView, ListMode};
+use crate::ui::components::{PLAYER_BAR_HEIGHT, Tonearm, Vinyl, format_duration, window_drag_area};
 use crate::ui::cover_color::{
     Backdrop, CoverColor, CoverGradient, dark_colors, dark_gradient, gradient_layer,
 };

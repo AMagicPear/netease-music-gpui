@@ -8,7 +8,6 @@ mod recent;
 mod recommend;
 mod roaming;
 pub(super) mod search;
-pub(super) mod song_comments;
 
 use gpui::*;
 

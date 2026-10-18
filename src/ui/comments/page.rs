@@ -1,69 +1,46 @@
 //! 歌曲评论页：播放栏、歌曲行或右键菜单的评论图标进来。
 //!
-//! 结构和歌单评论页一致——页头条目 + 虚拟评论列表 + 吸顶编辑框（CommentComposer），
-//! 只有页头内容换成歌曲信息；热评跟着歌曲接口返回，列表顶部会多出「精选评论」小节。
+//! 页面本身只有两件事——记住当前是哪首歌、渲染自己的页头条目；列表分页与吸顶编辑框
+//! 都在 [`CommentsPanel`] 里，和歌单评论页共用同一套 wiring。热评跟着歌曲接口返回，
+//! 列表顶部会多出「精选评论」小节。
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_kit::base::Theme;
-use gpui_kit::base::input::{InputEvent, TextareaState};
 
+use super::{CommentResource, CommentsPanel};
 use crate::models::Song;
 use crate::ui::assets::thumbnail_url;
-use crate::ui::components::{
-    CommentComposer, CommentResource, CommentsView, ListMode, clamp_to_limit, new_input,
-};
 
-/// 歌单 / 歌曲评论共享一个 View；歌曲数据直接存在页面上（只有一首，不用独立 Entity）。
-pub(crate) struct SongCommentsPage {
+/// 「查看评论」：带着歌来到 [SongCommentsPage]。
+/// 播放栏、歌曲行的评论图标与歌曲右键菜单都派发它，入口不同、目的地相同。
+/// 因为它不会从键位 JSON 反序列化，声明 `no_json` 以省去 `Deserialize` / `JsonSchema`。
+#[derive(Action, Clone, PartialEq)]
+#[action(namespace = comments, no_json)]
+pub(in crate::ui) struct ViewSongComments(pub Song);
+
+/// 所有歌曲共享一个 View；歌曲数据直接存在页面上（只有一首，不用独立 Entity）。
+pub(in crate::ui) struct SongCommentsPage {
     song: Option<Song>,
-    comments: Entity<CommentsView>,
-    comment_input: Entity<TextareaState>,
-    _comment_input_subscription: Subscription,
-    composer: CommentComposer,
-    /// 列表滚动 / 翻页时覆盖层要跟着重新定位；gpui 不会自动通知父 view，显式接一条。
-    _comments_subscription: Subscription,
+    comments: CommentsPanel,
 }
 
 impl SongCommentsPage {
-    pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let comments = cx.new(|_| CommentsView::new(None));
+    pub(in crate::ui) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         // 头部条目渲染时才回头取当前歌曲； weak 引用避免页面和列表互相持有。
         let page = cx.weak_entity();
-        comments.update(cx, |comments, cx| {
-            comments.set_header(
-                move |window, cx| {
-                    page.update(cx, |page, cx| page.render_header(window, cx))
-                        .unwrap_or_else(|_| div().into_any_element())
-                },
-                cx,
-            );
+        let comments = CommentsPanel::new(window, cx, None, move |window, cx| {
+            page.update(cx, |page, cx| page.render_header(window, cx))
+                .unwrap_or_else(|_| div().into_any_element())
         });
-        let comment_input = new_input(window, cx);
-        let comment_input_subscription = cx.subscribe_in(
-            &comment_input,
-            window,
-            |_, input, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::Change) {
-                    input.update(cx, |input, cx| clamp_to_limit(input, window, cx));
-                }
-                cx.notify();
-            },
-        );
-        let composer = CommentComposer::new(comment_input.clone(), comments.clone(), None);
-        let comments_subscription = cx.observe(&comments, |_, _, cx| cx.notify());
         Self {
             song: None,
             comments,
-            comment_input,
-            _comment_input_subscription: comment_input_subscription,
-            composer,
-            _comments_subscription: comments_subscription,
         }
     }
 
     /// 打开一首歌的评论；同一首歌重复打开不重载，评论和滚动位置都保留。
-    pub(crate) fn open(&mut self, song: Song, window: &mut Window, cx: &mut Context<Self>) {
+    pub(in crate::ui) fn open(&mut self, song: Song, window: &mut Window, cx: &mut Context<Self>) {
         if self
             .song
             .as_ref()
@@ -72,15 +49,9 @@ impl SongCommentsPage {
             return;
         }
         self.song = Some(song.clone());
-        self.comments.update(cx, |comments, cx| {
-            comments.set_resource(Some(CommentResource::Song(song.id)), cx);
-            comments.configure(ListMode::Owned, cx);
-        });
-        // 换歌即换语境：上一首的草稿不该落到新歌的发布框里；
-        // 占位位置记录一起丢掉，新头部量出来前不画到旧位置。
-        self.comment_input
-            .update(cx, |input, cx| input.set_value("", window, cx));
-        self.composer.reset();
+        self.comments
+            .open_resource(CommentResource::Song(song.id), None, cx);
+        self.comments.clear_draft(window, cx);
         cx.notify();
     }
 
@@ -160,18 +131,14 @@ impl SongCommentsPage {
                             ),
                     ),
             )
-            .child(self.composer.placeholder())
+            // 编辑框留在列表外编码 DX：只让等高占位参与虚拟列表的布局。
+            .child(self.comments.placeholder())
             .into_any_element()
     }
 }
 
 impl Render for SongCommentsPage {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .size_full()
-            .relative()
-            .overflow_hidden()
-            .child(self.comments.clone())
-            .child(self.composer.overlay())
+        self.comments.render()
     }
 }

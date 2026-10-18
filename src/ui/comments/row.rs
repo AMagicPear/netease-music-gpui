@@ -14,7 +14,7 @@ use crate::models::SongComment;
 use crate::ui::assets::thumbnail_url;
 use crate::ui::theme::{DOLPHIN_FAMILY, link_blue};
 
-/// 正文的选中身份：`handle` 由 [`crate::ui::components::CommentsView`] 按评论 id
+/// 正文的选中身份：`handle` 由列表（[`CommentsView`](super::super::CommentsView)）按评论 id
 /// 持有，`order` 是它在整个评论文档里的阅读顺序（从 0 递增）。
 ///
 /// 顺序必须显式给：gpui-kit 的 `SelectableText::new` 默认 `document_order = 0`，

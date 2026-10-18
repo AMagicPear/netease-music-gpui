@@ -6,8 +6,8 @@
 //!
 //! - [`state::NowPlaying`]：这一页的共享状态，也是整页展开/收起的唯一状态源与节拍源。
 //!   由 `main.rs` 创建、注入给播放栏与本页——播放栏的迷你碟、进度条、音量都读它。
-//! - [`page::NowPlayingPage`]：这一页的视图本体，以及它的歌词 [`page::lyrics`] 与
-//!   评论 [`page::comments`] 子模块。
+//! - [`page::NowPlayingPage`]：这一页的视图本体，歌词子视图 [`page::lyrics`]，以及
+//!   第二屏嵌入的 [`comments::CommentsView`]（模块内的列表行为见它自己的文档）。
 //!
 //! [`ContentPage`]: crate::ui::pages::ContentPage
 

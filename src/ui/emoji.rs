@@ -138,10 +138,7 @@ pub fn segments(text: &str) -> Vec<Segment<'_>> {
             }
         }
         // 按 UTF-8 字符前进，避免切在多字节字符中间。
-        index += text[index..]
-            .chars()
-            .next()
-            .map_or(1, char::len_utf8);
+        index += text[index..].chars().next().map_or(1, char::len_utf8);
     }
     if text_start < text.len() {
         segments.push(Segment::Text(&text[text_start..]));
@@ -157,7 +154,10 @@ pub fn expand(text: &str) -> Cow<'_, str> {
         return Cow::Borrowed(text);
     }
     let parts = segments(text);
-    if !parts.iter().any(|part| matches!(part, Segment::Emoji { .. })) {
+    if !parts
+        .iter()
+        .any(|part| matches!(part, Segment::Emoji { .. }))
+    {
         return Cow::Borrowed(text);
     }
     let mut out = String::with_capacity(text.len() + 8);
@@ -269,10 +269,7 @@ mod tests {
     #[test]
     fn expand_borrows_when_nothing_changes() {
         assert!(matches!(expand("普通评论"), std::borrow::Cow::Borrowed(_)));
-        assert!(matches!(
-            expand("[不存在]"),
-            std::borrow::Cow::Borrowed(_)
-        ));
+        assert!(matches!(expand("[不存在]"), std::borrow::Cow::Borrowed(_)));
         assert!(matches!(expand("[强]"), std::borrow::Cow::Owned(_)));
     }
 

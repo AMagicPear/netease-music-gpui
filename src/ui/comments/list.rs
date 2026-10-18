@@ -22,9 +22,11 @@ use std::{
 
 use crate::api::MusicApi;
 use crate::models::{SongComment, SongComments};
-use crate::ui::components::{comment_row, empty_state, spinner};
+use crate::ui::components::{empty_state, spinner};
 use crate::ui::cover_color::{Backdrop, dark_colors, dark_gradient};
 use crate::ui::theme::DOLPHIN_FAMILY;
+
+use super::comment_row;
 
 /// 底部留白：原来的 `pb(100.)`，现在由脚标条目的高度承担，
 /// 这样 `max_offset_for_scrollbar` 测出来的滚动范围和原来一致。

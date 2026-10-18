@@ -8,6 +8,7 @@ use gpui::*;
 use gpui_kit::component::native_menu::NativeMenu;
 
 use crate::models::Song;
+use crate::ui::comments::ViewSongComments;
 
 actions!(
     song_menu,
@@ -31,12 +32,6 @@ actions!(
 #[derive(Action, Clone, PartialEq)]
 #[action(namespace = song_menu, no_json)]
 pub struct PlayNext(pub Song);
-
-/// 「查看评论」：打开这首歌的评论页。菜单项直接带上歌，处理方不用再查。
-/// 播放栏 / 歌曲行的评论图标也派发同一个 action，入口不同、目的地相同。
-#[derive(Action, Clone, PartialEq)]
-#[action(namespace = song_menu, no_json)]
-pub struct ViewSongComments(pub Song);
 
 /// 在 `position`（窗口坐标）弹出「更多」菜单；`song` 是右键到的那一首，供菜单项使用。
 pub fn show_song_menu(position: Point<Pixels>, song: Song, window: &mut Window, cx: &mut App) {

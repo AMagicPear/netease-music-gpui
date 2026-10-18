@@ -1,8 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use gpui::Global;
 // 供消息面板等外部调用方给 `MusicApi::message_*` 传参时命名客户端类型。
@@ -12,8 +8,8 @@ use tokio::runtime::Runtime;
 
 use crate::models::{
     AudioQualityLevel, AudioSourceInfo, LyricLine, MessageItem, Playlist, Privilege, Song,
-    SongComment, SongComments, TrackId, UserProfile, VipInfo, parse_comments, parse_forwards,
-    parse_notices, parse_private,
+    SongComments, TrackId, UserProfile, VipInfo, parse_comment_page, parse_comments,
+    parse_forwards, parse_notices, parse_private,
 };
 
 /// GPUI 负责界面，Tokio 负责 SDK 的网络请求。客户端和运行时在应用内复用。
@@ -173,11 +169,12 @@ impl MusicApi {
         )
         .await?;
         // offset 是普通评论的分页位置，不能按合并热评后的条数推进。
-        song_comment_page(response.body, offset)
+        parse_comment_page(response.body, offset)
     }
 
     /// 歌单评论。响应形状与歌曲评论一致（`/api/v1/resource/comments/A_PL_0_{id}`），
-    /// 解析直接复用 `song_comment_page`：offset 语义相同（普通评论分页，热评只合并在第一页）。
+    /// 解析直接复用同一个 [`parse_comment_page`]：offset 语义相同（普通评论分页，
+    /// 热评只合并在第一页）。
     pub async fn playlist_comments(
         client: ApiClient,
         playlist_id: u64,
@@ -192,7 +189,7 @@ impl MusicApi {
             ),
         )
         .await?;
-        song_comment_page(response.body, offset)
+        parse_comment_page(response.body, offset)
     }
 
     pub async fn song_source(
@@ -475,68 +472,6 @@ fn lrc_time(tag: &str) -> Option<Duration> {
     ))
 }
 
-fn song_comment_page(body: serde_json::Value, offset: usize) -> Result<SongComments, String> {
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Comment {
-        comment_id: u64,
-        user: CommentUser,
-        content: String,
-        time: i64,
-        liked_count: u64,
-    }
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct CommentUser {
-        nickname: String,
-        avatar_url: String,
-    }
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Page {
-        total: u64,
-        comments: Vec<Comment>,
-        hot_comments: Option<Vec<Comment>>,
-        more: bool,
-    }
-    let page: Page =
-        serde_json::from_value(body).map_err(|error| format!("评论格式无效：{error}"))?;
-    let mut seen = HashSet::new();
-    let hot = if offset == 0 {
-        page.hot_comments.unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-    // 热评排在最前，去重后剩下多少条就是精选小节的行数；
-    // 热评内部也可能重复，所以数的是去重后真正入列的条数。
-    let mut hot_count = 0usize;
-    let comments = hot
-        .into_iter()
-        .map(|comment| (comment, true))
-        .chain(page.comments.into_iter().map(|comment| (comment, false)))
-        .filter(|(comment, _)| seen.insert(comment.comment_id))
-        .map(|(comment, is_hot)| {
-            if is_hot {
-                hot_count += 1;
-            }
-            SongComment {
-                id: comment.comment_id,
-                nickname: comment.user.nickname,
-                avatar_url: comment.user.avatar_url,
-                content: comment.content,
-                time: comment.time,
-                liked_count: comment.liked_count,
-            }
-        })
-        .collect();
-    Ok(SongComments {
-        total: page.total,
-        hot_count,
-        comments,
-        more: page.more,
-    })
-}
-
 fn song_source_info(body: &serde_json::Value, song_id: u64) -> Result<AudioSourceInfo, String> {
     let track = body["data"]
         .as_array()
@@ -625,51 +560,6 @@ mod tests {
         ] {
             assert!(song_lyric_lines(&body).is_empty());
         }
-    }
-
-    #[test]
-    fn comments_prioritize_hot_only_on_first_page_and_deduplicate() {
-        let comment = |id, content| {
-            serde_json::json!({
-                "commentId": id, "user": {"nickname": "听众", "avatarUrl": "https://example.com/avatar"},
-                "content": content, "time": 123456789, "likedCount": 42
-            })
-        };
-        let body = serde_json::json!({
-            "total": 100, "more": true,
-            "hotComments": [comment(2, "热评"), comment(1, "另一条热评")],
-            "comments": [comment(2, "重复"), comment(3, "普通评论"), comment(3, "重复")]
-        });
-        let first = song_comment_page(body.clone(), 0).unwrap();
-        assert_eq!(first.total, 100);
-        assert!(first.more);
-        assert_eq!(
-            first
-                .comments
-                .iter()
-                .map(|item| item.id)
-                .collect::<Vec<_>>(),
-            [2, 1, 3]
-        );
-        assert_eq!(first.comments[0].content, "热评");
-        assert_eq!(first.comments[0].nickname, "听众");
-        assert_eq!(first.comments[0].avatar_url, "https://example.com/avatar");
-        assert_eq!(first.comments[0].time, 123456789);
-        assert_eq!(first.comments[0].liked_count, 42);
-        let next = song_comment_page(body, 20).unwrap();
-        assert_eq!(
-            next.comments.iter().map(|item| item.id).collect::<Vec<_>>(),
-            [2, 3]
-        );
-        assert_eq!(next.comments[0].content, "重复");
-        let empty = song_comment_page(
-            serde_json::json!({"total": 0, "comments": [], "more": false}),
-            0,
-        )
-        .unwrap();
-        assert!(empty.comments.is_empty());
-        assert!(!empty.more);
-        assert!(song_comment_page(serde_json::json!({"comments": []}), 0).is_err());
     }
 
     #[test]

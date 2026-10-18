@@ -1,11 +1,10 @@
-mod comments;
 mod song_order;
 
 use song_order::{SongSort, next_sort, song_matches, sort_indices, sort_label};
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_kit::base::input::{Input, InputEditorStyle, InputEvent, InputState, TextareaState};
+use gpui_kit::base::input::{Input, InputEditorStyle, InputEvent, InputState};
 use gpui_kit::base::{Button, ColorTokens, Theme, Transition, transition};
 use gpui_kit::component::Sizable;
 use gpui_kit::component::avatar::Avatar;
@@ -41,14 +40,14 @@ use crate::models::{Playlist, Song};
 use crate::playback::PlaybackController;
 use crate::state::{library::MusicLibrary, playlist_detail::PlaylistDetail};
 use crate::ui::assets::thumbnail_url;
+use crate::ui::comments::{CommentResource, CommentsPanel, ViewSongComments};
 use crate::ui::components::{
-    ACTION_BUTTON_HEIGHT, ACTION_BUTTON_PADDING, CELL_PADDING, COLUMN_GAP, CommentComposer,
-    CommentResource, CommentsView, DURATION_COLUMN_WIDTH, HEADER_HEIGHT, KeepRowHover,
-    LIKE_COLUMN_WIDTH, ListMode, ResizeDragPreview, SECONDARY_FONT_WEIGHT, SongDisplay, TabBar,
-    TabChanged, TabItem, TableColumn, ViewSongComments, artist_label, centered_empty,
-    clamp_to_limit, hovered_row_after, index_column_width, like_icon_path, new_input,
-    play_all_button, play_count_label, quality_badge_path, row_hover_icon, search_clear_button,
-    spinner, text_with_matches, title_with_subtitle, virtual_table,
+    ACTION_BUTTON_HEIGHT, ACTION_BUTTON_PADDING, CELL_PADDING, COLUMN_GAP, DURATION_COLUMN_WIDTH,
+    HEADER_HEIGHT, KeepRowHover, LIKE_COLUMN_WIDTH, ResizeDragPreview, SECONDARY_FONT_WEIGHT,
+    SongDisplay, TabBar, TabChanged, TabItem, TableColumn, artist_label, centered_empty,
+    hovered_row_after, index_column_width, like_icon_path, play_all_button, play_count_label,
+    quality_badge_path, row_hover_icon, search_clear_button, spinner, text_with_matches,
+    title_with_subtitle, virtual_table,
 };
 use crate::ui::cover_color::{Backdrop, blend_color};
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
@@ -78,13 +77,9 @@ impl PlaylistTab {
 /// 所有歌单共享一个 View；歌单数据由独立的 Entity 管理。
 pub struct PlaylistPage {
     detail: Entity<PlaylistDetail>,
-    comments: Entity<CommentsView>,
-    comment_input: Entity<TextareaState>,
-    _comment_input_subscription: Subscription,
-    /// 吸顶编辑框：占位参与列表布局，实际框画在覆盖层，逻辑全在组件里。
-    composer: CommentComposer,
-    /// 列表滚动 / 翻页时覆盖层要跟着重新定位；gpui 不会自动通知父 view，显式接一条。
-    _comments_subscription: Subscription,
+    /// 评论页签的全部内容：虚拟列表、吸顶编辑框与输入限长都在 `CommentsPanel` 里，
+    /// 页面只给它一份「歌单页头」条目。
+    comments: CommentsPanel,
     _detail_subscription: Subscription,
     playlist_id: Option<u64>,
     /// 导航意图：当前是否是「我喜欢的音乐」页。
@@ -278,34 +273,12 @@ impl PlaylistPage {
         cx: &mut Context<Self>,
     ) -> Self {
         let detail = cx.new(|_| PlaylistDetail::default());
-        let comments = cx.new(|_| CommentsView::new(None));
+        // 列表首个条目就是歌单页头；weak 引用避免页面和列表互相持有。
         let page = cx.weak_entity();
-        comments.update(cx, |comments, cx| {
-            comments.set_header(
-                move |window, cx| {
-                    page.update(cx, |page, cx| page.render_comments_header(window, cx))
-                        .unwrap_or_else(|_| div().into_any_element())
-                },
-                cx,
-            );
+        let comments = CommentsPanel::new(window, cx, Some(backdrop.clone()), move |window, cx| {
+            page.update(cx, |page, cx| page.render_comments_header(window, cx))
+                .unwrap_or_else(|_| div().into_any_element())
         });
-        let comment_input = new_input(window, cx);
-        let comment_input_subscription = cx.subscribe_in(
-            &comment_input,
-            window,
-            |_, input, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::Change) {
-                    input.update(cx, |input, cx| clamp_to_limit(input, window, cx));
-                }
-                cx.notify();
-            },
-        );
-        let composer = CommentComposer::new(
-            comment_input.clone(),
-            comments.clone(),
-            Some(backdrop.clone()),
-        );
-        let comments_subscription = cx.observe(&comments, |_, _, cx| cx.notify());
         let tabs = cx.new(|_| {
             TabBar::new(vec![
                 TabItem::new("歌曲"),
@@ -317,20 +290,16 @@ impl PlaylistPage {
             this.measured_size.set(None);
             // 同一资源重复设置不会重载，切回页签保留评论和滚动位置。
             if this.tabs.read(cx).selected_index() == PlaylistTab::Comments as usize {
-                let (resource, total) = {
-                    let detail = this.detail.read(cx);
-                    let total = detail
-                        .playlist
-                        .as_ref()
-                        .and_then(|playlist| playlist.comment_count);
-                    (detail.id.map(CommentResource::Playlist), total)
-                };
-                this.comments.update(cx, |comments, cx| {
-                    comments.set_resource(resource, cx);
-                    // 详情里已经有评论数了，先用它渲染标题，别让标题空等到第一页回来。
-                    comments.set_estimated_total(total, cx);
-                    comments.configure(ListMode::Owned, cx);
-                });
+                let detail = this.detail.read(cx);
+                // 详情里已经有评论数了，先用它渲染标题，别让标题空等到第一页回来。
+                let total = detail
+                    .playlist
+                    .as_ref()
+                    .and_then(|playlist| playlist.comment_count);
+                if let Some(id) = detail.id {
+                    this.comments
+                        .open_resource(CommentResource::Playlist(id), total, cx);
+                }
             }
             cx.notify();
         });
@@ -390,9 +359,7 @@ impl PlaylistPage {
                 // 所以下面那次 `rebuild_display_order` 是这里唯一的重算入口，不能省。
                 this.search_input
                     .update(cx, |input, cx| input.set_value("", window, cx));
-                this.comment_input
-                    .update(cx, |input, cx| input.set_value("", window, cx));
-                this.composer.reset();
+                this.comments.clear_draft(window, cx);
             }
             let detail = detail.read(cx);
             this.song_display = detail.songs.iter().map(SongDisplay::new).collect();
@@ -414,10 +381,8 @@ impl PlaylistPage {
                     tabs.set_count(index, count, cx);
                 }
             });
-            this.comments.update(cx, |comments, cx| {
-                comments.scroll_state().remeasure_items(0..1);
-                cx.notify();
-            });
+            // 详情换了对像，列表首个条目（页头）随之变高，得让它重新量一次。
+            this.comments.remeasure_header(cx);
             cx.notify();
         });
         let playing_indicator = cx.new(|_| PlayingIndicator {
@@ -447,10 +412,6 @@ impl PlaylistPage {
         Self {
             detail,
             comments,
-            comment_input,
-            _comment_input_subscription: comment_input_subscription,
-            composer,
-            _comments_subscription: comments_subscription,
             _detail_subscription: detail_subscription,
             playlist_id: None,
             is_favorite_view: false,
@@ -510,13 +471,32 @@ impl PlaylistPage {
             .map(|url| thumbnail_url(url, 340))
     }
 
+    /// 当前是否停在「评论」页签：评论列表要占满整个内容区，页面不再走文档高度缓存。
+    pub fn comments_active(&self, cx: &App) -> bool {
+        self.tabs.read(cx).selected_index() == PlaylistTab::Comments as usize
+    }
+
+    /// 评论列表的首个条目：歌单元数据、页签行，外加吸顶编辑框的等高占位。
+    /// 列表、分页、滚动条和编辑框本体都在 `CommentsPanel` 里，这里只提供歌单自己的页头。
+    fn render_comments_header(&self, _: &mut Window, cx: &Context<Self>) -> AnyElement {
+        let colors = Theme::global(cx).tokens.colors;
+        div()
+            .w_full()
+            .px(px(40.))
+            .pt(px(18.))
+            .child(self.playlist_metadata(colors, cx))
+            .child(self.header_controls_row(None))
+            // 编辑器始终留在列表外，只让等高占位参与虚拟列表的布局。
+            .child(self.comments.placeholder())
+            .into_any_element()
+    }
+
     /// 打开一个歌单。`summary` 是调用方手上已有的歌单摘要（搜索结果里那份），
     /// 没有时才回音乐库里找 —— 侧栏和收藏歌单的摘要本来就在库里。
     /// 给了摘要就先渲染页头，详情接口返回后再补齐歌曲列表。
     pub fn open(&mut self, id: Option<u64>, summary: Option<Playlist>, cx: &mut Context<Self>) {
         if self.detail.read(cx).id != id {
-            self.comments
-                .update(cx, |comments, cx| comments.set_resource(None, cx));
+            self.comments.close_resource(cx);
         }
         let summary = summary.or_else(|| {
             self.library
@@ -1387,12 +1367,7 @@ impl Render for PlaylistPage {
         self.playing_indicator.read(cx).placement.set(None);
         self.table_header_hidden.set(false);
         if self.comments_active(cx) {
-            return div()
-                .size_full()
-                .relative()
-                .overflow_hidden()
-                .child(self.comments.clone())
-                .child(self.composer.overlay());
+            return self.comments.render();
         }
         let colors = Theme::global(cx).tokens.colors;
         // 展开与否只由「有没有焦点」和「有没有字」决定：光标停在框里就该让用户看得见
