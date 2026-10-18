@@ -7,7 +7,7 @@ use std::{
 use gpui::{prelude::FluentBuilder, *};
 
 use super::vinyl_stage;
-use crate::playback::PlaybackController;
+use crate::playback::{PlaybackController, PlaybackEvent};
 use crate::ui::assets::{track_cover_image, track_cover_url};
 
 const LARGE_COVER_RATIO: f32 = 0.63;
@@ -63,8 +63,10 @@ impl Vinyl {
         disc_path: &'static str,
         cx: &mut Context<Self>,
     ) -> Self {
-        let subscription = cx.observe(&playback, |this, playback, cx| {
-            if this.sync(playback.read(cx)) {
+        // 黑胶只关心播放态和封面：换歌、播放/暂停都在 SnapshotChanged 里，
+        // 100ms 的位置推进不打到这，旋转由时钟自己驱动。
+        let subscription = cx.subscribe(&playback, |this, playback, event, cx| {
+            if matches!(event, PlaybackEvent::SnapshotChanged) && this.sync(playback.read(cx)) {
                 cx.notify();
             }
         });

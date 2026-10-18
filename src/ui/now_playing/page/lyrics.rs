@@ -6,7 +6,7 @@ use gpui_kit::base::{Button, Theme, Transition, transition};
 
 use crate::api::MusicApi;
 use crate::models::LyricLine;
-use crate::playback::PlaybackController;
+use crate::playback::{PlaybackController, PlaybackEvent};
 use crate::ui::cover_color::{Backdrop, CoverGradient, dark_colors, dark_gradient};
 
 const LYRIC_FADE_HEIGHT: f32 = 96.;
@@ -108,7 +108,15 @@ impl LyricsView {
         backdrop: Backdrop,
         cx: &mut Context<Self>,
     ) -> Self {
-        let subscription = cx.observe(&playback, |this, playback, cx| {
+        // 高亮行跟随播放位置；切歌时也按新位置重新计算。
+        // 两个变体都只是「按当前位置重算高亮行」，用一个回调处理。
+        let subscription = cx.subscribe(&playback, |this, playback, event, cx| {
+            if !matches!(
+                event,
+                PlaybackEvent::PositionChanged | PlaybackEvent::SnapshotChanged
+            ) {
+                return;
+            }
             let active = this.line_at(playback.read(cx).snapshot().position);
             if this.active_line != active {
                 this.active_line = active;

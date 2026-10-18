@@ -5,7 +5,7 @@ use gpui::*;
 use gpui_kit::base::{Button, ColorTokens, Scrollbar, ScrollbarMode, Theme};
 
 use crate::models::{Playlist, Song};
-use crate::playback::PlaybackController;
+use crate::playback::{PlaybackController, PlaybackEvent};
 use crate::state::library::MusicLibrary;
 use crate::state::search_results::SearchResults;
 use crate::ui::assets::{track_cover_image, track_cover_url};
@@ -90,8 +90,6 @@ pub struct SearchPage {
     table_scroll: ScrollHandle,
     /// hover 中的行，用 id 标记，不随列表刷新错位。
     hovered_row: Option<u64>,
-    /// 播放状态快照：变化时才重绘，播放进度不会频繁刷新整页。
-    playback_state: (Option<u64>, bool, bool),
 }
 
 /// 单曲 / 综合的列定义。搜索结果不做排序，表头就是纯文字。
@@ -157,11 +155,10 @@ impl SearchPage {
             this.playlist_columns = playlist_table_columns(results.playlists.len());
             cx.notify();
         });
-        let mut playback_state = Self::playback_state(&playback, cx);
-        let playback_subscription = cx.observe(&playback, move |_, playback, cx| {
-            let next = Self::playback_state(&playback, cx);
-            if next != playback_state {
-                playback_state = next;
+        // 行首的播放指示只跟「哪首在播、是否在播」走，都是 SnapshotChanged 的份内事；
+        // 位置推进（10 次/秒）不打到这，列表不会跟着进度条白闪。
+        let playback_subscription = cx.subscribe(&playback, move |_, _, event, cx| {
+            if matches!(event, PlaybackEvent::SnapshotChanged) {
                 cx.notify();
             }
         });
@@ -178,21 +175,7 @@ impl SearchPage {
             playlist_columns: playlist_table_columns(0),
             table_scroll: ScrollHandle::default(),
             hovered_row: None,
-            playback_state,
         }
-    }
-
-    fn playback_state(
-        playback: &Entity<PlaybackController>,
-        cx: &App,
-    ) -> (Option<u64>, bool, bool) {
-        let playback = playback.read(cx);
-        let snapshot = playback.snapshot();
-        (
-            snapshot.current_song.as_ref().map(|song| song.id),
-            snapshot.is_playing,
-            playback.is_play_requested(),
-        )
     }
 
     /// 用当前结果整表作为播放队列，从 `song_id` 开始播放。
@@ -565,7 +548,13 @@ impl SearchPage {
         let display = SongDisplay::new(&song);
         let song_id = song.id;
         let liked = library.liked_song_ids.contains(&song_id);
-        let (current_song_id, is_playing, play_requested) = self.playback_state;
+        // 播放指示渲染时现读快照：变化由 PlaybackEvent::SnapshotChanged 触发重绘，
+        // 不再本地存一份元组镜像。
+        let playback = self.playback.read(cx);
+        let snapshot = playback.snapshot();
+        let current_song_id = snapshot.current_song.as_ref().map(|song| song.id);
+        let is_playing = snapshot.is_playing;
+        let play_requested = playback.is_play_requested();
         let is_current_song = current_song_id == Some(song_id);
         let hovered = self.hovered_row == Some(song_id);
         // 序号格的固定部分：两种内容（序号 / 播放键）共用同一套宽度和对齐方式。

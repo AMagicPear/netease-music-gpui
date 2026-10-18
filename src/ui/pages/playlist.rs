@@ -37,10 +37,10 @@ const SEARCH_BORDER_DURATION: Duration = Duration::from_millis(150);
 type DividerDragAnchor = Rc<Cell<(Pixels, f32, Pixels)>>;
 
 use crate::models::{Playlist, Song};
-use crate::playback::PlaybackController;
+use crate::playback::{PlaybackController, PlaybackEvent};
 use crate::state::{library::MusicLibrary, playlist_detail::PlaylistDetail};
 use crate::ui::assets::thumbnail_url;
-use crate::ui::comments::{CommentResource, CommentsPanel, ViewSongComments};
+use crate::ui::comments::{CommentResource, CommentsPanel};
 use crate::ui::components::{
     ACTION_BUTTON_HEIGHT, ACTION_BUTTON_PADDING, CELL_PADDING, COLUMN_GAP, DURATION_COLUMN_WIDTH,
     HEADER_HEIGHT, KeepRowHover, LIKE_COLUMN_WIDTH, ResizeDragPreview, SECONDARY_FONT_WEIGHT,
@@ -50,6 +50,7 @@ use crate::ui::components::{
     title_with_subtitle, virtual_table,
 };
 use crate::ui::cover_color::{Backdrop, blend_color};
+use crate::ui::events::{OpenSongComments, PlaylistCommentsTab, PlaylistMetadataChanged};
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
 
 // 「更多」菜单里的三个命令。
@@ -111,6 +112,10 @@ pub struct PlaylistPage {
     playing_indicator: Entity<PlayingIndicator>,
 }
 
+impl EventEmitter<OpenSongComments> for PlaylistPage {}
+impl EventEmitter<PlaylistCommentsTab> for PlaylistPage {}
+impl EventEmitter<PlaylistMetadataChanged> for PlaylistPage {}
+
 /// 简介压成一行：换行、连续空白、首尾空白都折叠成一个空格。
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -143,7 +148,16 @@ fn tag_row(tags: &[String], colors: ColorTokens) -> AnyElement {
 }
 
 /// 行 hover 时贴在标题右侧的那排操作图标：下载 / 收藏 / 评论 / 更多。
-fn row_actions(index: u64, song: &Song, colors: ColorTokens) -> AnyElement {
+///
+/// `on_comment` 由调用方用 `cx.listener` 构造后注入：UI 入口发 typed event
+/// （消息层），这里不持 `Context`——行渲染期间正握着快照读借用，
+/// `&mut Context` 进不去，而 `cx.listener` 只借 `&cx`，恰好相容。
+fn row_actions(
+    index: u64,
+    song: &Song,
+    colors: ColorTokens,
+    on_comment: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
     // 四个图标只有 id / 路径 / 无障碍名不同，其余全都一样：尺寸用 header 那排的
     // `IconSize::Small`，灰度和三态交互在这里统一给。
     // 返回 `Stateful<Svg>`，需要交互的图标（收藏 / 更多）还能继续挂 `.on_click`。
@@ -179,12 +193,7 @@ fn row_actions(index: u64, song: &Song, colors: ColorTokens) -> AnyElement {
                 .on_click(|_, window, cx| crate::ui::components::open_collect_window(window, cx)),
         )
         .child(
-            action_icon("playlist-song-comment", "icons/comment.svg", "评论").on_click({
-                let song = song.clone();
-                move |_, window, cx| {
-                    window.dispatch_action(Box::new(ViewSongComments(song.clone())), cx);
-                }
-            }),
+            action_icon("playlist-song-comment", "icons/comment.svg", "评论").on_click(on_comment),
         )
         // 最右侧的「更多」弹出原生菜单。
         .child(
@@ -286,10 +295,19 @@ impl PlaylistPage {
                 TabItem::new("收藏者"),
             ])
         });
-        let tabs_subscription = cx.subscribe(&tabs, |this, _, _: &TabChanged, cx| {
+        let mut comments_tab = false;
+        let tabs_subscription = cx.subscribe(&tabs, move |this, _, _: &TabChanged, cx| {
             this.measured_size.set(None);
+            let on_comments = this.tabs.read(cx).selected_index() == PlaylistTab::Comments as usize;
+            // 停进 / 离开评论页签会改变整页布局（列表铺满内容区），广播给布局方；
+            // 只在翻转时发，「歌曲 ↔ 收藏者」不打扰它。发送方自己认边沿，
+            // 订阅方拿到就是既定事实，不必再留一份镜像比对。
+            if on_comments != comments_tab {
+                comments_tab = on_comments;
+                cx.emit(PlaylistCommentsTab);
+            }
             // 同一资源重复设置不会重载，切回页签保留评论和滚动位置。
-            if this.tabs.read(cx).selected_index() == PlaylistTab::Comments as usize {
+            if on_comments {
                 let detail = this.detail.read(cx);
                 // 详情里已经有评论数了，先用它渲染标题，别让标题空等到第一页回来。
                 let total = detail
@@ -326,11 +344,10 @@ impl PlaylistPage {
             }
             cx.notify();
         });
-        let mut playback_state = playlist_playback_state(playback.read(cx));
-        let playback_subscription = cx.observe(&playback, move |_, playback, cx| {
-            let next = playlist_playback_state(playback.read(cx));
-            if next != playback_state {
-                playback_state = next;
+        // 行首的播放指示只跟「哪首在播、是否在播」走，都是 SnapshotChanged 的份内事；
+        // 100ms 的位置推进打不到这，长列表不会跟着进度条白闪。
+        let playback_subscription = cx.subscribe(&playback, move |_, _, event, cx| {
+            if matches!(event, PlaybackEvent::SnapshotChanged) {
                 cx.notify();
             }
         });
@@ -383,6 +400,7 @@ impl PlaylistPage {
             });
             // 详情换了对像，列表首个条目（页头）随之变高，得让它重新量一次。
             this.comments.remeasure_header(cx);
+            cx.emit(PlaylistMetadataChanged);
             cx.notify();
         });
         let playing_indicator = cx.new(|_| PlayingIndicator {
@@ -1074,6 +1092,7 @@ impl PlaylistPage {
         display: &SongDisplay,
         is_current_song: bool,
         colors: ColorTokens,
+        on_comment: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> AnyElement {
         div()
             .flex()
@@ -1156,7 +1175,7 @@ impl PlaylistPage {
                     )
                     // 隐形元素仍占宽度且可点击，因此只在 hover 时挂载操作图标。
                     .when(self.hovered_row == Some(song.id), |title| {
-                        title.child(row_actions(song.id, song, colors))
+                        title.child(row_actions(song.id, song, colors, on_comment))
                     }),
             )
             .into_any_element()
@@ -1170,6 +1189,12 @@ impl PlaylistPage {
         let display = &self.song_display[self.display_order[index]];
         let song_id = song.id;
         let like_song = song.clone();
+        // 评论图标：UI 入口发 typed event（消息层），MainContent 订阅后打开评论页。
+        // `cx.listener` 只借 `&cx`，和上面几条快照读借用相容。
+        let comment_song = song.clone();
+        let on_comment = cx.listener(move |_, _, _, cx| {
+            cx.emit(OpenSongComments(comment_song.clone()));
+        });
         let playback = self.playback.read(cx);
         let is_current_song = playback
             .snapshot()
@@ -1256,7 +1281,7 @@ impl PlaylistPage {
                     .child(format!("{:02}", index + 1))
                     .into_any_element()
             },
-            self.song_title_cell(song, display, is_current_song, colors),
+            self.song_title_cell(song, display, is_current_song, colors, on_comment),
             div()
                 .truncate()
                 .font_weight(SECONDARY_FONT_WEIGHT)
@@ -1315,15 +1340,6 @@ fn table_columns(row_count: usize, album_share: f32) -> Rc<Vec<TableColumn>> {
         TableColumn::new("喜欢", Some(LIKE_COLUMN_WIDTH)),
         TableColumn::new("时长", Some(DURATION_COLUMN_WIDTH)),
     ])
-}
-
-fn playlist_playback_state(playback: &PlaybackController) -> (Option<u64>, bool, bool) {
-    let snapshot = playback.snapshot();
-    (
-        snapshot.current_song.as_ref().map(|song| song.id),
-        snapshot.is_playing,
-        playback.is_play_requested(),
-    )
 }
 
 fn resized_album_share(start: f32, movement: f32, available: f32) -> f32 {

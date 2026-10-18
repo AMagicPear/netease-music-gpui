@@ -7,8 +7,8 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_kit::base::{Button, ColorTokens, Theme};
 
-use super::NowPlaying;
-use crate::playback::PlaybackController;
+use super::{NowPlaying, NowPlayingEvent};
+use crate::playback::{PlaybackController, PlaybackEvent};
 use crate::state::library::MusicLibrary;
 use crate::ui::assets::track_cover_url;
 use crate::ui::comments::{CommentResource, CommentsView, ListMode};
@@ -114,22 +114,19 @@ impl NowPlayingPage {
                 }
             }
         });
-        let mut playback_state = {
-            let state = playback.read(cx).snapshot();
-            (
-                state.revision,
-                state.is_playing,
-                playback.read(cx).playlist_id(),
-            )
-        };
-        let playback_subscription = cx.observe(&playback, move |this, playback, cx| {
-            let state = playback.read(cx).snapshot();
-            let next = (
-                state.revision,
-                state.is_playing,
-                playback.read(cx).playlist_id(),
-            );
-            let song_id = state.current_song.as_ref().map(|song| song.id);
+        // 展开时：切歌重新同步歌词与评论，播放态变化重绘。都归 SnapshotChanged，
+        // 不再本地留 (revision, is_playing, playlist_id) 三元组做比对。
+        let playback_subscription = cx.subscribe(&playback, move |this, _, event, cx| {
+            if !matches!(event, PlaybackEvent::SnapshotChanged) {
+                return;
+            }
+            let song_id = this
+                .playback
+                .read(cx)
+                .snapshot()
+                .current_song
+                .as_ref()
+                .map(|song| song.id);
             let changed = this.song_id != song_id;
             if this.is_expanded(cx) {
                 this.sync_song(cx);
@@ -140,29 +137,18 @@ impl NowPlayingPage {
                 this.comments
                     .update(cx, |view, cx| view.set_resource(None, cx));
             }
-            if this.is_expanded(cx) && (changed || next != playback_state) {
+            if this.is_expanded(cx) {
                 cx.notify();
             }
-            playback_state = next;
         });
-        // 展开/收起的状态迁移由 NowPlaying 广播；本页在这里跑对应的副作用，
-        // 播放栏、进度条、音量则各自 observe 它来重绘。
-        //
-        // 这个 `expanded` 守卫是必需的，不能省：NowPlaying 还会用 `publish_backdrop`
-        // 每帧广播背景渐变，那些通知同样会打到这里。少了守卫，`on_expand` 会在整个
-        // 600ms 渐变期间被反复触发，`reset_page()` 每帧复位一次，页面看起来就是
-        // "自己弹回顶部"。这里只认状态位的边沿，渐变通知一律放过。
-        let mut expanded = now_playing.read(cx).is_expanded();
-        let now_playing_subscription = cx.observe(&now_playing, move |this, now_playing, cx| {
-            let next = now_playing.read(cx).is_expanded();
-            if next == expanded {
-                return;
-            }
-            expanded = next;
-            if next {
-                this.on_expand(cx);
-            } else {
-                this.on_collapse(cx);
+        // 背景每帧变化不应重复执行开合副作用，否则滚动位置会被反复复位。
+        let now_playing_subscription = cx.subscribe(&now_playing, |this, _, event, cx| {
+            if let NowPlayingEvent::ExpandedChanged(expanded) = event {
+                if *expanded {
+                    this.on_expand(cx);
+                } else {
+                    this.on_collapse(cx);
+                }
             }
         });
         Self {

@@ -1,5 +1,5 @@
 use super::{
-    PlaybackSnapshot,
+    PlaybackEvent, PlaybackSnapshot,
     audio_cache::{AudioCacheStore, DEFAULT_CAPACITY, DEFAULT_MAX_FILE_BYTES},
     cover_art::CoverArtCache,
     engine::PlayerEngine,
@@ -11,7 +11,7 @@ use crate::{
     models::{AudioQualityLevel, PlayMode, Song},
     persistence::{Persistence, PlaybackState},
 };
-use gpui::{App, Context, ReadGlobal, Window};
+use gpui::{App, Context, EventEmitter, ReadGlobal, Window};
 use rand::{Rng, seq::SliceRandom};
 use souvlaki::{MediaControlEvent, SeekDirection};
 use std::{sync::Arc, time::Duration};
@@ -43,10 +43,6 @@ pub struct PlaybackController {
     queue_cursor: Option<usize>,
     /// 列表的来源歌单，只用来显示「来自哪个歌单」。
     queue_source: Option<u64>,
-    /// 队列内容每变一次（换列表、洗牌、插歌、移游标）就自增。UI 靠它判断
-    /// 播放列表面板是否需要重绘：不能只盯 `state.revision`，因为重播同一首
-    /// 已加载的歌时列表可以整体换掉而不重新加载。
-    queue_revision: u64,
     play_when_ready: bool,
     request: Option<tokio::task::AbortHandle>,
     pending_position: Duration,
@@ -60,6 +56,8 @@ pub struct PlaybackController {
     #[cfg(test)]
     test_directory: Option<tempfile::TempDir>,
 }
+
+impl EventEmitter<PlaybackEvent> for PlaybackController {}
 
 /// 播放中周期性落盘的间隔（tick 数）。暂停时 tick 不再写盘。
 const SAVE_INTERVAL_TICKS: u32 = 50;
@@ -79,7 +77,6 @@ impl PlaybackController {
             queue: Vec::new(),
             queue_cursor: None,
             queue_source: None,
-            queue_revision: 0,
             play_when_ready: false,
             request: None,
             pending_position: Duration::ZERO,
@@ -99,6 +96,14 @@ impl PlaybackController {
         let mut this = Self::with_persistence(Persistence::at(directory.path().to_owned()));
         this.test_directory = Some(directory);
         this
+    }
+
+    /// 状态变了：粗广播（`notify`，服务 observe 与系统媒体同步）+ typed 事件
+    /// （`emit`，服务 subscribe）一起发。两条通道都从这里出，别在别处直接
+    /// `cx.notify()` 完事——订阅了事件的消费者收不到通知，就会得过期数据。
+    fn publish(&mut self, cx: &mut Context<Self>, event: PlaybackEvent) {
+        cx.notify();
+        cx.emit(event);
     }
 
     pub fn new(window: &Window, persistence: Persistence, cx: &mut Context<Self>) -> Self {
@@ -162,7 +167,7 @@ impl PlaybackController {
             MediaControlEvent::Next => self.next(cx),
             MediaControlEvent::Stop => {
                 self.stop();
-                cx.notify();
+                self.publish(cx, PlaybackEvent::SnapshotChanged);
             }
             MediaControlEvent::SetPosition(position) => self.seek_to(position.0, cx),
             MediaControlEvent::Seek(direction) => {
@@ -232,12 +237,6 @@ impl PlaybackController {
         self.queue_cursor
     }
 
-    /// 队列内容的版本号：换列表、洗牌、插歌、移游标都会让它变化。
-    /// 界面把它并进「需要重绘」的比对里，队列一变面板就刷新。
-    pub fn queue_revision(&self) -> u64 {
-        self.queue_revision
-    }
-
     /// 播放列表面板双击某一项：游标移到这一项并立即播放。
     /// 队列项是按位置引用的，不按歌曲 id 反查，列表里有重复歌曲也不会选错。
     pub fn play_queue_index(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -245,7 +244,6 @@ impl PlaybackController {
             return;
         };
         self.queue_cursor = Some(index);
-        self.queue_revision = self.queue_revision.wrapping_add(1);
         self.select_song(song, cx);
     }
 
@@ -259,7 +257,7 @@ impl PlaybackController {
         cx: &mut Context<Self>,
     ) {
         let Some(song) = self.set_list(Some(source), songs, Some(song_id)) else {
-            cx.notify();
+            self.publish(cx, PlaybackEvent::SnapshotChanged);
             return;
         };
         // 新列表也要服从当前的播放方式：随机模式下当场洗一遍。
@@ -282,11 +280,10 @@ impl PlaybackController {
         self.set_list(Some(source), songs, None);
         self.apply_mode_to_list(self.state.mode);
         let Some(song) = self.queue.first().cloned() else {
-            cx.notify();
+            self.publish(cx, PlaybackEvent::SnapshotChanged);
             return;
         };
         self.queue_cursor = Some(0);
-        self.queue_revision = self.queue_revision.wrapping_add(1);
         self.select_song(song, cx);
     }
 
@@ -302,7 +299,6 @@ impl PlaybackController {
         self.queue = songs;
         self.queue_cursor =
             song_id.and_then(|song_id| self.queue.iter().position(|song| song.id == song_id));
-        self.queue_revision = self.queue_revision.wrapping_add(1);
         self.current_list_song()
     }
 
@@ -401,6 +397,8 @@ impl PlaybackController {
             let downloaded = download.await.is_ok_and(|path| path.is_some());
             let _ = this.update(cx, |_, cx| {
                 if downloaded {
+                    // 只为触发上面的 observe_self 去同步系统媒体控件的封面，
+                    // 播放状态没有语义变化，不发 PlaybackEvent。
                     cx.notify();
                 }
             });
@@ -415,6 +413,7 @@ impl PlaybackController {
                 || preload.quality != self.state.quality
         }) {
             self.cancel_preload();
+            self.publish(cx, PlaybackEvent::PreloadChanged);
         }
         // 当前歌曲先下载完，避免下一首抢占当前播放的网络带宽。
         if self.preload.is_some()
@@ -440,6 +439,7 @@ impl PlaybackController {
             request: self.audio_request(next.id, None, cx),
             song: next,
         });
+        self.publish(cx, PlaybackEvent::PreloadChanged);
     }
 
     /// 手动切歌：`direction` 只取符号，`mode.wraps()` 决定能否越过两端。
@@ -459,7 +459,6 @@ impl PlaybackController {
             return None;
         };
         self.queue_cursor = Some(cursor as usize);
-        self.queue_revision = self.queue_revision.wrapping_add(1);
         self.current_list_song()
     }
 
@@ -490,7 +489,6 @@ impl PlaybackController {
             self.queue.shuffle(&mut rng);
             self.queue_cursor = None;
         }
-        self.queue_revision = self.queue_revision.wrapping_add(1);
     }
 
     /// 下一首插入：插到当前歌曲之后。「播完这首就听它」和心动模式穿插推荐都走这里。
@@ -500,9 +498,8 @@ impl PlaybackController {
             Some(cursor) => self.queue.insert(cursor + 1, song),
             None => self.queue.insert(0, song),
         }
-        self.queue_revision = self.queue_revision.wrapping_add(1);
         self.save_cache();
-        cx.notify();
+        self.publish(cx, PlaybackEvent::SnapshotChanged);
     }
 
     /// 清空播放队列：停止播放并移除全部队列项。
@@ -519,7 +516,6 @@ impl PlaybackController {
         if let Some(media) = self.system_media.as_mut() {
             media.clear();
         }
-        self.queue_revision = self.queue_revision.wrapping_add(1);
         self.ticks_since_save = 0;
         // save_cache 遇到空队列会跳过，这里手动写一份空状态覆盖磁盘上的旧缓存，
         // 否则下次启动会把刚清掉的队列又恢复回来。
@@ -532,7 +528,7 @@ impl PlaybackController {
             mode: self.state.mode,
             quality: self.state.quality,
         });
-        cx.notify();
+        self.publish(cx, PlaybackEvent::SnapshotChanged);
     }
 
     fn select_song(&mut self, song: Song, cx: &mut Context<Self>) {
@@ -576,12 +572,12 @@ impl PlaybackController {
                 .unwrap_or_else(|_| Err("音频加载任务失败".into()));
             let _ = this.update(cx, |this, cx| {
                 if this.finish(load_revision, result) {
-                    cx.notify();
+                    this.publish(cx, PlaybackEvent::SnapshotChanged);
                 }
             });
         })
         .detach();
-        cx.notify();
+        self.publish(cx, PlaybackEvent::SnapshotChanged);
     }
 
     fn finish(
@@ -636,7 +632,7 @@ impl PlaybackController {
         self.state.is_playing = false;
         self.state.buffering = false;
         self.save_cache();
-        cx.notify();
+        self.publish(cx, PlaybackEvent::SnapshotChanged);
     }
 
     pub fn resume(&mut self, cx: &mut Context<Self>) {
@@ -660,7 +656,7 @@ impl PlaybackController {
             }
         }
         self.save_cache();
-        cx.notify();
+        self.publish(cx, PlaybackEvent::SnapshotChanged);
     }
 
     /// 下载已经不再产出新数据：失败后不会再自行重试，或者已经很久没有新字节。
@@ -703,7 +699,7 @@ impl PlaybackController {
         } else {
             // 没有正在播放的歌曲也要记住选择，下次启动沿用。
             self.save_cache();
-            cx.notify();
+            self.publish(cx, PlaybackEvent::SnapshotChanged);
         }
     }
 
@@ -730,7 +726,7 @@ impl PlaybackController {
             // 顺序播放到队尾：停在末尾不动，位置保留，再按播放会重播当前歌曲。
             self.engine.stop();
             self.save_cache();
-            cx.notify();
+            self.publish(cx, PlaybackEvent::SnapshotChanged);
             return;
         };
         self.select_song(song, cx);
@@ -748,7 +744,7 @@ impl PlaybackController {
             return;
         }
         self.save_cache();
-        cx.notify();
+        self.publish(cx, PlaybackEvent::SnapshotChanged);
     }
 
     /// 播放栏按钮切换到下一种播放方式。
@@ -765,7 +761,7 @@ impl PlaybackController {
         // 只在进入随机模式的那一刻洗牌；离开随机不再还原，洗好的顺序就是列表顺序。
         self.apply_mode_to_list(mode);
         self.save_cache();
-        cx.notify();
+        self.publish(cx, PlaybackEvent::SnapshotChanged);
     }
 
     pub fn can_seek(&self) -> bool {
@@ -779,7 +775,7 @@ impl PlaybackController {
             self.state.error = None;
             self.state.buffering = self.state.is_playing;
             self.save_cache();
-            cx.notify();
+            self.publish(cx, PlaybackEvent::PositionChanged);
         }
     }
 
@@ -787,14 +783,14 @@ impl PlaybackController {
     pub fn set_volume(&mut self, volume: f32, cx: &mut Context<Self>) {
         if self.engine.set_volume(volume) {
             self.state.volume = self.engine.volume();
-            cx.notify();
+            self.publish(cx, PlaybackEvent::VolumeChanged);
         }
     }
 
     fn tick(&mut self, cx: &mut Context<Self>) {
         if let Some(error) = self.engine.error() {
             self.fail(error);
-            cx.notify();
+            self.publish(cx, PlaybackEvent::SnapshotChanged);
             return;
         }
         if !self.state.is_playing {
@@ -804,18 +800,20 @@ impl PlaybackController {
                 if position != self.state.position {
                     self.state.position = position;
                     self.save_cache();
-                    cx.notify();
+                    self.publish(cx, PlaybackEvent::PositionChanged);
                 }
             }
             // 暂停时状态没有变化，不写盘也不重绘。
             return;
         }
+        let was_buffering = self.state.buffering;
         self.state.buffering = self.engine.buffering();
         if self.engine.finished() {
             self.state.position = self.state.duration;
             self.state.is_playing = false;
             self.state.buffering = false;
             self.advance_on_finished(cx);
+            return;
         } else if self.state.buffering && self.download_stalled() {
             // 输出端在等数据而下载已经停摆：原地重建音源并保留进度，
             // 否则界面会一直显示「正在播放」，进度条却再也不动。
@@ -833,7 +831,14 @@ impl PlaybackController {
         if self.ticks_since_save >= SAVE_INTERVAL_TICKS {
             self.save_cache();
         }
-        cx.notify();
+        self.publish(
+            cx,
+            if was_buffering != self.state.buffering {
+                PlaybackEvent::SnapshotChanged
+            } else {
+                PlaybackEvent::PositionChanged
+            },
+        );
     }
 
     /// 组装最新快照并交给后台写入线程；本方法自身不再做磁盘 I/O。
@@ -951,22 +956,17 @@ mod tests {
     }
 
     #[test]
-    fn queue_revision_tracks_replacement_cursor_and_shuffle() {
+    fn replacement_cursor_and_shuffle_keep_queue_consistent() {
         let mut controller = controller_with(&[1, 2, 1, 3], 1, PlayMode::Sequential);
-        let revision = controller.queue_revision();
         controller.step_list(1);
         controller.step_list(1);
         assert_eq!(controller.queue_cursor(), Some(2));
-        assert_eq!(controller.queue_revision(), revision + 2);
         controller.apply_mode_to_list(PlayMode::Shuffle);
-        assert_eq!(controller.queue_revision(), revision + 3);
         assert_eq!(controller.queue()[controller.queue_cursor().unwrap()].id, 1);
         controller.set_list(Some(7), vec![], None);
         assert!(controller.queue().is_empty());
         assert_eq!(controller.queue_cursor(), None);
-        assert_eq!(controller.queue_revision(), revision + 4);
         assert!(controller.step_list(1).is_none());
-        assert_eq!(controller.queue_revision(), revision + 4);
     }
 
     #[test]

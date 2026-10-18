@@ -41,6 +41,18 @@ src/
 
 GPUI 的共享业务对象放在 Entity 中：`AccountState`、`MusicLibrary`、`PlaylistDetail`、`PlaybackController`。View 观察 Entity 的通知并渲染；底层 `PlayerEngine` 和流式解码实现不依赖 GPUI 或网易云 SDK。
 
+## 事件与重绘
+
+同一视图内部的操作直接调用方法，修改业务状态则调用 Entity 的命令。跨视图的导航意图与布局变化通过 `cx.emit` / `cx.subscribe` 连接，相关 UI 消息集中在 `ui/events.rs`。生产者表达变化，shell 负责导航和窗口布局；需要窗口的回调用 `subscribe_in`。
+
+键位和原生菜单使用 Action。GPUI 沿当前焦点的祖先路径派发 Action，无焦点时不会经过应用根 div 的处理器，所以主窗口启动时设置根焦点。播放栏和歌曲行的评论按钮使用 Entity 事件，不依赖焦点；播放栏事件与原生菜单共用窗口的评论入口，唱片页展开时翻到评论屏，否则打开歌曲评论页。
+
+播放通知由控制器的 `publish` 统一发出：`notify` 服务系统媒体同步，领域事件服务 UI。`SnapshotChanged` 表示歌曲、队列、播放态等变化；`PositionChanged` 表示进度推进或跳转；`VolumeChanged` 只同步音量；`PreloadChanged` 只驱动下一首封面预取。进度和歌词跟随位置，歌曲列表不处理每 100ms 的位置事件。曲终切歌的路径自身已发布状态，不再追加位置事件。
+
+`NowPlayingEvent` 分开开合与背景渐变通知：开合只执行一次重置副作用，渐变只刷新依赖颜色的播放栏和进度条。窗口背景只跟随导航、侧栏宽度和歌单元数据变化，不观察歌曲行 hover、评论滚动或搜索结果刷新。低频且消费者确实需要整个状态的 Entity 继续使用 `observe`。
+
+歌曲互动计数由 `state/song_counts.rs` 加载，播放栏只读结果。切歌取消旧请求并清空计数，返回结果按 Tokio 任务身份校验，避免 A → B → A 的旧结果覆盖新结果；销毁实体时也取消网络任务。
+
 ## 统一播放入口
 
 界面只持有 `Entity<PlaybackController>`，用 `snapshot()` 读取状态，所有修改通过控制器方法提交。

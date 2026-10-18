@@ -16,3 +16,4 @@ mod state;
 
 pub(in crate::ui) use page::NowPlayingPage;
 pub(crate) use state::NowPlaying;
+pub(in crate::ui) use state::NowPlayingEvent;

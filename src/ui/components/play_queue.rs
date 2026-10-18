@@ -17,7 +17,7 @@ use super::{
     side_panel::panel_height,
 };
 use crate::models::Song;
-use crate::playback::PlaybackController;
+use crate::playback::{PlaybackController, PlaybackEvent};
 use crate::state::library::MusicLibrary;
 use crate::ui::assets::{track_cover_image, track_cover_url};
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA};
@@ -38,18 +38,6 @@ const PLAY_BUTTON_SIZE: Pixels = px(20.);
 /// `group_hover` 按名字全局查分组，同名会互相点亮，所以每行要一个不同的组名。
 fn row_group(index: usize) -> SharedString {
     SharedString::from(format!("playlist-panel-row-{index}"))
-}
-
-/// 面板里会变化、又影响画面的那几项：队列内容、当前歌曲、播放/暂停意图。
-///
-/// 播放控制器每 100ms 为进度通知一次，直接跟着重绘会白跑十几次；这里只在真正
-/// 影响列表的东西变了才刷新。
-fn panel_playback_state(playback: &PlaybackController) -> (u64, Option<usize>, bool) {
-    (
-        playback.queue_revision(),
-        playback.queue_cursor(),
-        playback.is_play_requested(),
-    )
 }
 
 /// 头部右侧的文字按钮（「收藏全部」「清空」「一键全读」共用）：
@@ -116,14 +104,10 @@ impl PlayQueue {
         // 只当作品虚拟滚动容器用：不做选中高亮，点击行为由每一行自己处理。
         let list = cx.new(|cx| ListState::new(delegate, window, cx).selectable(false));
 
-        let mut playback_state = panel_playback_state(&playback.read(cx));
-        let _playback_subscription = cx.observe(&playback, move |this, playback, cx| {
-            let next = panel_playback_state(&playback.read(cx));
-            if next == playback_state {
-                return;
-            }
-            playback_state = next;
-            if this.visible {
+        // 队列内容、游标、当前歌曲、播放态变化都走 SnapshotChanged；
+        // 100ms 的位置推进是另一个变体，面板不订阅，不会白跑十几次。
+        let _playback_subscription = cx.subscribe(&playback, move |this, _, event, cx| {
+            if matches!(event, PlaybackEvent::SnapshotChanged) && this.visible {
                 this.list.update(cx, |_, cx| cx.notify());
                 cx.notify();
             }

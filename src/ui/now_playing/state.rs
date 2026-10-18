@@ -9,8 +9,7 @@
 //! - [`NowPlaying::backdrop`] 是共享的封面渐变底；
 //! - [`NowPlaying::rotation_clock`] 是共享的黑胶旋转时钟（迷你碟与整页大碟同一份）；
 //! - [`NowPlaying::reveal`] 是全应用唯一一处展开 / 收起动效定义（时长、曲线、通道 id）；
-//! - 想改状态就 `update` 本实体调 `toggle` / `collapse`，想跟随就 `observe`，
-//!   事件回环与镜像 bool 一并消失。
+//! - 修改状态用 `toggle` / `collapse`，通过 [`NowPlayingEvent`] 区分开合与渐变通知。
 
 use std::{cell::Cell, rc::Rc, time::Duration};
 
@@ -28,6 +27,12 @@ pub const REVEAL_DURATION: Duration = Duration::from_millis(500);
 /// 展开 / 收起的动效通道 id。同一元素内必须始终是同一种值类型（这里是 `f32`）。
 const REVEAL_TRANSITION_ID: &str = "now-playing-reveal";
 
+/// 开合只触发一次副作用；背景变化只驱动依赖渐变颜色的控件。
+pub(in crate::ui) enum NowPlayingEvent {
+    ExpandedChanged(bool),
+    BackdropChanged,
+}
+
 /// 「正在播放」界面的共享状态。全应用一份：`main.rs` 创建，注入给播放栏与黑胶页。
 pub struct NowPlaying {
     expanded: bool,
@@ -36,6 +41,8 @@ pub struct NowPlaying {
     /// 上次广播出去的渐变。见 [`Self::publish_backdrop`]。
     published_gradient: Option<CoverGradient>,
 }
+
+impl EventEmitter<NowPlayingEvent> for NowPlaying {}
 
 impl NowPlaying {
     pub fn new() -> Self {
@@ -76,21 +83,17 @@ impl NowPlaying {
             return;
         }
         self.expanded = expanded;
-        cx.notify();
+        cx.emit(NowPlayingEvent::ExpandedChanged(expanded));
     }
 
     /// 把共享底的最新插值广播给观察者；黑胶页在渲染时调用它。
     ///
-    /// `published_gradient` 是这次整理里唯一新长出来的镜像，但它和当初删掉的
-    /// `album_expanded` 不是一回事：没有任何路径能绕过本方法去写 `backdrop`，所以它
-    /// 不会与真值漂移。`!=` 去重也不是可选的优化——背景渐变自带 600ms 过渡，若不去重，
-    /// 播放栏 / 进度条每帧都会收到一次 notify 并重绘；去重后渐变一停通知就停。
-    /// （音量也 observe 本实体，但它只认 `expanded` 的翻转，渐变广播会自己挡掉。）
+    /// 背景渐变停止后不再广播，播放栏与进度条也就不再为它重绘。
     pub(in crate::ui) fn publish_backdrop(&mut self, cx: &mut Context<Self>) {
         let gradient = self.backdrop.gradient();
         if self.published_gradient != gradient {
             self.published_gradient = gradient;
-            cx.notify();
+            cx.emit(NowPlayingEvent::BackdropChanged);
         }
     }
 

@@ -6,6 +6,8 @@ mod login;
 pub(crate) mod components;
 mod cover_color;
 pub(crate) mod emoji;
+// 跨视图的 UI 消息（intent 层）：UI 点击发 typed event，action 留给键位与原生菜单。
+pub(crate) mod events;
 // 「正在播放」沉浸页：共享状态 `NowPlaying` 由 main.rs 创建、shell 注入，所以要放到
 // crate 可见。它自成模块而不在 `pages` 里——它不是侧边栏可切换的页面，而是窗口级浮层。
 pub(crate) mod now_playing;

@@ -8,7 +8,7 @@ use gpui_kit::base::{
 use gpui_kit::component::slider::{SliderEvent, SliderState};
 
 use super::format_duration;
-use crate::playback::PlaybackController;
+use crate::playback::{PlaybackController, PlaybackEvent};
 use crate::ui::cover_color::{
     Backdrop, CoverGradient, blend_color, blend_colors, dark_colors, dark_gradient,
 };
@@ -98,9 +98,17 @@ impl ProgressBar {
         let duration = controller.snapshot().duration;
         let revision = controller.snapshot().revision;
         let slider = cx.new(|_| slider_state(position, duration));
+        // 换歌 / 时长变化走 SnapshotChanged，播放推进与跳转走 PositionChanged；
+        // 两个变体都只是「重新读快照对齐滑块」，用同一个回调处理。
         let playback_subscription =
-            cx.observe_in(&playback, window, |this, playback, window, cx| {
-                let playback = playback.read(cx);
+            cx.subscribe_in(&playback, window, |this, _, event, window, cx| {
+                if !matches!(
+                    event,
+                    PlaybackEvent::SnapshotChanged | PlaybackEvent::PositionChanged
+                ) {
+                    return;
+                }
+                let playback = this.playback.read(cx);
                 let revision = playback.snapshot().revision;
                 let duration = playback.snapshot().duration;
                 let position = playback.snapshot().position.min(duration);
@@ -124,7 +132,7 @@ impl ProgressBar {
             });
         let slider_subscription = Self::subscribe_slider(&slider, revision, window, cx);
         // 展开状态与共享渐变底都由 NowPlaying 广播；进度条只负责跟着重绘取色。
-        let now_playing_subscription = cx.observe(&now_playing, |_, _, cx| cx.notify());
+        let now_playing_subscription = cx.subscribe(&now_playing, |_, _, _, cx| cx.notify());
         Self {
             playback,
             now_playing,

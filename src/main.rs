@@ -10,7 +10,7 @@ mod ui;
 use gpui::*;
 use persistence::Persistence;
 use playback::PlaybackController;
-use state::{account::AccountState, library::MusicLibrary};
+use state::{account::AccountState, library::MusicLibrary, song_counts::SongCounts};
 use ui::{
     assets::Assets,
     components::{PlayerBar, SidePanel},
@@ -88,19 +88,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )
                 });
                 let now_playing = cx.new(|_| NowPlaying::new());
+                // 互动计数是独立 store：自己跟着播放状态加载，播放栏只读。
+                let song_counts = cx.new(|cx| SongCounts::new(playback.clone(), cx));
                 let player_bar = cx.new(|cx| {
                     PlayerBar::new(
                         playback.clone(),
                         library.clone(),
+                        song_counts,
                         now_playing.clone(),
                         side_panel,
                         window,
                         cx,
                     )
                 });
-                cx.new(|cx| {
-                    MainWindow::new(main_content, player_bar, now_playing, playback, library, cx)
-                })
+                let main_window = cx.new(|cx| {
+                    MainWindow::new(
+                        window,
+                        main_content,
+                        player_bar,
+                        now_playing,
+                        playback,
+                        library,
+                        cx,
+                    )
+                });
+                // 原生菜单仍沿焦点路径派发 Action，启动即设置根焦点。
+                cx.update_entity(&main_window, |view, cx| view.focus_root(window, cx));
+                main_window
             },
         )
         .unwrap();

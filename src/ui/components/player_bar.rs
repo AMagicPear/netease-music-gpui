@@ -10,29 +10,32 @@ use super::volume_control::VolumeControl;
 use super::{
     LAYER_PROGRESS_BAR, SurfacePopover, Vinyl, artist_label, icon_hover_color, like_icon_path,
 };
-use crate::api::MusicApi;
 use crate::models::AudioQualityLevel;
-use crate::playback::PlaybackController;
+use crate::playback::{PlaybackController, PlaybackEvent};
 use crate::state::library::MusicLibrary;
-use crate::ui::comments::ViewSongComments;
+use crate::state::song_counts::SongCounts;
 use crate::ui::cover_color::{blend_color, blend_colors, dark_colors};
+use crate::ui::events::OpenSongComments;
 use crate::ui::now_playing::NowPlaying;
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
 
 /// 播放栏固定高度；专辑歌词页据此估算可视区域高度。
 pub const PLAYER_BAR_HEIGHT: f32 = 86.;
 
+impl EventEmitter<OpenSongComments> for PlayerBar {}
+
 pub struct PlayerBar {
     playback: Entity<PlaybackController>,
     /// 喜欢状态不在播放控制器里，而在音乐库中，红心要据此显示实心/空心。
     library: Entity<MusicLibrary>,
+    /// 互动计数（喜欢 / 评论数）由 store 持有：加载、切歌丢弃过期结果都在那边，
+    /// 这里只读快照，不自己 spawn。
+    song_counts: Entity<SongCounts>,
     progress_bar: Entity<ProgressBar>,
     /// 音量是 hover 弹出、形状还带小三角，和通用弹层不一样，自己实现。
     volume: Entity<VolumeControl>,
     play_button_hovered: bool,
     play_button_pressed: bool,
-    song_id: Option<u64>,
-    counts: [Option<u64>; 2],
     /// 哪块互动区正被悬停，`(互动区 id, 命中部件)`。
     /// 图标和计数是两个独立 hitbox（计数还可能伸出格子），靠这份状态让两者同步变色。
     hovered_interaction: Option<(&'static str, usize)>,
@@ -49,6 +52,7 @@ pub struct PlayerBar {
     /// 播放栏只负责挂载和触发播放队列页。
     side_panel: Entity<SidePanel>,
     _playback_subscription: Subscription,
+    _counts_subscription: Subscription,
     _progress_subscription: Subscription,
     _library_subscription: Subscription,
     _now_playing_subscription: Subscription,
@@ -65,6 +69,7 @@ impl PlayerBar {
     pub fn new(
         playback: Entity<PlaybackController>,
         library: Entity<MusicLibrary>,
+        song_counts: Entity<SongCounts>,
         now_playing: Entity<NowPlaying>,
         side_panel: Entity<SidePanel>,
         window: &mut Window,
@@ -83,33 +88,16 @@ impl PlayerBar {
                 cx,
             )
         });
-        let mut playback_state = {
-            let controller = playback.read(cx);
-            let state = controller.snapshot();
-            (
-                state.revision,
-                controller.is_play_requested(),
-                state.mode,
-                state.quality,
-                state.actual_quality,
-            )
-        };
-        let playback_subscription = cx.observe(&playback, move |this, playback, cx| {
-            let controller = playback.read(cx);
-            let state = controller.snapshot();
-            let next = (
-                state.revision,
-                controller.is_play_requested(),
-                state.mode,
-                state.quality,
-                state.actual_quality,
-            );
-            if next != playback_state {
-                playback_state = next;
-                this.load_counts(cx);
+        // 播放栏要重绘的状态（模式、音质、播放态）都是「结构性变化」，
+        // 订阅 SnapshotChanged 一个变体即可；100ms 的位置推进不在这里处理。
+        // 计数由 SongCounts store 自己跟着播放状态加载，这里不碰异步。
+        let playback_subscription = cx.subscribe(&playback, move |_, _, event, cx| {
+            if matches!(event, PlaybackEvent::SnapshotChanged) {
                 cx.notify();
             }
         });
+        // 计数回来时重绘互动区；store 内部处理切歌丢弃。
+        let counts_subscription = cx.observe(&song_counts, |_, _, cx| cx.notify());
         let mut progress_expanded = progress_bar.read(cx).expanded();
         let progress_subscription = cx.observe(&progress_bar, move |_, progress, cx| {
             let expanded = progress.read(cx).expanded();
@@ -121,75 +109,30 @@ impl PlayerBar {
         // 喜欢状态由音乐库维护：歌单页点亮红心后，播放栏也要跟着重绘。
         let library_subscription = cx.observe(&library, |_, _, cx| cx.notify());
         // 展开状态与共享渐变底都由 NowPlaying 广播；播放栏只负责跟着重绘。
-        let now_playing_subscription = cx.observe(&now_playing, |_, _, cx| cx.notify());
-        let mut this = Self {
+        let now_playing_subscription = cx.subscribe(&now_playing, |_, _, _, cx| cx.notify());
+        Self {
             playback,
             library,
+            song_counts,
             progress_bar,
             volume,
             play_button_hovered: false,
             play_button_pressed: false,
-            song_id: None,
-            counts: [None; 2],
             hovered_interaction: None,
             mini_vinyl,
             quality_open: false,
             now_playing,
             side_panel,
             _playback_subscription: playback_subscription,
+            _counts_subscription: counts_subscription,
             _progress_subscription: progress_subscription,
             _library_subscription: library_subscription,
             _now_playing_subscription: now_playing_subscription,
-        };
-        this.load_counts(cx);
-        this
+        }
     }
 
     pub(in crate::ui) fn vinyl_overlay(&self) -> AnyElement {
         self.mini_vinyl.clone().into_any_element()
-    }
-
-    fn load_counts(&mut self, cx: &mut Context<Self>) {
-        let song_id = self
-            .playback
-            .read(cx)
-            .snapshot()
-            .current_song
-            .as_ref()
-            .map(|song| song.id);
-        if self.song_id == song_id {
-            return;
-        }
-        self.song_id = song_id;
-        self.counts = [None; 2];
-        let Some(song_id) = song_id else {
-            return;
-        };
-        let api = MusicApi::global(cx);
-        let request = api
-            .runtime
-            .spawn(MusicApi::song_counts(api.client.clone(), song_id));
-        cx.spawn(async move |this, cx| {
-            match request.await {
-                Ok(counts) => {
-                    let _ = this.update(cx, |this, cx| {
-                        // 切歌后的旧请求不能覆盖当前歌曲的计数。
-                        if this.song_id != Some(song_id) {
-                            return;
-                        }
-                        for (index, count) in counts.into_iter().enumerate() {
-                            match count {
-                                Ok(count) => this.counts[index] = Some(count),
-                                Err(message) => eprintln!("{message}"),
-                            }
-                        }
-                        cx.notify();
-                    });
-                }
-                Err(_) => eprintln!("歌曲互动计数任务失败"),
-            }
-        })
-        .detach();
     }
 
     /// 离开事件只清除自己：图标和计数是两块相邻的 hitbox，鼠标从图标移到数字上时，
@@ -261,12 +204,14 @@ impl PlayerBar {
                 }))
             })
             .when(click == InteractionClick::Comments, |element| {
-                element.on_click(cx.listener(|this, _, window, cx| {
+                element.on_click(cx.listener(|this, _, _, cx| {
                     cx.stop_propagation();
                     let Some(song) = this.playback.read(cx).snapshot().current_song.clone() else {
                         return;
                     };
-                    window.dispatch_action(Box::new(ViewSongComments(song)), cx);
+                    // UI 入口发 typed event（消息层）； MainContent 订阅后导航。
+                    // 不走 action：那是输入层（键位 / 原生菜单）的通道。
+                    cx.emit(OpenSongComments(song));
                 }))
             })
             .child(
@@ -700,6 +645,8 @@ impl Render for PlayerBar {
         // 红心跟随这首歌真实的喜欢状态，而不是固定实心。
         let liked =
             song_id.is_some_and(|song_id| self.library.read(cx).liked_song_ids.contains(&song_id));
+        // 互动计数现读 store：加载、切歌丢弃过期结果都在 SongCounts 里。
+        let counts = self.song_counts.read(cx).counts();
         let snapshot = self.playback.read(cx).snapshot();
         // 播放模式的图标和按下后的目标都由控制器给出，这里只负责显示。
         let mode = snapshot.mode;
@@ -844,7 +791,7 @@ impl Render for PlayerBar {
                             .child(self.interaction_count(
                                 "player-like-button",
                                 like_icon_path(liked),
-                                self.counts[0],
+                                counts[0],
                                 InteractionClick::Like,
                                 if liked {
                                     theme_colors.primary
@@ -867,7 +814,7 @@ impl Render for PlayerBar {
                             .child(self.interaction_count(
                                 "player-comment-button",
                                 "icons/comment.svg",
-                                self.counts[1],
+                                counts[1],
                                 InteractionClick::Comments,
                                 colors.muted_foreground,
                                 icon_hover_color(colors.muted_foreground, colors),

@@ -8,9 +8,9 @@ use gpui_kit::base::{
 use gpui_kit::component::slider::{SliderEvent, SliderState};
 
 use super::{LAYER_VOLUME_BALLOON, icon_hover_color};
-use crate::playback::PlaybackController;
+use crate::playback::{PlaybackController, PlaybackEvent};
 use crate::ui::cover_color::dark_colors;
-use crate::ui::now_playing::NowPlaying;
+use crate::ui::now_playing::{NowPlaying, NowPlayingEvent};
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA};
 
 /// 气泡圆角。
@@ -72,9 +72,13 @@ impl VolumeControl {
                 .default_value(volume * 100.)
         });
         // 音量可能在别处被改（或初始化时还没拿到设备），反过来同步滑块。
+        // 只订阅 VolumeChanged：切歌、进度推进都不会打到这。
         let playback_subscription =
-            cx.observe_in(&playback, window, |this, playback, window, cx| {
-                let volume = playback.read(cx).snapshot().volume * 100.;
+            cx.subscribe_in(&playback, window, |this, _, event, window, cx| {
+                if !matches!(event, PlaybackEvent::VolumeChanged) {
+                    return;
+                }
+                let volume = this.playback.read(cx).snapshot().volume * 100.;
                 if (this.slider.read(cx).value().end() - volume).abs() > 0.5 {
                     this.slider
                         .update(cx, |slider, cx| slider.set_value(volume, window, cx));
@@ -90,13 +94,9 @@ impl VolumeControl {
                 playback.set_volume((value / 100.).clamp(0., 1.), cx);
             });
         });
-        // 只在"展开/收起"翻转时重绘：背景渐变的每帧广播（publish_backdrop）也会打到
-        // 这里，但音量不跟渐变走（见 render 说明），没必要陪着逐帧重绘。
-        let mut expanded = now_playing.read(cx).is_expanded();
-        let now_playing_subscription = cx.observe(&now_playing, move |_, now_playing, cx| {
-            let next = now_playing.read(cx).is_expanded();
-            if next != expanded {
-                expanded = next;
+        // 音量不跟背景渐变走，只响应开合。
+        let now_playing_subscription = cx.subscribe(&now_playing, |_, _, event, cx| {
+            if matches!(event, NowPlayingEvent::ExpandedChanged(_)) {
                 cx.notify();
             }
         });

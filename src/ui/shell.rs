@@ -10,13 +10,16 @@ use super::components::{
     SidePanelContent, SurfacePopover, icon_hover_color, search_clear_button, window_drag_area,
 };
 use super::cover_color::{Backdrop, CoverColor, CoverGradient, gradient_layer};
+use super::events::{
+    ContentLayoutChanged, OpenSongComments, PlaylistCommentsTab, PlaylistMetadataChanged,
+};
 use super::now_playing::{NowPlaying, NowPlayingPage};
 use super::pages::search::OpenPlaylist;
 use super::pages::{ContentPage, playlist::PlaylistPage, search::SearchPage};
 use super::sidebar::{LoginRequested, SidebarChanged, SidebarPage};
 use super::theme::{IconSize, PRESSED_ICON_ALPHA};
 use crate::models::Song;
-use crate::playback::PlaybackController;
+use crate::playback::{PlaybackController, PlaybackEvent};
 use crate::state::account::AccountState;
 use crate::state::library::MusicLibrary;
 use crate::state::search_results::SearchResults;
@@ -39,8 +42,12 @@ pub struct MainWindow {
     pub main_content: Entity<MainContent>,
     pub player_bar: Entity<PlayerBar>,
     now_playing_page: Entity<NowPlayingPage>,
+    /// 窗口根视图的焦点锚点：action 派发从焦点节点沿祖先链走，根视图持焦点时
+    /// 才轮得到它根 div 上的 `on_action`。见 [`MainWindow::focus_root`]。
+    focus_handle: FocusHandle,
+    _player_bar_subscription: Subscription,
     _playback_subscription: Subscription,
-    _background_subscriptions: Vec<Subscription>,
+    _background_subscriptions: [Subscription; 2],
     cover_tint: CoverColor,
     cover_prefetch: CoverPrefetch,
     /// 持有播放控制器，只为接住歌词菜单的「下一首播放」这一类全局派发的 action。
@@ -49,6 +56,7 @@ pub struct MainWindow {
 
 impl MainWindow {
     pub fn new(
+        window: &mut Window,
         main_content: Entity<MainContent>,
         player_bar: Entity<PlayerBar>,
         now_playing: Entity<NowPlaying>,
@@ -61,20 +69,41 @@ impl MainWindow {
         // 展开/收起的接线（谁触发、谁跟随）全在各自 view 内部，shell 不再当中介。
         let now_playing_page =
             cx.new(|cx| NowPlayingPage::new(playback.clone(), library, now_playing, cx));
-        let playback_subscription = cx.observe(&playback, |this, playback, cx| {
-            this.sync_cover_prefetch(&playback, cx);
+        let focus_handle = cx.focus_handle();
+        // 播放栏的评论按钮发 OpenSongComments（消息层）：shell 当路由者，转交
+        // MainContent 落地。UI 消息与焦点无关，不走 action 那条输入层通道。
+        let player_bar_subscription = cx.subscribe_in(
+            &player_bar,
+            window,
+            |this, _, event: &OpenSongComments, window, cx| {
+                this.open_song_comments(event.0.clone(), window, cx);
+            },
+        );
+        // 封面预取只跟随歌曲和预加载候选，不处理位置推进。
+        let playback_subscription = cx.subscribe(&playback, |this, _, event, cx| {
+            if matches!(
+                event,
+                PlaybackEvent::SnapshotChanged | PlaybackEvent::PreloadChanged
+            ) {
+                let playback = this.playback.clone();
+                this.sync_cover_prefetch(&playback, cx);
+            }
         });
         let playlist_page = main_content.read(cx).playlist_page.clone();
-        let search_page = main_content.read(cx).search_page.clone();
-        let background_subscriptions = vec![
-            cx.observe(&main_content, |_, _, cx| cx.notify()),
-            cx.observe(&playlist_page, |_, _, cx| cx.notify()),
-            cx.observe(&search_page, |_, _, cx| cx.notify()),
+        let background_subscriptions = [
+            cx.subscribe(&main_content, |_, _, _: &ContentLayoutChanged, cx| {
+                cx.notify()
+            }),
+            cx.subscribe(&playlist_page, |_, _, _: &PlaylistMetadataChanged, cx| {
+                cx.notify()
+            }),
         ];
         let mut this = Self {
             main_content,
             player_bar,
             now_playing_page,
+            focus_handle,
+            _player_bar_subscription: player_bar_subscription,
             _playback_subscription: playback_subscription,
             _background_subscriptions: background_subscriptions,
             cover_tint: CoverColor::default(),
@@ -83,6 +112,23 @@ impl MainWindow {
         };
         this.sync_cover_prefetch(&playback, cx);
         this
+    }
+
+    /// 启动时给原生菜单的 Action 一个派发起点；无焦点时无法到达根 div 的处理器。
+    /// 默认不是 tab stop，不改变 Tab 导航顺序。
+    pub fn focus_root(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_handle.focus(window, cx);
+    }
+
+    fn open_song_comments(&mut self, song: Song, window: &mut Window, cx: &mut Context<Self>) {
+        if self.now_playing_page.read(cx).is_expanded(cx) {
+            self.now_playing_page
+                .update(cx, |page, cx| page.toggle_comments_screen(cx));
+        } else {
+            self.main_content.update(cx, |content, cx| {
+                content.open_song_comments(song, window, cx)
+            });
+        }
     }
 
     fn sync_cover_prefetch(
@@ -149,9 +195,11 @@ impl Render for MainWindow {
         let colors = Theme::global(cx).tokens.colors;
         let tint = self.playlist_tint(window, cx);
         let playback = self.playback.clone();
-        let main_content = self.main_content.clone();
-        let now_playing_page = self.now_playing_page.clone();
         div()
+            // 焦点锚点（见 focus_root）：没有焦点时 action 派发到不了下面的 on_action。
+            // 不设 focus 样式也不是 tab 站点，纯当派发起点用。
+            .track_focus(&self.focus_handle)
+            .id("main-window")
             // 歌曲菜单的「下一首播放」：原生菜单把 action 派发到窗口，冒泡上来后由这个根
             // div 接住（元素级 on_action 在绘制阶段注册，避开「只能 paint 期间调用」的限制）。
             // action 自己带着要插入的歌曲，直接交给控制器插到当前歌曲之后。
@@ -160,24 +208,16 @@ impl Render for MainWindow {
                     controller.insert_next(action.0.clone(), cx);
                 });
             })
-            // 「查看评论」（菜单、播放栏 / 歌曲行的评论图标都派发它）同一条链路：
-            // action 带着歌进来，导航、详情加载都归 MainContent。
+            // 「查看评论」：只剩原生歌曲菜单一个入口（输入层，见 ui::events 的分工）。
+            // 播放栏 / 歌单行的评论图标走 OpenSongComments typed event（消息层），
+            // 两条通道终点相同：导航、详情加载都归 MainContent。
             //
             // 例外是正在播放页开着的时候：那一页已经铺满窗口，评论按钮想看的评论
             // 就在它的下半屏，该翻屏而不是再叠一个评论页上去（此时也只有播放栏上的
             // 评论按钮点得到——浮层盖住了其余入口）。
-            .on_action(move |action: &ViewSongComments, window, cx| {
-                if now_playing_page.read(cx).is_expanded(cx) {
-                    cx.update_entity(&now_playing_page, |page, cx| {
-                        page.toggle_comments_screen(cx);
-                    });
-                    return;
-                }
-                let song = action.0.clone();
-                cx.update_entity(&main_content, |content, cx| {
-                    content.open_song_comments(song, window, cx);
-                });
-            })
+            .on_action(cx.listener(|this, action: &ViewSongComments, window, cx| {
+                this.open_song_comments(action.0.clone(), window, cx);
+            }))
             .size_full()
             .flex()
             .flex_col()
@@ -262,7 +302,10 @@ pub struct MainContent {
     _search_subscription: Subscription,
     _search_page_subscription: Subscription,
     _playlist_subscription: Subscription,
+    _playlist_comments_subscription: Subscription,
 }
+
+impl EventEmitter<ContentLayoutChanged> for MainContent {}
 
 impl MainContent {
     pub fn new(
@@ -297,14 +340,20 @@ impl MainContent {
                 cx,
             )
         });
-        let mut comments_active = false;
-        let playlist_subscription = cx.observe(&playlist_page, move |_, page, cx| {
-            let active = page.read(cx).comments_active(cx);
-            if active != comments_active {
-                comments_active = active;
-                cx.notify();
-            }
-        });
+        // 歌单评论页签开合：布局要整页铺满。事件只在翻转时发，直接重绘即可，
+        // 不再本地留 comments_active 镜像——渲染时本来就直接问页面。
+        let playlist_subscription = cx
+            .subscribe(&playlist_page, |_, _, _: &PlaylistCommentsTab, cx| {
+                cx.notify()
+            });
+        // 歌单行 / 播放栏的评论图标都发 OpenSongComments（消息层），统一在这里导航。
+        let playlist_comments_subscription = cx.subscribe_in(
+            &playlist_page,
+            window,
+            |this, _, event: &OpenSongComments, window, cx| {
+                this.open_song_comments(event.0.clone(), window, cx);
+            },
+        );
         let song_comments_page = cx.new(|cx| SongCommentsPage::new(window, cx));
         let library_subscription = cx.observe(&library, |this, _, cx| {
             // 收藏歌单的 ID 要等账号索引返回后才能解析。
@@ -387,6 +436,7 @@ impl MainContent {
             _search_subscription: search_subscription,
             _search_page_subscription: search_page_subscription,
             _playlist_subscription: playlist_subscription,
+            _playlist_comments_subscription: playlist_comments_subscription,
         }
     }
 
@@ -423,6 +473,7 @@ impl MainContent {
 
     /// 导航的实际生效路径：历史记录、页面切换各自独立，返回时只走这里不再入栈。
     fn show_page(&mut self, page: ContentPage, cx: &mut Context<Self>) {
+        let changed = self.active_page != page;
         self.active_page = page;
         self.sidebar
             .update(cx, |sidebar, cx| sidebar.set_active_page(page, cx));
@@ -432,6 +483,9 @@ impl MainContent {
         // 不用对着一个和当前语境无关的滚动位置。
         if page != ContentPage::Search {
             self.search_page.update(cx, |page, _| page.reset_scroll());
+        }
+        if changed {
+            cx.emit(ContentLayoutChanged);
         }
         cx.notify();
     }
@@ -962,6 +1016,7 @@ impl Render for MainContent {
                             this.sidebar_width = (event.event.position.x - event.drag(cx).get()
                                 + px(4.))
                             .clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
+                            cx.emit(ContentLayoutChanged);
                             cx.notify();
                         },
                     )),

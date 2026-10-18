@@ -7,7 +7,7 @@ use tray_icon::{
 
 use crate::api::MusicApi;
 use crate::models::PlayMode;
-use crate::playback::PlaybackController;
+use crate::playback::{PlaybackController, PlaybackEvent};
 use crate::state::library::MusicLibrary;
 use crate::ui::shell::MainWindow;
 
@@ -183,9 +183,15 @@ fn install_dock_menu(
     };
     apply(cx);
     vec![
-        cx.observe(&playback, {
+        // Dock 菜单跟着播放态与模式走：都是 SnapshotChanged；`apply` 内部还有
+        // 一层三字段 diff，只有内容真变了才重建原生菜单。
+        cx.subscribe(&playback, {
             let apply = apply.clone();
-            move |_, cx| apply(cx)
+            move |_, event: &PlaybackEvent, cx| {
+                if matches!(event, PlaybackEvent::SnapshotChanged) {
+                    apply(cx);
+                }
+            }
         }),
         cx.observe(&library, move |_, cx| apply(cx)),
     ]

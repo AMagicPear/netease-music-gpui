@@ -10,6 +10,24 @@ pub use controller::PlaybackController;
 use crate::models::{AudioQualityLevel, PlayMode, Song};
 use std::time::Duration;
 
+/// 播放状态的变化通知，按语义分型，消费者只订阅自己关心的变体。
+///
+/// 为什么不用裸 `observe`：`observe` 只能回答「有事发生」，消费者想知道
+/// 「什么变了」就得各自持有一份字段快照做元组 diff（播放栏五元组、歌词页
+/// 三元组、搜索/歌单页各一份……）。改成 typed event 后，判断一次做完，
+/// 消费者拿到变体即可行动，本地不再留镜像状态。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlaybackEvent {
+    /// 歌曲、队列、模式、音质、播放/缓冲/加载/错误状态变化。
+    SnapshotChanged,
+    /// 播放位置变化：100ms 推进、主动跳转或暂停淡出后的位置补记。
+    PositionChanged,
+    /// 音量变化。
+    VolumeChanged,
+    /// 音频预加载候选变化，供封面预取跟随；不影响播放控件和列表。
+    PreloadChanged,
+}
+
 /// 控制器的只读视图；UI 通过 snapshot() 借用，不能直接修改播放状态。
 pub struct PlaybackSnapshot {
     /// 每次重新加载递增，UI 用来隔离旧歌曲或旧音质的拖动事件。

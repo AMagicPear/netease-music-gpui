@@ -36,7 +36,8 @@ impl CommentsPanel {
     where
         V: 'static,
     {
-        let list = cx.new(|_| CommentsView::new(backdrop.clone()));
+        // 独立评论页统一使用主题颜色和 40px 留白；渐变只供吸顶编辑框补画背景。
+        let list = cx.new(|_| CommentsView::new(None));
         list.update(cx, |view, cx| view.set_header(header, cx));
         let input = new_input(window, cx);
         let composer = CommentComposer::new(input.clone(), list.clone(), backdrop);
