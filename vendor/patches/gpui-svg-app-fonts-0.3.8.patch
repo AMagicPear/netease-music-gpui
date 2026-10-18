@@ -1,0 +1,32 @@
+--- a/vendor/gpui-pre/src/svg_renderer.rs
++++ b/vendor/gpui-pre/src/svg_renderer.rs
+@@ -316,7 +316,29 @@
+             Ok(Some(data)) => db.load_font_data(data.into_owned()),
+             Ok(None) => log::warn!("Bundled font not found: {path}"),
+             Err(error) => log::warn!("Failed to load bundled font {path}: {error}"),
++        }
++    }
++
++    // The application's own fonts live in `font/` (the same files it hands to
++    // `TextSystem::add_fonts`). Register them here too, so `<text>` inside an
++    // SVG can reference the families the UI itself uses.
++    let app_fonts = match asset_source.list("font") {
++        Ok(fonts) => fonts,
++        Err(error) => {
++            log::warn!("Failed to list application fonts: {error}");
++            return;
++        }
++    };
++    for name in app_fonts {
++        if !name.ends_with(".ttf") && !name.ends_with(".otf") {
++            continue;
+         }
++        let path = format!("font/{name}");
++        match asset_source.load(&path) {
++            Ok(Some(data)) => db.load_font_data(data.into_owned()),
++            Ok(None) => log::warn!("Application font not found: {path}"),
++            Err(error) => log::warn!("Failed to load application font {path}: {error}"),
++        }
+     }
+ }
+ 

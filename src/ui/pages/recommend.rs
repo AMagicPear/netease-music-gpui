@@ -302,53 +302,48 @@ fn quick_entry(
         )
 }
 
-/// 「每日推荐」的当日日期：深色小方块压一条白边，读作日历的形状；标题挨着它排在右边。
+/// 「每日推荐」的日历图标正文，直接编译进二进制：这张图要在渲染前把当日数字
+/// 拼进遮罩里，走 `AssetSource`（每次 `fs::read`）不如编译期嵌入省事；
+/// 图标本身仍是 `assets/icons/calendar.svg`，改图要重新编译。
+const CALENDAR_BADGE_SVG: &str = include_str!("../../../assets/icons/calendar.svg");
+/// 图标里给数字留的插入点（见该 SVG 的 `<mask id="date-cut">`）。
+const CALENDAR_DATE_SLOT: &str = "<!--DATE_TEXT-->";
+/// 角标边长，与 SVG 的 viewBox（22×22）一一对应，换尺寸时下面的几何常量要一起看。
+const CALENDAR_BADGE_SIZE: f32 = 22.;
+/// 数字的视觉中心：图标上半有一条横向镂空的装订带（y 5.3~8.8），
+/// 剩下那块白色空白区是 y 8.8~19.6，中心即 14.2。
+const CALENDAR_DIGIT_CENTER_Y: f32 = 14.2;
+/// 一位数只有一个字形，放大些才撑满同一块空白；两位数并排，小一号刚好放下。
+const CALENDAR_DIGIT_SIZE_ONE: f32 = 11.5;
+const CALENDAR_DIGIT_SIZE_TWO: f32 = 9.5;
+
+/// 「每日推荐」的当日日期：白色日历图标，日期是从图标本体上「镂空」出来的
+/// ——数字位置是透明的洞，直接透出下面的封面。
+///
+/// 做法是 SVG 遮罩：`assets/icons/calendar.svg` 里那张 `date-cut` 遮罩铺满白色
+/// （白 = 保留），渲染前把当日数字用黑色画进遮罩（黑 = 抹掉），两者相乘就得到
+/// 「日历减去数字」的形状。所以数字不是压在图标上的文字，而是被挖掉的一块，
+/// 背后是什么颜色就露出什么颜色，不必去采样封面取色。
 fn date_badge(day: u8) -> AnyElement {
-    div()
+    let size = if day < 10 {
+        CALENDAR_DIGIT_SIZE_ONE
+    } else {
+        CALENDAR_DIGIT_SIZE_TWO
+    };
+    // `<text>` 的 y 是基线；Dolphin 的 capHeight 是 0.7em，想让数字的中缝落在
+    // `CALENDAR_DIGIT_CENTER_Y`，基线就得再往下挪半个字高。
+    let baseline = CALENDAR_DIGIT_CENTER_Y + size * 0.35;
+    let digits = format!(
+        r##"<text x="11" y="{baseline:.3}" font-family="Dolphin" font-size="{size}" font-weight="bold" text-anchor="middle" fill="#000">{day}</text>"##
+    );
+    let source = CALENDAR_BADGE_SVG.replace(CALENDAR_DATE_SLOT, &digits);
+    svg()
+        // `.data` 按内容哈希做缓存键：日期不变时拿到的还是同一份栅格结果。
+        .data(source.as_bytes())
+        .size(px(CALENDAR_BADGE_SIZE))
         .flex_none()
-        .w(px(22.))
-        .h(px(24.))
-        .rounded(px(4.))
-        .bg(black().alpha(0.55))
-        .flex()
-        .flex_col()
-        .items_center()
-        .overflow_hidden()
-        // 白条 + 两个小孔：日历的装订边。
-        .child(
-            div()
-                .w_full()
-                .h(px(5.))
-                .bg(white().alpha(0.85))
-                .flex()
-                .items_center()
-                .justify_center()
-                .gap(px(7.))
-                .child(
-                    div()
-                        .w(px(2.))
-                        .h(px(2.))
-                        .rounded_full()
-                        .bg(black().alpha(0.45)),
-                )
-                .child(
-                    div()
-                        .w(px(2.))
-                        .h(px(2.))
-                        .rounded_full()
-                        .bg(black().alpha(0.45)),
-                ),
-        )
-        .child(
-            div()
-                .flex_1()
-                .flex()
-                .items_center()
-                .text_size(px(11.))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(white())
-                .child(day.to_string()),
-        )
+        // 单色图标由 text_color 染色（取的是形状的 alpha），镂空的洞保持透明。
+        .text_color(white())
         .into_any_element()
 }
 
@@ -509,7 +504,8 @@ fn recommended_card(
                         300,
                     )))
                     .size_full()
-                    .object_fit(ObjectFit::Cover),
+                    .object_fit(ObjectFit::Cover)
+                    .rounded(COVER_RADIUS),
                 )
                 // 播放量在封面内部，从顶部向下渐淡才看得清（同歌单详情页封面）。
                 .child(
@@ -547,8 +543,9 @@ fn recommended_card(
         .child(
             div()
                 .h(CARD_TEXT_HEIGHT)
-                .pt(px(2.))
+                .pt(px(5.))
                 .text_size(px(13.))
+                .font_weight(FontWeight::SEMIBOLD)
                 .line_height(px(18.))
                 .line_clamp(2)
                 .text_color(colors.secondary_foreground)
@@ -583,7 +580,8 @@ fn featured_activities(colors: ColorTokens) -> impl IntoElement {
                 .child(
                     img(PLACEHOLDER_COVER)
                         .size_full()
-                        .object_fit(ObjectFit::Cover),
+                        .object_fit(ObjectFit::Cover)
+                        .rounded(COVER_RADIUS),
                 )
                 .child(
                     div()
