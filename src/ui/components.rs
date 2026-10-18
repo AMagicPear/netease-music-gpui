@@ -30,7 +30,7 @@ pub use collect_window::open_collect_window;
 pub use drag_preview::ResizeDragPreview;
 pub use player_bar::{PLAYER_BAR_HEIGHT, PlayerBar};
 pub use side_panel::{SidePanel, SidePanelContent};
-pub use song_menu::{PlayNext, show_song_menu};
+pub use song_menu::{Collect, PlayNext, show_song_menu};
 // 播放队列浮层、音质弹窗、账号弹层共用同一份圆角与投影；
 // 子模块与 ui 模块（shell）都通过这里取名。
 pub(in crate::ui) use popover::{SURFACE_RADIUS, SurfacePopover, surface_shadow};

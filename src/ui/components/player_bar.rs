@@ -1001,10 +1001,18 @@ impl Render for PlayerBar {
                                     colors,
                                 )
                                 // 右侧第二个图标就是收藏入口：弹出「收藏到歌单」弹窗。
-                                .on_click(|_, window, cx| {
-                                    cx.stop_propagation();
-                                    super::open_collect_window(window, cx);
-                                }),
+                                // 收藏的是当前这首，所以要从播放快照里取——弹窗不认识播放器。
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        let Some(song) =
+                                            this.playback.read(cx).snapshot().current_song.clone()
+                                        else {
+                                            return;
+                                        };
+                                        super::open_collect_window(window, vec![song], cx);
+                                    },
+                                )),
                             )
                             .child(
                                 // 音量是独立控件（还带自己的 hover 气泡），整栏可点之后必须由

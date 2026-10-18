@@ -14,6 +14,10 @@ use crate::models::{
     parse_radar,
 };
 
+/// 「收藏到歌单」一次请求最多带多少首。歌单歌曲接口有单次数量上限，
+/// 队列里可能有几百首（「收藏全部」），按批发才不会整批被服务端拒掉。
+const COLLECT_BATCH: usize = 100;
+
 /// GPUI 负责界面，Tokio 负责 SDK 的网络请求。客户端和运行时在应用内复用。
 pub struct MusicApi {
     pub client: ApiClient,
@@ -245,8 +249,7 @@ impl MusicApi {
     /// 推荐页顶部入口：官方把「每日推荐 + 多种风格日推」混排在一个区块里，
     /// 走新的首屏聚合接口，不必为每个入口单独发请求。
     pub async fn recommend_entries(client: ApiClient) -> Result<Vec<RecommendEntry>, String> {
-        let response =
-            Self::request(client.pc_rcmd_resource_show(&Query::new())).await?;
+        let response = Self::request(client.pc_rcmd_resource_show(&Query::new())).await?;
         Ok(parse_entries(&response.body))
     }
 
@@ -257,8 +260,7 @@ impl MusicApi {
     pub async fn recommended_playlists(
         client: ApiClient,
     ) -> Result<Vec<RecommendedPlaylist>, String> {
-        let response =
-            Self::request(client.personal_page_playlist_rcmd(&Query::new())).await?;
+        let response = Self::request(client.personal_page_playlist_rcmd(&Query::new())).await?;
         Ok(parse_playlists(&response.body))
     }
 
@@ -329,6 +331,78 @@ impl MusicApi {
     /// 官方 web 客户端「清空全部新消息提醒」用的接口，无参数，四类计数一并清零。
     pub async fn clear_message_counts(client: &ApiClient) -> Result<(), String> {
         Self::request(client.msg_count_clear()).await.map(|_| ())
+    }
+
+    /// 把歌曲收藏进歌单（官方 PC 客户端的「收藏到歌单」）。
+    ///
+    /// 接口一次能收的量有限，按 [`COLLECT_BATCH`] 首一批发。返回已成功的歌曲数和
+    /// 第一个错误：分批之后可能前几批已经生效，调用方要按这个数字记账，不能当整批失败。
+    pub async fn add_songs_to_playlist(
+        client: ApiClient,
+        playlist_id: u64,
+        song_ids: Vec<u64>,
+    ) -> (usize, Option<String>) {
+        let mut added = 0;
+        for chunk in song_ids.chunks(COLLECT_BATCH) {
+            let tracks = chunk
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            let result = Self::request(
+                client.playlist_tracks(
+                    &Query::new()
+                        .param("op", "add")
+                        .param("pid", &playlist_id.to_string())
+                        .param("tracks", &tracks),
+                ),
+            )
+            .await;
+            match result {
+                Ok(_) => added += chunk.len(),
+                Err(message) => return (added, Some(message)),
+            }
+        }
+        (added, None)
+    }
+
+    /// 新建歌单，返回新歌单。
+    ///
+    /// weapi 的响应有时把整个歌单放在 `playlist` 里、有时只给顶层 `id`，
+    /// 两种都认：只剩 id 时用占位对象（封面等字段等下次刷新列表再补齐）。
+    pub async fn create_playlist(client: &ApiClient, name: &str) -> Result<Playlist, String> {
+        let mut response =
+            Self::request(client.playlist_create(&Query::new().param("name", name))).await?;
+        if let Ok(playlist) = serde_json::from_value::<Playlist>(response.body["playlist"].take())
+            && playlist.id != 0
+        {
+            return Ok(playlist);
+        }
+        let id = response.body["id"]
+            .as_u64()
+            .filter(|id| *id != 0)
+            .ok_or_else(|| "新建歌单没有返回歌单 id".to_string())?;
+        Ok(Playlist::empty(id, name.to_owned()))
+    }
+
+    /// 依次把多首歌设为喜欢 / 取消喜欢，返回真正成功的 id 和第一个错误。
+    ///
+    /// 收藏进「我喜欢的音乐」要用它：那个歌单的内容就是账号的喜欢列表，
+    /// 没有对应的歌单接口，只能一首首点亮。逐首发的代价是失败可能只发生在半途，
+    /// 所以把成功的 id 带回去，让调用方只回滚没生效的那部分。
+    pub async fn set_songs_liked(
+        client: ApiClient,
+        song_ids: Vec<u64>,
+        liked: bool,
+    ) -> (Vec<u64>, Option<String>) {
+        let mut succeeded = Vec::with_capacity(song_ids.len());
+        for song_id in song_ids {
+            match Self::set_song_liked(client.clone(), song_id, liked).await {
+                Ok(()) => succeeded.push(song_id),
+                Err(message) => return (succeeded, Some(message)),
+            }
+        }
+        (succeeded, None)
     }
 
     /// 喜欢 / 取消喜欢一首歌。成功时接口只回 code，不返回新状态。
@@ -870,7 +944,8 @@ mod tests {
                         ui["image"]["imageUrl"],
                         first["action"],
                         first["actionType"],
-                        ui.as_object().map(|ui| ui.keys().cloned().collect::<Vec<_>>()),
+                        ui.as_object()
+                            .map(|ui| ui.keys().cloned().collect::<Vec<_>>()),
                     );
                 }
             }
@@ -1121,5 +1196,4 @@ mod temp_probe {
             .expect("清空未读计数失败");
         println!("{}", serde_json::to_string_pretty(&response.body).unwrap());
     }
-
 }

@@ -31,6 +31,28 @@ pub struct Playlist {
 }
 
 impl Playlist {
+    /// 占位歌单：新建歌单的响应只回了 id 时，用它把新歌单插进「我的歌单」列表。
+    ///
+    /// 封面、创建者这些字段接口没给，留空比编一个假值诚实；下次刷新列表时
+    /// `user_playlist` 返回的真实数据会整体替换掉它。
+    pub fn empty(id: u64, name: String) -> Self {
+        Self {
+            id,
+            name,
+            cover_img_url: None,
+            creator: UserProfile::default(),
+            create_time: None,
+            play_count: 0,
+            track_count: 0,
+            subscribed_count: 0,
+            comment_count: None,
+            description: None,
+            tags: None,
+            special_type: 0,
+            track_ids: Vec::new(),
+        }
+    }
+
     /// 展示用的简介：去掉首尾空白，纯空白和 `null` 都算「没有简介」。
     pub fn description(&self) -> Option<&str> {
         self.description

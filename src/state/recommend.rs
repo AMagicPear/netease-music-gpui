@@ -82,7 +82,12 @@ fn default_entries() -> Vec<QuickEntry> {
             Some(QuickEntryTarget::HeartMode),
         ),
         // 私人雷达是歌单，id 要等雷达接口回来才填。
-        entry(QuickEntryKind::Radar, "私人雷达", "今日份的私人雷达歌单", None),
+        entry(
+            QuickEntryKind::Radar,
+            "私人雷达",
+            "今日份的私人雷达歌单",
+            None,
+        ),
         entry(
             QuickEntryKind::Roam,
             "私人漫游",
@@ -666,10 +671,7 @@ mod tests {
             .expect("首行应当有私人雷达入口");
         assert_eq!(radar_entry.caption.as_ref(), "今天从《歌》听起");
         assert_eq!(radar_entry.cover.as_deref(), Some("cover-3"));
-        assert_eq!(
-            radar_entry.target,
-            Some(QuickEntryTarget::Playlist(3))
-        );
+        assert_eq!(radar_entry.target, Some(QuickEntryTarget::Playlist(3)));
         // 雷达先回来不会把推荐歌单的 loading 提前关掉。
         assert!(this.loading);
         assert!(this.apply_playlists(1, Ok(vec![playlist(7, "歌单")])));
@@ -685,20 +687,14 @@ mod tests {
         this.generation = 1;
         assert!(this.apply_radar(1, Ok(vec![playlist(9, "今天从《歌》听起")])));
         // 入口请求后到：重建固定入口时要把已有的雷达数据补回去。
-        assert!(this.apply_entries(
-            1,
-            Ok(vec![entry("dailySong", "每日推荐", "29")])
-        ));
+        assert!(this.apply_entries(1, Ok(vec![entry("dailySong", "每日推荐", "29")])));
         let radar_entry = this
             .entries
             .iter()
             .find(|entry| entry.kind == QuickEntryKind::Radar)
             .expect("首行应当有私人雷达入口");
         assert_eq!(radar_entry.cover.as_deref(), Some("cover-9"));
-        assert_eq!(
-            radar_entry.target,
-            Some(QuickEntryTarget::Playlist(9))
-        );
+        assert_eq!(radar_entry.target, Some(QuickEntryTarget::Playlist(9)));
     }
 
     #[test]

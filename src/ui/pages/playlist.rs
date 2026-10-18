@@ -38,7 +38,10 @@ type DividerDragAnchor = Rc<Cell<(Pixels, f32, Pixels)>>;
 
 use crate::models::{Playlist, Song};
 use crate::playback::{PlaybackController, PlaybackEvent};
-use crate::state::{library::MusicLibrary, playlist_detail::PlaylistDetail};
+use crate::state::{
+    library::{MusicLibrary, SongsCollected},
+    playlist_detail::PlaylistDetail,
+};
 use crate::ui::assets::thumbnail_url;
 use crate::ui::comments::{CommentResource, CommentsPanel};
 use crate::ui::components::{
@@ -92,6 +95,7 @@ pub struct PlaylistPage {
     playback: Entity<PlaybackController>,
     _playback_subscription: Subscription,
     _library_subscription: Subscription,
+    _collect_subscription: Subscription,
     /// 原始歌单顺序保存在 detail.songs；这里只保存显示顺序。
     display_order: Vec<usize>,
     /// 按原始歌曲索引缓存；排序只改变 display_order，不复制展示数据。
@@ -148,7 +152,7 @@ fn tag_row(tags: &[String], colors: ColorTokens) -> AnyElement {
 
 /// 行 hover 时贴在标题右侧的那排操作图标：下载 / 收藏 / 评论 / 更多。
 ///
-/// `on_comment` 由调用方用 `cx.listener` 构造后注入：UI 入口发 typed event
+/// `on_comment` / `on_collect` 由调用方用 `cx.listener` 构造后注入：UI 入口发 typed event
 /// （消息层），这里不持 `Context`——行渲染期间正握着快照读借用，
 /// `&mut Context` 进不去，而 `cx.listener` 只借 `&cx`，恰好相容。
 fn row_actions(
@@ -156,6 +160,7 @@ fn row_actions(
     song: &Song,
     colors: ColorTokens,
     on_comment: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_collect: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     // 四个图标只有 id / 路径 / 无障碍名不同，其余全都一样：尺寸用 header 那排的
     // `IconSize::Small`，灰度和三态交互在这里统一给。
@@ -188,8 +193,7 @@ fn row_actions(
         ))
         // 从左往右第二个图标就是收藏入口。
         .child(
-            action_icon("playlist-song-collect", "icons/collect.svg", "收藏")
-                .on_click(|_, window, cx| crate::ui::components::open_collect_window(window, cx)),
+            action_icon("playlist-song-collect", "icons/collect.svg", "收藏").on_click(on_collect),
         )
         .child(
             action_icon("playlist-song-comment", "icons/comment.svg", "评论").on_click(on_comment),
@@ -343,6 +347,14 @@ impl PlaylistPage {
             }
             cx.notify();
         });
+        // 别人往「正在看的这个歌单」里收藏了歌（弹窗、以后可能的拖拽），列表要跟上。
+        // 只认成功、且 id 对得上的：不相关的歌单变了自己不该白刷一遍。
+        let collect_subscription = cx.subscribe(&library, |this, _, event: &SongsCollected, cx| {
+            let open_id = this.detail.read(cx).id;
+            if event.result.is_ok() && open_id == Some(event.playlist_id) {
+                this.detail.update(cx, |detail, cx| detail.reload(cx));
+            }
+        });
         // 行首的播放指示只跟「哪首在播、是否在播」走，都是 SnapshotChanged 的份内事；
         // 100ms 的位置推进打不到这，长列表不会跟着进度条白闪。
         let playback_subscription = cx.subscribe(&playback, move |_, _, event, cx| {
@@ -444,6 +456,7 @@ impl PlaylistPage {
             playback,
             _playback_subscription: playback_subscription,
             _library_subscription: library_subscription,
+            _collect_subscription: collect_subscription,
             display_order: Vec::new(),
             song_display: Vec::new(),
             search_input,
@@ -1098,6 +1111,7 @@ impl PlaylistPage {
         is_current_song: bool,
         colors: ColorTokens,
         on_comment: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+        on_collect: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> AnyElement {
         div()
             .flex()
@@ -1180,7 +1194,7 @@ impl PlaylistPage {
                     )
                     // 隐形元素仍占宽度且可点击，因此只在 hover 时挂载操作图标。
                     .when(self.hovered_row == Some(song.id), |title| {
-                        title.child(row_actions(song.id, song, colors, on_comment))
+                        title.child(row_actions(song.id, song, colors, on_comment, on_collect))
                     }),
             )
             .into_any_element()
@@ -1199,6 +1213,12 @@ impl PlaylistPage {
         let comment_song = song.clone();
         let on_comment = cx.listener(move |_, _, _, cx| {
             NavigationBus::emit(cx, Navigate::SongComments(comment_song.clone()));
+        });
+        // 收藏图标：打开「收藏到歌单」窗口。收藏的那一首就是这一行，直接装进闭包带走，
+        // 弹窗不需要知道行号、也不需要回查歌单快照。
+        let collect_song = song.clone();
+        let on_collect = cx.listener(move |_, _, window, cx| {
+            crate::ui::components::open_collect_window(window, vec![collect_song.clone()], cx);
         });
         let playback = self.playback.read(cx);
         let is_current_song = playback
@@ -1286,7 +1306,14 @@ impl PlaylistPage {
                     .child(format!("{:02}", index + 1))
                     .into_any_element()
             },
-            self.song_title_cell(song, display, is_current_song, colors, on_comment),
+            self.song_title_cell(
+                song,
+                display,
+                is_current_song,
+                colors,
+                on_comment,
+                on_collect,
+            ),
             div()
                 .truncate()
                 .font_weight(SECONDARY_FONT_WEIGHT)

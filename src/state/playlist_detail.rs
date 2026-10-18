@@ -73,6 +73,21 @@ impl PlaylistDetail {
         cx.notify();
     }
 
+    /// 重新拉取当前歌单：往这个歌单里收藏了歌曲后，列表和计数要跟着变。
+    ///
+    /// 不本地插入新行——排序、去重、页头计数都跟服务端一致才是唯一真值，
+    /// 尤其收藏可能是别人在别的设备上做的，本地拼一份迟早对不上。
+    pub fn reload(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.id else {
+            return;
+        };
+        // `open` 对「同一个 id」是幂等的（认为已经有数据就不重载），所以先清空，
+        // 把摘要留给下一轮，页面不必从空白开始画页头。
+        let summary = self.playlist.take();
+        self.clear();
+        self.open(Some(id), summary, cx);
+    }
+
     /// 「喜欢的音乐」（`special_type == 5`）的歌曲集合就是账号的喜欢列表，
     /// 所以点亮 / 取消喜欢后要把已加载的 songs 同步成同一集合：
     /// 取消的去掉，新点亮的从 `cache`（音乐库本次会话缓存过的歌曲）补到队首

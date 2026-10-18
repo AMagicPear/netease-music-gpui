@@ -6,8 +6,9 @@ use gpui::*;
 use super::assets::{CoverPrefetch, thumbnail_url, track_cover_url};
 use super::comments::{SongCommentsPage, ViewSongComments};
 use super::components::{
-    PAGE_SIDE_PADDING, PLAYER_BAR_HEIGHT, PlayNext, PlayerBar, ResizeDragPreview, SidePanel,
-    SidePanelContent, SurfacePopover, icon_hover_color, search_clear_button, window_drag_area,
+    Collect, PAGE_SIDE_PADDING, PLAYER_BAR_HEIGHT, PlayNext, PlayerBar, ResizeDragPreview,
+    SidePanel, SidePanelContent, SurfacePopover, icon_hover_color, search_clear_button,
+    window_drag_area,
 };
 use super::cover_color::{Backdrop, CoverColor, CoverGradient, gradient_layer};
 use super::events::{
@@ -82,9 +83,7 @@ impl MainWindow {
                 Navigate::Playlist { id, summary } => {
                     this.open_playlist_nav(*id, summary.clone(), cx)
                 }
-                Navigate::SongComments(song) => {
-                    this.open_song_comments(song.clone(), window, cx)
-                }
+                Navigate::SongComments(song) => this.open_song_comments(song.clone(), window, cx),
             },
         );
         // 封面预取只跟随歌曲和预加载候选，不处理位置推进。
@@ -237,6 +236,11 @@ impl Render for MainWindow {
             // 评论按钮点得到——浮层盖住了其余入口）。
             .on_action(cx.listener(|this, action: &ViewSongComments, window, cx| {
                 this.open_song_comments(action.0.clone(), window, cx);
+            }))
+            // 歌曲菜单的「收藏」：和行内收藏图标同一个入口——弹出收藏到歌单的窗口。
+            // 窗口开在哪个显示器、居中于谁，都由这里传进去的 `window` 决定。
+            .on_action(cx.listener(|_, action: &Collect, window, cx| {
+                super::components::open_collect_window(window, vec![action.0.clone()], cx);
             }))
             .size_full()
             .flex()
@@ -504,13 +508,9 @@ impl MainContent {
     ///
     /// `navigate` 里的 `open_playlist` 会补上「是否我喜欢的音乐」，
     /// 并因为 id 没变、正在加载而跳过第二次请求，摘要不会被冲掉。
-    fn open_playlist_detail(
-        &mut self,
-        id: u64,
-        summary: Option<Playlist>,
-        cx: &mut Context<Self>,
-    ) {
-        self.playlist_page.update(cx, |view, cx| view.open(Some(id), summary, cx));
+    fn open_playlist_detail(&mut self, id: u64, summary: Option<Playlist>, cx: &mut Context<Self>) {
+        self.playlist_page
+            .update(cx, |view, cx| view.open(Some(id), summary, cx));
         self.navigate(ContentPage::Playlist(id), cx);
     }
 

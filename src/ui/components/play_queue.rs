@@ -203,8 +203,16 @@ impl Render for PlayQueue {
                                 "icons/add_all.svg",
                                 "收藏全部",
                                 colors,
-                                |_, window, cx| {
-                                    crate::ui::components::open_collect_window(window, cx);
+                                {
+                                    // 「收藏全部」收的是整个队列，所以把队列整份交给弹窗；
+                                    // 弹窗自己不知道播放器，这里给它快照就行。
+                                    let playback = self.playback.clone();
+                                    move |_, window, cx| {
+                                        let songs = playback.read(cx).queue().to_vec();
+                                        crate::ui::components::open_collect_window(
+                                            window, songs, cx,
+                                        );
+                                    }
                                 },
                             ))
                             .child(header_text_button(
@@ -598,9 +606,12 @@ fn row_actions(
                 "icons/collect.svg",
                 "收藏",
             )
-            .on_click(|_, window, cx| {
-                cx.stop_propagation();
-                crate::ui::components::open_collect_window(window, cx);
+            .on_click({
+                let song = song.clone();
+                move |_, window, cx| {
+                    cx.stop_propagation();
+                    crate::ui::components::open_collect_window(window, vec![song.clone()], cx);
+                }
             }),
         )
         // 更多：弹出原生菜单。

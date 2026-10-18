@@ -14,7 +14,6 @@ actions!(
     song_menu,
     [
         Play,
-        Collect,
         Download,
         Share,
         Buy,
@@ -33,14 +32,22 @@ actions!(
 #[action(namespace = song_menu, no_json)]
 pub struct PlayNext(pub Song);
 
+/// 「收藏」：打开「收藏到歌单」弹窗，和行内收藏图标同一个入口。
+///
+/// 和 [`PlayNext`] 一样把歌曲装进 action 带过去：菜单是原生 NSMenu，弹窗挂在主窗口的
+/// 根 div 上，处理时已经没有「右键的是哪一行」这个上下文了。
+#[derive(Action, Clone, PartialEq)]
+#[action(namespace = song_menu, no_json)]
+pub struct Collect(pub Song);
+
 /// 在 `position`（窗口坐标）弹出「更多」菜单；`song` 是右键到的那一首，供菜单项使用。
 pub fn show_song_menu(position: Point<Pixels>, song: Song, window: &mut Window, cx: &mut App) {
     NativeMenu::new()
         .menu("播放", Box::new(Play))
         .menu("下一首播放", Box::new(PlayNext(song.clone())))
-        .menu("查看评论", Box::new(ViewSongComments(song)))
+        .menu("查看评论", Box::new(ViewSongComments(song.clone())))
         .separator()
-        .menu("收藏", Box::new(Collect))
+        .menu("收藏", Box::new(Collect(song)))
         .menu("下载", Box::new(Download))
         .menu("分享", Box::new(Share))
         .menu("购买单曲", Box::new(Buy))
