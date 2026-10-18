@@ -69,6 +69,28 @@ pub struct RecommendedPlaylist {
     pub play_count: u64,
 }
 
+impl RecommendedPlaylist {
+    /// 把卡片摘要升级成详情页能直接画页头的 [`Playlist`]：接口给的 `id / name /
+    /// 封面 / 播放量` 是真值，其余字段推荐接口不给、填默认，等 `playlist/detail` 回来再整体替换。
+    pub fn to_summary(&self) -> Playlist {
+        Playlist {
+            id: self.id,
+            name: self.name.clone(),
+            cover_img_url: self.pic_url.clone(),
+            creator: UserProfile::default(),
+            create_time: None,
+            play_count: self.play_count,
+            track_count: 0,
+            subscribed_count: 0,
+            comment_count: None,
+            description: None,
+            tags: None,
+            special_type: 0,
+            track_ids: Vec::new(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Playlist, RecommendedPlaylist};

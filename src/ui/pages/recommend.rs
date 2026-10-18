@@ -484,6 +484,8 @@ fn recommended_card(
     cx: &Context<RecommendPage>,
 ) -> impl IntoElement {
     let playlist_id = playlist.id;
+    // 先固化成拥有值，避免 `move` 闭包捕获 `playlist` 的短生命周期引用。
+    let summary = playlist.to_summary();
     div()
         .flex_1()
         .min_w(px(0.))
@@ -553,7 +555,14 @@ fn recommended_card(
                 .child(playlist.name.clone()),
         )
         .on_click(cx.listener(move |_, _, _, cx| {
-            NavigationBus::emit(cx, Navigate::Playlist { id: playlist_id, summary: None });
+            NavigationBus::emit(
+                cx,
+                Navigate::Playlist {
+                    id: playlist_id,
+                    // 卡片上歌单名 / 封面 / 播放量已知，先作为摘要交详情页画页头。
+                    summary: Some(summary.clone()),
+                },
+            );
         }))
 }
 

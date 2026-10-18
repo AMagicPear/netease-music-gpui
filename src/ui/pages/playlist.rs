@@ -382,12 +382,18 @@ impl PlaylistPage {
             // 列宽跟着显示行数走（序号列按位数定宽），过滤后也要重算。
             this.rebuild_display_order(cx);
             let playlist = detail.playlist.as_ref();
+            // 只有「确实 > 0」才显示计数：摘要阶段 trackCount / subscribedCount
+            // 未知（填的 0），不该闪一个误导的「0」。
             let counts = [
-                playlist.map(|playlist| playlist.track_count.to_string()),
+                playlist
+                    .filter(|playlist| playlist.track_count > 0)
+                    .map(|playlist| playlist.track_count.to_string()),
                 playlist
                     .and_then(|playlist| playlist.comment_count)
                     .map(|count| count.to_string()),
-                playlist.map(|playlist| playlist.subscribed_count.to_string()),
+                playlist
+                    .filter(|playlist| playlist.subscribed_count > 0)
+                    .map(|playlist| playlist.subscribed_count.to_string()),
             ];
             this.tabs.update(cx, |tabs, cx| {
                 if changed {
