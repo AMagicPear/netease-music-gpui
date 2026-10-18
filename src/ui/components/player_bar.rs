@@ -15,14 +15,12 @@ use crate::playback::{PlaybackController, PlaybackEvent};
 use crate::state::library::MusicLibrary;
 use crate::state::song_counts::SongCounts;
 use crate::ui::cover_color::{blend_color, blend_colors, dark_colors};
-use crate::ui::events::OpenSongComments;
+use crate::ui::events::{Navigate, NavigationBus};
 use crate::ui::now_playing::NowPlaying;
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
 
 /// 播放栏固定高度；专辑歌词页据此估算可视区域高度。
 pub const PLAYER_BAR_HEIGHT: f32 = 86.;
-
-impl EventEmitter<OpenSongComments> for PlayerBar {}
 
 pub struct PlayerBar {
     playback: Entity<PlaybackController>,
@@ -209,9 +207,9 @@ impl PlayerBar {
                     let Some(song) = this.playback.read(cx).snapshot().current_song.clone() else {
                         return;
                     };
-                    // UI 入口发 typed event（消息层）； MainContent 订阅后导航。
+                    // UI 入口发 typed event（消息层）； MainWindow 经导航总线订阅后导航。
                     // 不走 action：那是输入层（键位 / 原生菜单）的通道。
-                    cx.emit(OpenSongComments(song));
+                    NavigationBus::emit(cx, Navigate::SongComments(song));
                 }))
             })
             .child(

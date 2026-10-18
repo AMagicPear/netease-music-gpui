@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use gpui::*;
 use gpui_kit::base::{Button, ColorTokens, Theme};
 
@@ -6,7 +8,7 @@ use crate::state::recommend::RecommendedPlaylists;
 use crate::ui::assets::{track_cover_image, track_cover_url};
 use crate::ui::components::{centered_empty, play_count_label, spinner};
 use crate::ui::cover_color::{CoverColor, dark_gradient};
-use crate::ui::events::OpenRecommendedPlaylist;
+use crate::ui::events::{Navigate, NavigationBus};
 use crate::ui::theme::{DOLPHIN_FAMILY, PRESSED_ICON_ALPHA};
 
 /// 区块之间的竖向间距。
@@ -15,6 +17,8 @@ const SECTION_GAP: Pixels = px(28.);
 const CARD_GAP: f32 = 16.;
 /// 封面圆角，与歌单详情页封面一致。
 const COVER_RADIUS: Pixels = px(8.);
+/// 刷新图标转一圈的时长，和 `spinner.rs` 的 `SPIN_PERIOD` 一致，读作同一类加载。
+const SPIN_PERIOD: Duration = Duration::from_millis(900);
 /// 封面下方 caption 区的高度。官方实测整卡 190px = 142px 封面 + 48px caption 区；
 /// 高度不随窗口变（宽窗口下封面变大、caption 区仍是 48px）。
 const CARD_TEXT_HEIGHT: Pixels = px(48.);
@@ -36,8 +40,6 @@ pub struct RecommendPage {
     /// 从封面取色压暗得来，与 img 共用 GPUI 图片缓存，新封面加载中保留上一张的颜色。
     entry_colors: Vec<CoverColor>,
 }
-
-impl EventEmitter<OpenRecommendedPlaylist> for RecommendPage {}
 
 impl RecommendPage {
     pub fn new(recommended: Entity<RecommendedPlaylists>) -> Self {
@@ -375,15 +377,32 @@ impl RecommendPage {
             .child(self.recommended_body(columns, colors, cx))
     }
 
-    /// 刷新按钮：加载中换成转圈图标——同一份加载语义，和别处的加载中一致。
+    /// 刷新按钮：加载中让图标自身绕中心匀速旋转——同一份加载语义，但复用
+    /// 刷新图标本体（不另换一个缓存的转圈图标），转起来就自然读作「加载中」。
     fn refresh_button(&self, colors: ColorTokens, cx: &Context<Self>) -> AnyElement {
-        if self.recommended.read(cx).loading {
-            return spinner("recommend-refresh-loading", 16., colors.muted_foreground)
+        let loading = self.recommended.read(cx).loading;
+        if loading {
+            // 加载中：图标自旋即加载反馈；此时按钮处于「进行中」，不再响应
+            // hover/active/点击（和原先换成纯 spinner 时不可交互一致）。
+            return svg()
+                .path("icons/refresh.svg")
+                .size(px(16.))
+                .flex_none()
+                .text_color(colors.muted_foreground)
+                .with_animation(
+                    "recommend-refresh-loading",
+                    Animation::new(SPIN_PERIOD).repeat(),
+                    |icon, delta| {
+                        icon.with_transformation(Transformation::rotate(percentage(delta)))
+                    },
+                )
                 .into_any_element();
         }
+        // 空闲：静态刷新图标，保留 hover/active 换色与点击刷新。
+        // `active` 属于 StatefulInteractiveElement，必须跟在 `.id()` 之后。
         svg()
             .path("icons/refresh.svg")
-            .size(px(18.))
+            .size(px(16.))
             .flex_none()
             .text_color(colors.muted_foreground)
             .hover(|style| style.text_color(colors.foreground))
@@ -534,7 +553,7 @@ fn recommended_card(
                 .child(playlist.name.clone()),
         )
         .on_click(cx.listener(move |_, _, _, cx| {
-            cx.emit(OpenRecommendedPlaylist(playlist_id));
+            NavigationBus::emit(cx, Navigate::Playlist { id: playlist_id, summary: None });
         }))
 }
 

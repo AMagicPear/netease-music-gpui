@@ -11,16 +11,14 @@ use super::components::{
 };
 use super::cover_color::{Backdrop, CoverColor, CoverGradient, gradient_layer};
 use super::events::{
-    ContentLayoutChanged, OpenRecommendedPlaylist, OpenSongComments, PlaylistCommentsTab,
-    PlaylistMetadataChanged,
+    ContentLayoutChanged, Navigate, NavigationBus, PlaylistCommentsTab, PlaylistMetadataChanged,
 };
 use super::now_playing::{NowPlaying, NowPlayingPage};
 use super::pages::recommend::RecommendPage;
-use super::pages::search::OpenPlaylist;
 use super::pages::{ContentPage, playlist::PlaylistPage, search::SearchPage};
 use super::sidebar::{LoginRequested, SidebarChanged, SidebarPage};
 use super::theme::{IconSize, PRESSED_ICON_ALPHA};
-use crate::models::Song;
+use crate::models::{Playlist, Song};
 use crate::playback::{PlaybackController, PlaybackEvent};
 use crate::state::account::AccountState;
 use crate::state::library::MusicLibrary;
@@ -48,7 +46,9 @@ pub struct MainWindow {
     /// 窗口根视图的焦点锚点：action 派发从焦点节点沿祖先链走，根视图持焦点时
     /// 才轮得到它根 div 上的 `on_action`。见 [`MainWindow::focus_root`]。
     focus_handle: FocusHandle,
-    _player_bar_subscription: Subscription,
+    /// 全部导航意图（打开歌单 / 歌曲评论）走一条总线，这里订阅一次接管，
+    /// 不再按页面各挂一条订阅。
+    _nav_subscription: Subscription,
     _playback_subscription: Subscription,
     _background_subscriptions: [Subscription; 2],
     cover_tint: CoverColor,
@@ -73,13 +73,18 @@ impl MainWindow {
         let now_playing_page =
             cx.new(|cx| NowPlayingPage::new(playback.clone(), library, now_playing, cx));
         let focus_handle = cx.focus_handle();
-        // 播放栏的评论按钮发 OpenSongComments（消息层）：shell 当路由者，转交
-        // MainContent 落地。UI 消息与焦点无关，不走 action 那条输入层通道。
-        let player_bar_subscription = cx.subscribe_in(
-            &player_bar,
+        // 全部导航意图走一条总线，这里订阅一次接管：卡片 / 图标只发意图，详情加载与
+        // 导航都在这里落地。UI 消息与焦点无关，不走 action 那条输入层通道。
+        let nav_subscription = cx.subscribe_in(
+            &NavigationBus::global(cx),
             window,
-            |this, _, event: &OpenSongComments, window, cx| {
-                this.open_song_comments(event.0.clone(), window, cx);
+            |this, _, intent: &Navigate, window, cx| match intent {
+                Navigate::Playlist { id, summary } => {
+                    this.open_playlist_nav(*id, summary.clone(), cx)
+                }
+                Navigate::SongComments(song) => {
+                    this.open_song_comments(song.clone(), window, cx)
+                }
             },
         );
         // 封面预取只跟随歌曲和预加载候选，不处理位置推进。
@@ -106,7 +111,7 @@ impl MainWindow {
             player_bar,
             now_playing_page,
             focus_handle,
-            _player_bar_subscription: player_bar_subscription,
+            _nav_subscription: nav_subscription,
             _playback_subscription: playback_subscription,
             _background_subscriptions: background_subscriptions,
             cover_tint: CoverColor::default(),
@@ -132,6 +137,18 @@ impl MainWindow {
                 content.open_song_comments(song, window, cx)
             });
         }
+    }
+
+    /// 路由「打开歌单」导航意图：带摘要（搜索结果）就先画页头，否则按 id 现取；
+    /// 详情加载与切页都交给 `MainContent`，这里只做分流。
+    fn open_playlist_nav(&mut self, id: u64, summary: Option<Playlist>, cx: &mut Context<Self>) {
+        self.main_content.update(cx, |content, cx| {
+            if let Some(summary) = summary {
+                content.open_playlist_detail(id, Some(summary), cx);
+            } else {
+                content.navigate(ContentPage::Playlist(id), cx);
+            }
+        });
     }
 
     fn sync_cover_prefetch(
@@ -212,8 +229,8 @@ impl Render for MainWindow {
                 });
             })
             // 「查看评论」：只剩原生歌曲菜单一个入口（输入层，见 ui::events 的分工）。
-            // 播放栏 / 歌单行的评论图标走 OpenSongComments typed event（消息层），
-            // 两条通道终点相同：导航、详情加载都归 MainContent。
+            // 播放栏 / 歌单行的评论图标走导航总线的 Navigate::SongComments 意图（消息层），
+            // 两条通道终点相同：导航、详情加载都归 MainWindow。
             //
             // 例外是正在播放页开着的时候：那一页已经铺满窗口，评论按钮想看的评论
             // 就在它的下半屏，该翻屏而不是再叠一个评论页上去（此时也只有播放栏上的
@@ -305,11 +322,7 @@ pub struct MainContent {
     _user_profile_subscription: Subscription,
     _library_subscription: Subscription,
     _search_subscription: Subscription,
-    _search_page_subscription: Subscription,
-    /// 推荐歌单卡片点开：页面只发 id，这里负责导航与详情加载。
-    _recommend_subscription: Subscription,
     _playlist_subscription: Subscription,
-    _playlist_comments_subscription: Subscription,
 }
 
 impl EventEmitter<ContentLayoutChanged> for MainContent {}
@@ -353,26 +366,10 @@ impl MainContent {
             .subscribe(&playlist_page, |_, _, _: &PlaylistCommentsTab, cx| {
                 cx.notify()
             });
-        // 歌单行 / 播放栏的评论图标都发 OpenSongComments（消息层），统一在这里导航。
-        let playlist_comments_subscription = cx.subscribe_in(
-            &playlist_page,
-            window,
-            |this, _, event: &OpenSongComments, window, cx| {
-                this.open_song_comments(event.0.clone(), window, cx);
-            },
-        );
         let song_comments_page = cx.new(|cx| SongCommentsPage::new(window, cx));
         // 推荐页的歌单数据：跟着登录状态加载，过期结果由 store 自己丢弃。
         let recommended = cx.new(|cx| RecommendedPlaylists::new(user_profile.clone(), cx));
         let recommend_page = cx.new(|_| RecommendPage::new(recommended));
-        // 推荐歌单卡片：页面只发 id（消息层），导航和详情加载归这里——
-        // 和搜索页的 OpenPlaylist 同一套路，详情按 id 现取。
-        let recommend_subscription = cx.subscribe(
-            &recommend_page,
-            |this, _, event: &OpenRecommendedPlaylist, cx| {
-                this.navigate(ContentPage::Playlist(event.0), cx);
-            },
-        );
         let library_subscription = cx.observe(&library, |this, _, cx| {
             // 收藏歌单的 ID 要等账号索引返回后才能解析。
             this.open_playlist(this.active_page, cx);
@@ -402,11 +399,6 @@ impl MainContent {
                 this.submit_current_input(cx);
             }
         });
-        // 搜索结果里点开一个歌单：页面只发出意图，导航和详情加载都归这里。
-        let search_page_subscription =
-            cx.subscribe(&search_page, |this, _, event: &OpenPlaylist, cx| {
-                this.open_searched_playlist(event, cx);
-            });
 
         // 页面在这里全部建好；切走再切回仍是同一个 View 实例。
         let pages = ContentPage::all()
@@ -453,10 +445,7 @@ impl MainContent {
             _user_profile_subscription: user_profile_subscription,
             _library_subscription: library_subscription,
             _search_subscription: search_subscription,
-            _search_page_subscription: search_page_subscription,
-            _recommend_subscription: recommend_subscription,
             _playlist_subscription: playlist_subscription,
-            _playlist_comments_subscription: playlist_comments_subscription,
         }
     }
 
@@ -510,16 +499,19 @@ impl MainContent {
         cx.notify();
     }
 
-    /// 搜索结果里点开一个歌单：摘要已经在手上，先交给详情页把页头画出来
-    /// （封面和歌单名不用等详情接口返回），再走统一导航。
+    /// 打开歌单详情：带摘要（搜索结果）就先交给详情页把页头画出来
+    /// （封面和歌单名不用等详情接口返回），否则按 id 现取；再走统一导航。
     ///
     /// `navigate` 里的 `open_playlist` 会补上「是否我喜欢的音乐」，
     /// 并因为 id 没变、正在加载而跳过第二次请求，摘要不会被冲掉。
-    fn open_searched_playlist(&mut self, event: &OpenPlaylist, cx: &mut Context<Self>) {
-        self.playlist_page.update(cx, |view, cx| {
-            view.open(Some(event.id), Some(event.summary.clone()), cx)
-        });
-        self.navigate(ContentPage::Playlist(event.id), cx);
+    fn open_playlist_detail(
+        &mut self,
+        id: u64,
+        summary: Option<Playlist>,
+        cx: &mut Context<Self>,
+    ) {
+        self.playlist_page.update(cx, |view, cx| view.open(Some(id), summary, cx));
+        self.navigate(ContentPage::Playlist(id), cx);
     }
 
     /// 评论图标（播放栏 / 歌曲行 / 右键菜单）统一从这里进歌曲评论页。

@@ -10,24 +10,51 @@
 //! `observe` 用于读取整个实体的状态，位置推进、渐变等高频变化用领域事件区分，
 //! 避免让无关消费者跟着重绘。
 
-use crate::models::Song;
+use crate::models::{Playlist, Song};
+use gpui::{App, Entity, EventEmitter};
 
-/// 「打开某首歌的评论页」：播放栏、歌单行的评论图标发它，`MainContent` 订阅后导航。
-/// 原生歌曲菜单里的同名项仍走 [`super::comments::ViewSongComments`] action（输入层），
-/// 两者终点相同、通道各归其位。
+/// 跨视图的统一导航意图：所有「点开某个东西」的消息层意图都走这一条通道，由
+/// `MainWindow` 里的一个订阅（路由者）统一处理，不再让每个页面在 `MainWindow` /
+/// `MainContent` 各挂一条订阅。以后加「专辑 / 歌手」这类跳转，只要在这里加一个
+/// 变体、在路由者里加一个分支即可，不用再动接线。
+///
+/// 卡片 / 图标只发意图（消息层），导航与详情加载归路由者；详情按 id 现取。
 #[derive(Clone)]
-pub(in crate::ui) struct OpenSongComments(pub Song);
+pub(crate) enum Navigate {
+    /// 打开一个歌单：详情按 id 现取；搜索结果带摘要就先画页头（封面 / 歌单名）。
+    Playlist { id: u64, summary: Option<Playlist> },
+    /// 打开一首歌的评论页（播放栏 / 歌单行的评论图标）。
+    SongComments(Song),
+}
+
+/// 导航意图的总线：页面与组件只往这里发意图，不自己持有订阅者。
+/// 它是 [`Navigate`] 的事件源，`MainWindow` 订阅一次就接管全部导航。
+pub(crate) struct NavigationBus;
+
+impl EventEmitter<Navigate> for NavigationBus {}
+
+/// 把总线实体挂到 App 全局的句柄（`Entity` 本身不实现 `Global`，用这层包一下）。
+pub(crate) struct NavigationBusHandle(pub(crate) Entity<NavigationBus>);
+
+impl gpui::Global for NavigationBusHandle {}
+
+impl NavigationBus {
+    /// 取全局唯一的总线实体（在 `main.rs` 启动时 `set_global`）。
+    pub(crate) fn global(cx: &App) -> Entity<NavigationBus> {
+        cx.global::<NavigationBusHandle>().0.clone()
+    }
+
+    /// 往总线发一个导航意图（消息层）。任何持有 `&mut App` 的上下文都能调。
+    pub(crate) fn emit(cx: &mut App, intent: Navigate) {
+        Self::global(cx).update(cx, |_, cx| cx.emit(intent));
+    }
+}
 
 /// 「歌单页停进 / 离开评论页签」：评论列表要铺满整个内容区，`MainContent` 订阅后重排。
 /// 只在翻转时发，切「歌曲 ↔ 收藏者」不打扰布局方；当前是纯信号事件，订阅方
 /// 渲染时直接问页面要状态，不需要载荷。
 #[derive(Clone, Copy)]
 pub(in crate::ui) struct PlaylistCommentsTab;
-
-/// 「打开推荐页的一张推荐歌单」：卡片只发 id（消息层），导航和详情加载归
-/// `MainContent`——详情按 id 现取，卡片上没有完整摘要可传。
-#[derive(Clone, Copy)]
-pub(in crate::ui) struct OpenRecommendedPlaylist(pub u64);
 
 /// 歌单元数据更新，窗口需要重新读取封面颜色；行 hover 和列表滚动不影响窗口背景。
 pub(in crate::ui) struct PlaylistMetadataChanged;

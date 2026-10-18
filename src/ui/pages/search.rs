@@ -16,6 +16,7 @@ use crate::ui::components::{
     like_icon_path, play_all_button, play_count_label, quality_badge_path, row_hover_icon, spinner,
     title_with_subtitle, virtual_table,
 };
+use crate::ui::events::{Navigate, NavigationBus};
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize};
 
 /// 歌单表「歌曲数」「播放量」的固定宽度。两列内容最长是「1234万」「1163首」
@@ -57,18 +58,6 @@ const SEARCH_TABS: [(SearchTab, &str); 10] = [
 const SONG_TAB: usize = 1;
 /// 歌单 tab 的下标：切到它时才发歌单搜索请求。
 const PLAYLIST_TAB: usize = 2;
-
-/// 搜索页请求打开某个歌单。
-///
-/// 页面之间不直接互相调用：搜索页不知道自己被谁显示着，只管发出打开意图，
-/// 由 `MainContent` 统一处理导航和详情加载。
-pub struct OpenPlaylist {
-    pub id: u64,
-    /// 搜索结果里已经拿到的歌单摘要。详情页先用它把页头画出来，不用等详情接口返回。
-    pub summary: Playlist,
-}
-
-impl EventEmitter<OpenPlaylist> for SearchPage {}
 
 /// 搜索结果页。和歌单详情页一样只是「一个用 `virtual_table` 的列表页」，两者互不依赖：
 /// 共用的表格长相和行内零件都在 `components::virtual_table` 里。
@@ -535,10 +524,13 @@ impl SearchPage {
         else {
             return;
         };
-        cx.emit(OpenPlaylist {
-            id: playlist_id,
-            summary,
-        });
+        NavigationBus::emit(
+            cx,
+            Navigate::Playlist {
+                id: playlist_id,
+                summary: Some(summary),
+            },
+        );
     }
 
     fn song_cells(&mut self, index: usize, cx: &mut Context<Self>) -> Vec<AnyElement> {

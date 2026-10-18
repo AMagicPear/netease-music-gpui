@@ -13,7 +13,7 @@ use crate::models::Song;
 use crate::ui::assets::thumbnail_url;
 
 /// 「查看评论」：带着歌来到 [SongCommentsPage]。
-/// 歌曲原生菜单派发它；界面上的评论图标使用 `OpenSongComments` 事件。
+/// 歌曲原生菜单派发它；界面上的评论图标经导航总线发 `Navigate::SongComments` 意图。
 /// 因为它不会从键位 JSON 反序列化，声明 `no_json` 以省去 `Deserialize` / `JsonSchema`。
 #[derive(Action, Clone, PartialEq)]
 #[action(namespace = comments, no_json)]

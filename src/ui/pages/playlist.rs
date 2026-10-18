@@ -50,7 +50,7 @@ use crate::ui::components::{
     title_with_subtitle, virtual_table,
 };
 use crate::ui::cover_color::{Backdrop, blend_color};
-use crate::ui::events::{OpenSongComments, PlaylistCommentsTab, PlaylistMetadataChanged};
+use crate::ui::events::{Navigate, NavigationBus, PlaylistCommentsTab, PlaylistMetadataChanged};
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
 
 // 「更多」菜单里的三个命令。
@@ -112,7 +112,6 @@ pub struct PlaylistPage {
     playing_indicator: Entity<PlayingIndicator>,
 }
 
-impl EventEmitter<OpenSongComments> for PlaylistPage {}
 impl EventEmitter<PlaylistCommentsTab> for PlaylistPage {}
 impl EventEmitter<PlaylistMetadataChanged> for PlaylistPage {}
 
@@ -1193,7 +1192,7 @@ impl PlaylistPage {
         // `cx.listener` 只借 `&cx`，和上面几条快照读借用相容。
         let comment_song = song.clone();
         let on_comment = cx.listener(move |_, _, _, cx| {
-            cx.emit(OpenSongComments(comment_song.clone()));
+            NavigationBus::emit(cx, Navigate::SongComments(comment_song.clone()));
         });
         let playback = self.playback.read(cx);
         let is_current_song = playback

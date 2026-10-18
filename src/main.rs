@@ -14,6 +14,7 @@ use state::{account::AccountState, library::MusicLibrary, song_counts::SongCount
 use ui::{
     assets::Assets,
     components::{PlayerBar, SidePanel},
+    events::{NavigationBus, NavigationBusHandle},
     now_playing::NowPlaying,
     shell::{MainContent, MainWindow},
     theme,
@@ -60,6 +61,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
             cx,
             |window, cx| {
+                // 导航总线：全局唯一实体。所有页面 / 组件往这发导航意图，
+                // MainWindow 订阅一次接管，不再按来源各挂一条订阅。
+                let nav_bus = cx.new(|_| NavigationBus);
+                cx.set_global(NavigationBusHandle(nav_bus));
                 desktop::configure_window(window, cx);
                 let playback =
                     cx.new(|cx| PlaybackController::new(window, persistence.clone(), cx));
