@@ -7,6 +7,7 @@
 
 - `gpui-image-transform-0.3.8.patch`：图片 GPU 旋转。
 - `gpui-backdrop-blur-0.3.8.patch`：圆角矩形背景模糊（毛玻璃）。
+- `gpui-svg-app-fonts-0.3.8.patch`：SVG 文本加载 `assets/font/` 中的应用字体，用于推荐页日历等图案。
 
 首次构建或补丁更新后，在项目根目录运行：
 

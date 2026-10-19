@@ -1,3 +1,5 @@
+mod quality;
+
 use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
@@ -7,10 +9,7 @@ use gpui_kit::base::{Button, ColorTokens, Theme, Transition, transition};
 use super::progress_bar::ProgressBar;
 use super::side_panel::{SidePanel, SidePanelContent};
 use super::volume_control::VolumeControl;
-use super::{
-    LAYER_PROGRESS_BAR, SurfacePopover, Vinyl, artist_label, icon_hover_color, like_icon_path,
-};
-use crate::models::AudioQualityLevel;
+use super::{LAYER_PROGRESS_BAR, Vinyl, artist_label, icon_hover_color, like_icon_path};
 use crate::playback::{PlaybackController, PlaybackEvent};
 use crate::state::library::MusicLibrary;
 use crate::state::song_counts::SongCounts;
@@ -24,30 +23,17 @@ pub const PLAYER_BAR_HEIGHT: f32 = 86.;
 
 pub struct PlayerBar {
     playback: Entity<PlaybackController>,
-    /// 喜欢状态不在播放控制器里，而在音乐库中，红心要据此显示实心/空心。
     library: Entity<MusicLibrary>,
-    /// 互动计数（喜欢 / 评论数）由 store 持有：加载、切歌丢弃过期结果都在那边，
-    /// 这里只读快照，不自己 spawn。
     song_counts: Entity<SongCounts>,
     progress_bar: Entity<ProgressBar>,
-    /// 音量是 hover 弹出、形状还带小三角，和通用弹层不一样，自己实现。
     volume: Entity<VolumeControl>,
     play_button_hovered: bool,
     play_button_pressed: bool,
-    /// 哪块互动区正被悬停，`(互动区 id, 命中部件)`。
-    /// 图标和计数是两个独立 hitbox（计数还可能伸出格子），靠这份状态让两者同步变色。
+    /// 图标与计数的独立命中区共用颜色，键为（互动区 ID，部件）。
     hovered_interaction: Option<(&'static str, usize)>,
     mini_vinyl: Entity<Vinyl>,
-    /// 音质弹层的开合。位置、延迟绘制和窗口边缘避让交给 `base::Popup`，
-    /// 但开合状态、点外面关闭和进出场动画得自己管：gpui-kit 的 Popover 一关
-    /// 就在同一帧卸载内容，没有东西留给退场动画。
     quality_open: bool,
-    /// 打开弹层前的焦点，关闭时还回去。
-    /// 「整页展开/收起」的单一状态源。展开状态、共享渐变底、动效节拍都从这里读，
-    /// 播放栏不再自己存 `album_expanded` 镜像。
     now_playing: Entity<NowPlaying>,
-    /// 全局侧面板（内含播放队列/消息两页内容）。由组合根创建后传入；
-    /// 播放栏只负责挂载和触发播放队列页。
     side_panel: Entity<SidePanel>,
     _playback_subscription: Subscription,
     _counts_subscription: Subscription,
@@ -56,10 +42,9 @@ pub struct PlayerBar {
     _now_playing_subscription: Subscription,
 }
 
-/// 互动区图标的点击行为：红心切喜欢，评论开评论页，其余图标还没接。
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InteractionClick {
-    Like,
+    Like(bool),
     Comments,
 }
 
@@ -77,7 +62,6 @@ impl PlayerBar {
             cx.new(|cx| ProgressBar::new(playback.clone(), now_playing.clone(), window, cx));
         let volume =
             cx.new(|cx| VolumeControl::new(playback.clone(), now_playing.clone(), window, cx));
-        // 旋转时钟由 NowPlaying 持有，和整页大碟共用同一份。
         let mini_vinyl = cx.new(|cx| {
             Vinyl::new(
                 playback.clone(),
@@ -86,15 +70,12 @@ impl PlayerBar {
                 cx,
             )
         });
-        // 播放栏要重绘的状态（模式、音质、播放态）都是「结构性变化」，
-        // 订阅 SnapshotChanged 一个变体即可；100ms 的位置推进不在这里处理。
-        // 计数由 SongCounts store 自己跟着播放状态加载，这里不碰异步。
+        // 进度推进由进度条处理，不重绘整条播放栏。
         let playback_subscription = cx.subscribe(&playback, move |_, _, event, cx| {
             if matches!(event, PlaybackEvent::SnapshotChanged) {
                 cx.notify();
             }
         });
-        // 计数回来时重绘互动区；store 内部处理切歌丢弃。
         let counts_subscription = cx.observe(&song_counts, |_, _, cx| cx.notify());
         let mut progress_expanded = progress_bar.read(cx).expanded();
         let progress_subscription = cx.observe(&progress_bar, move |_, progress, cx| {
@@ -104,9 +85,7 @@ impl PlayerBar {
                 cx.notify();
             }
         });
-        // 喜欢状态由音乐库维护：歌单页点亮红心后，播放栏也要跟着重绘。
         let library_subscription = cx.observe(&library, |_, _, cx| cx.notify());
-        // 展开状态与共享渐变底都由 NowPlaying 广播；播放栏只负责跟着重绘。
         let now_playing_subscription = cx.subscribe(&now_playing, |_, _, _, cx| cx.notify());
         Self {
             playback,
@@ -133,9 +112,7 @@ impl PlayerBar {
         self.mini_vinyl.clone().into_any_element()
     }
 
-    /// 离开事件只清除自己：图标和计数是两块相邻的 hitbox，鼠标从图标移到数字上时，
-    /// 「离开图标」和「进入数字」谁先到并不确定；一律清除会让后到的进入事件失效，
-    /// 于是颜色闪一下就没了。只清除与当前键相同的状态就没有这个问题。
+    /// 离开事件只清除自己，避免乱序回调清掉相邻命中区的 hover。
     fn set_interaction_hover(
         &mut self,
         key: (&'static str, usize),
@@ -155,27 +132,28 @@ impl PlayerBar {
         }
     }
 
-    /// 左下角互动图标 + 右上角计数，两者同色。
-    ///
-    /// 图标和计数是两块独立的 hitbox，而且计数常常比 28px 的格子宽、会伸出格子，
-    /// 没法用一个 `group` 的形状同时罩住它们。所以改用 view 里的悬停状态把两者绑在一起：
-    /// 谁被悬停都算这块互动区被悬停，两边都按同一份状态取色。
-    ///
-    /// 点击行为由 `click` 决定：红心切喜欢、评论进评论页，都会先停传播，
-    /// 否则那一下会冒到栏根，顺手把整栏展开 / 收起。
     fn interaction_count(
         &self,
-        id: &'static str,
-        path: &'static str,
-        count: Option<u64>,
-        // 点击行为：红心取当时正在播放的那首歌，避免每帧克隆整首。
         click: InteractionClick,
-        color: Hsla,
-        hover_color: Hsla,
-        pressed_color: Hsla,
+        count: Option<u64>,
         colors: ColorTokens,
+        primary: Hsla,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let (id, path, liked) = match click {
+            InteractionClick::Like(liked) => ("player-like-button", like_icon_path(liked), liked),
+            InteractionClick::Comments => ("player-comment-button", "icons/comment.svg", false),
+        };
+        let (color, hover_color, pressed_color) = if liked {
+            let hover = primary.alpha(primary.a * 0.88);
+            (primary, hover, hover)
+        } else {
+            (
+                colors.muted_foreground,
+                icon_hover_color(colors.muted_foreground, colors),
+                colors.foreground,
+            )
+        };
         let hovered = self
             .hovered_interaction
             .is_some_and(|(interaction, _)| interaction == id);
@@ -191,27 +169,20 @@ impl PlayerBar {
             .on_hover(cx.listener(move |this, hovered, _, cx| {
                 this.set_interaction_hover((id, INTERACTION_AREA), *hovered, cx);
             }))
-            .when(click == InteractionClick::Like, |element| {
-                element.on_click(cx.listener(|this, _, _, cx| {
-                    cx.stop_propagation();
-                    let Some(song) = this.playback.read(cx).snapshot().current_song.clone() else {
-                        return;
-                    };
-                    this.library
-                        .update(cx, |library, cx| library.toggle_like(song, cx));
-                }))
-            })
-            .when(click == InteractionClick::Comments, |element| {
-                element.on_click(cx.listener(|this, _, _, cx| {
-                    cx.stop_propagation();
-                    let Some(song) = this.playback.read(cx).snapshot().current_song.clone() else {
-                        return;
-                    };
-                    // UI 入口发 typed event（消息层）； MainWindow 经导航总线订阅后导航。
-                    // 不走 action：那是输入层（键位 / 原生菜单）的通道。
-                    NavigationBus::emit(cx, Navigate::SongComments(song));
-                }))
-            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                let Some(song) = this.playback.read(cx).snapshot().current_song.clone() else {
+                    return;
+                };
+                match click {
+                    InteractionClick::Like(_) => this
+                        .library
+                        .update(cx, |library, cx| library.toggle_like(song, cx)),
+                    InteractionClick::Comments => {
+                        NavigationBus::emit(cx, Navigate::SongComments(song));
+                    }
+                }
+            }))
             .child(
                 div().absolute().left_0().bottom_0().child(
                     svg()
@@ -248,289 +219,6 @@ impl PlayerBar {
                 )
             })
             .into_any_element()
-    }
-
-    fn quality_popover(
-        &self,
-        selected_quality: AudioQualityLevel,
-        quality_label: &'static str,
-        colors: ColorTokens,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        // 触发按钮：点自己开/关。守卫比较的是**本次渲染时**的开合值——
-        // "点外面"的捕获监听可能已经先把状态关掉了，那时不能再翻回去。
-        // 末尾的 `stop_propagation` 还兼一件事：按下不冒到栏根，
-        // 点音质按钮不会顺手把歌词页收起来。
-        let was_open = self.quality_open;
-        let trigger = Button::new("player-quality-button")
-            .aria_label("音质选项")
-            .h(px(16.))
-            .px(px(2.))
-            .flex_none()
-            .border_1()
-            .border_color(colors.muted_foreground)
-            .rounded(px(4.))
-            .text_size(px(10.))
-            .text_color(colors.muted_foreground)
-            .hover(|style| {
-                let hover = icon_hover_color(colors.muted_foreground, colors);
-                style.text_color(hover).border_color(hover)
-            })
-            .child(quality_label)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    if this.quality_open == was_open {
-                        this.set_quality_popover(!was_open, cx);
-                    }
-                    cx.stop_propagation();
-                }),
-            );
-
-        // 歌词页上播放栏会过渡到暗色板：弹层换一套专为暗底设计的近黑面板，
-        // 靠亮度差 + 白系描边与背景分层（墨色阴影在深背景上不可见）；
-        // 浅色页面维持白面板 + 墨色阴影。两种面板共用同一份列表结构。
-        let dark = colors.background.l < 0.5;
-        let title_color = if dark {
-            white().alpha(0.92)
-        } else {
-            colors.secondary_foreground
-        };
-        let detail_color = if dark {
-            white().alpha(0.45)
-        } else {
-            colors.muted_foreground.alpha(0.4)
-        };
-        let hover_bg = if dark {
-            white().alpha(0.07)
-        } else {
-            colors.muted
-        };
-
-        // 品质标记：环绕/母带用金色线性图标，VIP 等级红系，普通档灰系。
-        #[derive(Clone, Copy)]
-        enum QualityMark {
-            Gold(&'static str),
-            Red(&'static str),
-            Neutral(&'static str),
-        }
-        let mark = move |kind: QualityMark| -> Div {
-            let (bg, fg) = match kind {
-                QualityMark::Gold(_) => (
-                    if dark {
-                        Hsla::from(rgb(0xe8bd77)).alpha(0.16)
-                    } else {
-                        Hsla::from(rgb(0xf7edd6))
-                    },
-                    if dark {
-                        Hsla::from(rgb(0xe8bd77))
-                    } else {
-                        Hsla::from(rgb(0xd9a648))
-                    },
-                ),
-                QualityMark::Red(_) => (
-                    if dark {
-                        Hsla::from(rgb(0xc97f71)).alpha(0.18)
-                    } else {
-                        Hsla::from(rgb(0xfdf0ed))
-                    },
-                    if dark {
-                        Hsla::from(rgb(0xe59d93))
-                    } else {
-                        Hsla::from(rgb(0xc97f71))
-                    },
-                ),
-                QualityMark::Neutral(_) => (
-                    if dark {
-                        white().alpha(0.1)
-                    } else {
-                        colors.muted
-                    },
-                    if dark {
-                        white().alpha(0.6)
-                    } else {
-                        colors.muted_foreground
-                    },
-                ),
-            };
-            let inner: AnyElement = match kind {
-                QualityMark::Gold(icon) => svg()
-                    .path(icon)
-                    .size(px(18.))
-                    .text_color(fg)
-                    .into_any_element(),
-                QualityMark::Red(text) | QualityMark::Neutral(text) => {
-                    div().text_size(px(11.)).child(text).into_any_element()
-                }
-            };
-            div()
-                .size(px(32.))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .bg(bg)
-                .text_color(fg)
-                .child(inner)
-        };
-
-        let entries = [
-            (
-                AudioQualityLevel::Sky,
-                "沉浸环绕声",
-                "环绕音感 最高5.1声道",
-                QualityMark::Gold("icons/音质选项/immersive_audio.svg"),
-                "icons/VIP/svip.svg",
-            ),
-            (
-                AudioQualityLevel::JyMaster,
-                "超清母带",
-                "极致细节 192kHz/24bit",
-                QualityMark::Gold("icons/音质选项/master_audio.svg"),
-                "icons/VIP/svip.svg",
-            ),
-            (
-                AudioQualityLevel::JyEffect,
-                "高清臻音 (Spatial Audio)",
-                "高频细节还原与清晰沉浸感，96kHz/24bit",
-                QualityMark::Red("臻"),
-                "icons/VIP/vip.svg",
-            ),
-            (
-                AudioQualityLevel::HiRes,
-                "高解析度无损 (Hi-Res)",
-                "更饱满清晰的高解析度音质，最高192kHz/24bit",
-                QualityMark::Red("H"),
-                "icons/VIP/vip.svg",
-            ),
-            (
-                AudioQualityLevel::Lossless,
-                "无损 (SQ)",
-                "高保真无损音质，最高48kHz/16bit",
-                QualityMark::Red("SQ"),
-                "icons/VIP/vip.svg",
-            ),
-            (
-                AudioQualityLevel::ExHigh,
-                "极高 (HQ)",
-                "近 CD 音质的细节体验，最高 320kbps",
-                QualityMark::Neutral("HQ"),
-                "",
-            ),
-            (
-                AudioQualityLevel::Standard,
-                "标准",
-                "128kbps",
-                QualityMark::Neutral("标"),
-                "",
-            ),
-        ];
-
-        SurfacePopover::new("player-quality-popover", was_open, trigger)
-            .anchor(Anchor::BottomCenter)
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                this.set_quality_popover(false, cx);
-            }))
-            .w(px(340.))
-            .flex()
-            .flex_col()
-            .pb(px(8.))
-            .when(dark, |panel| {
-                panel
-                    .bg(hsla(0., 0., 0.12, 1.))
-                    .border_1()
-                    .border_color(white().alpha(0.08))
-            })
-            .text_color(title_color)
-            .child(
-                div()
-                    .px(px(16.))
-                    .pt(px(12.))
-                    .pb(px(8.))
-                    .text_size(px(16.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("当前歌曲音质"),
-            )
-            .children(
-                entries
-                    .into_iter()
-                    .map(|(quality, title, detail, mark_kind, badge)| {
-                        let selected = selected_quality == quality;
-                        div()
-                            .id((
-                                match quality {
-                                    AudioQualityLevel::Sky => "quality-sky",
-                                    AudioQualityLevel::JyMaster => "quality-master",
-                                    AudioQualityLevel::JyEffect => "quality-jyeffect",
-                                    AudioQualityLevel::HiRes => "quality-hires",
-                                    AudioQualityLevel::Lossless => "quality-lossless",
-                                    AudioQualityLevel::ExHigh => "quality-exhigh",
-                                    _ => "quality-standard",
-                                },
-                                0usize,
-                            ))
-                            .h(px(52.))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .gap(px(10.))
-                            .mx(px(8.))
-                            .px(px(6.))
-                            .rounded(px(8.))
-                            .hover(|style| style.bg(hover_bg))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.playback
-                                    .update(cx, |playback, cx| playback.set_quality(quality, cx));
-                            }))
-                            .child(mark(mark_kind))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.))
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(3.))
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(6.))
-                                            .text_size(px(14.))
-                                            .line_height(px(16.))
-                                            .child(title)
-                                            .when(!badge.is_empty(), |line| {
-                                                line.child(
-                                                    img(badge).w_auto().h(px(13.5)).flex_none(),
-                                                )
-                                            }),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(11.))
-                                            .line_height(px(14.))
-                                            .text_color(detail_color)
-                                            .child(detail),
-                                    ),
-                            )
-                            .when(selected, |line| {
-                                line.child(
-                                    img("icons/音质选项/quality_selected.svg")
-                                        .size(px(24.))
-                                        .flex_none(),
-                                )
-                            })
-                    }),
-            )
-    }
-
-    /// 打开 / 关闭音质弹层。
-    fn set_quality_popover(&mut self, open: bool, cx: &mut Context<Self>) {
-        if self.quality_open == open {
-            return;
-        }
-        self.quality_open = open;
-        cx.notify();
     }
 }
 
@@ -576,8 +264,6 @@ fn hover_icon(
 impl Render for PlayerBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme_colors = Theme::global(cx).tokens.colors;
-        // 展开状态和共享渐变底都来自 NowPlaying：播放栏只读，不再自持镜像。
-        // `Entity::read` 会借住 `cx`，所以放在一个 block 里一次取完再往下走。
         let (album_expanded, album_backdrop) = {
             let now_playing = self.now_playing.read(cx);
             (now_playing.is_expanded(), now_playing.backdrop())
@@ -640,13 +326,10 @@ impl Render for PlayerBar {
                     )
                 })
         };
-        // 红心跟随这首歌真实的喜欢状态，而不是固定实心。
         let liked =
             song_id.is_some_and(|song_id| self.library.read(cx).liked_song_ids.contains(&song_id));
-        // 互动计数现读 store：加载、切歌丢弃过期结果都在 SongCounts 里。
         let counts = self.song_counts.read(cx).counts();
         let snapshot = self.playback.read(cx).snapshot();
-        // 播放模式的图标和按下后的目标都由控制器给出，这里只负责显示。
         let mode = snapshot.mode;
         let selected_quality = snapshot.quality;
         // 优先显示实际拿到的音质，降级时不会谎报。
@@ -664,18 +347,8 @@ impl Render for PlayerBar {
             .size(play_pause_icon_size)
             .text_color(colors.primary_foreground)
             .into_any_element();
-        // 触发按钮的按下/松开职责：capture 阶段申请抑制（见 SidePanel），
-        // click 再决定开合或原地换内容；不再需要渲染时快照守卫。
-
         div()
-            // 整条栏是一个点击区：收起态点任意空白处展开歌词页，展开态再点收起，
-            // 统一 toggle 单一状态源（和页头的收起按钮殊途同归）。
-            //
-            // 冒泡规则：自带行为的部件在各自处理器里 `stop_propagation`
-            // （播放控制、红心、音量、进度条、两个浮层和队列面板），
-            // 所以那些控件上的点击不会走到这里；冒到这里的就是"点了栏本身"。
-            // 反过来，评论数、更多这些还没接行为的图标暂时就归到这里管，
-            // 等它们接上自己的动作时，再在各自处理器里补一句停传播。
+            // 控件自行停止冒泡，空白区域的点击才会开合歌词页。
             .id("player-bar")
             .on_click(cx.listener(|this, _, _, cx| {
                 this.now_playing
@@ -787,37 +460,17 @@ impl Render for PlayerBar {
                             )
                             // 已喜欢 hover 淡一档的红；未喜欢和评论按背景亮度轻微提亮。
                             .child(self.interaction_count(
-                                "player-like-button",
-                                like_icon_path(liked),
+                                InteractionClick::Like(liked),
                                 counts[0],
-                                InteractionClick::Like,
-                                if liked {
-                                    theme_colors.primary
-                                } else {
-                                    colors.muted_foreground
-                                },
-                                if liked {
-                                    theme_colors.primary.alpha(theme_colors.primary.a * 0.88)
-                                } else {
-                                    icon_hover_color(colors.muted_foreground, colors)
-                                },
-                                if liked {
-                                    theme_colors.primary.alpha(theme_colors.primary.a * 0.88)
-                                } else {
-                                    colors.foreground
-                                },
                                 colors,
+                                theme_colors.primary,
                                 cx,
                             ))
                             .child(self.interaction_count(
-                                "player-comment-button",
-                                "icons/comment.svg",
-                                counts[1],
                                 InteractionClick::Comments,
-                                colors.muted_foreground,
-                                icon_hover_color(colors.muted_foreground, colors),
-                                colors.foreground,
+                                counts[1],
                                 colors,
+                                theme_colors.primary,
                                 cx,
                             )),
                     )

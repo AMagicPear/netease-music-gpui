@@ -1,79 +1,25 @@
-//! 虚拟滚动表格引擎，外加音乐列表页共用的「表格长相」和行内零件。
-//!
-//! 歌单详情页和搜索结果页是两个各自独立的页面：列定义、排序、行内交互都不一样，
-//! 但表头、行高、列间距、hover 效果这些必须是同一套，否则摆在一起不像同一种表格。
-//! 公共部分集中在这里，而不是让搜索页去 `use` 歌单页里的东西——
-//! 那等于把「搜索页需要什么」写进歌单页，两个页面从此再也拆不开。
-//!
-//! 下面分三段：尺寸常量与列模型、表格引擎、公共零件。
+//! 跟随祖先滚动容器的固定行高表格，业务页面提供列、单元格和行事件。
 
 use std::{ops::Range, rc::Rc};
 
-use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_kit::base::{Button, ColorTokens, Theme};
-
-use crate::models::Song;
-use crate::ui::assets::track_cover_url;
-use crate::ui::components::{empty_state, format_duration};
-use crate::ui::theme::{PRESSED_ICON_ALPHA, PRESSED_OPACITY};
-
-// ---------------------------------------------------------------------------
-// 1. 尺寸常量与列模型
-// ---------------------------------------------------------------------------
+use gpui_kit::base::Theme;
 
 const OVERSCAN_ROWS: usize = 4;
 
-/// 固定行高。虚拟滚动靠它把行下标换算成 y 坐标，所以行高不能按内容变。
-///
-/// 导出是因为调用方偶尔要让某个单元格撑满整行 —— 比如让标题格的点击区盖住
-/// 行内上下留白，而不是只有文字那么高。
+/// 虚拟布局按固定行高换算下标与坐标。
 pub const ROW_HEIGHT: Pixels = px(56.);
-/// 表头行高。调用者要在表头上叠东西（比如可拖动的分界线）时，用同一个值对齐。
 pub const HEADER_HEIGHT: Pixels = px(40.);
-/// 行与表头的文字字号。
 pub const ROW_TEXT_SIZE: Pixels = px(13.);
-/// 列与列之间的间距。表头与每一行用同一个值，列的边界才对得齐。
 pub const COLUMN_GAP: Pixels = px(6.);
-/// 相邻内容仍相隔 20px：两侧 padding 加上 6px 列间距。
 pub const CELL_PADDING: Pixels = px(7.);
 
-/// 内容区左右留白。它同时是行 hover 投影的横向余量：投影拖尾有 3σ = 36px，
-/// 而 padding 属于裁剪框内部，所以留白必须加在**滚动容器自己**身上，
-/// 留在父级的话投影会被滚动容器的边界切出硬边。
+/// 留白必须加在滚动容器内部，避免裁掉行 hover 的 36px 阴影拖尾。
 pub const PAGE_SIDE_PADDING: Pixels = px(40.);
 
-/// 次要文字统一用常规字重：副标题、专辑名、时长、计数都靠灰度而不是粗细退让。
-pub const SECONDARY_FONT_WEIGHT: FontWeight = FontWeight::NORMAL;
-
-/// 列表上方那排按钮的尺寸，高度和内边距成对使用；那一行按高度对齐，
-/// 按钮时有时无时行高才不会塌陷。
-pub const ACTION_BUTTON_HEIGHT: Pixels = px(36.);
-pub const ACTION_BUTTON_PADDING: Pixels = px(12.);
-
-/// 「喜欢」列的固定宽度。
-pub const LIKE_COLUMN_WIDTH: Pixels = px(42.);
-/// 「时长」列的固定宽度。
-pub const DURATION_COLUMN_WIDTH: Pixels = px(66.);
-
-/// Dolphin 里最宽的数字是 600/1000 em。
-const DOLPHIN_WIDEST_DIGIT_EM: f32 = 0.6;
-
-/// 序号列宽。表头和虚拟行各自独立布局，必须共用同一个函数，否则列边界错开。
-/// 取「放得下最长序号」和「放得下播放键」两者的较大值。
-pub fn index_column_width(row_count: usize) -> Pixels {
-    // 末行渲染的是 `format!("{:02}", row_count)`，它就是最长的那个序号。
-    let digits = format!("{:02}", row_count).chars().count() as f32;
-    let width = digits * DOLPHIN_WIDEST_DIGIT_EM * f32::from(ROW_TEXT_SIZE);
-    // 向上取整：小数宽度按设备像素取整后可能差一丁点，而这点差距就够让数字折行。
-    px(width.ceil().max(20.))
-}
-
-/// hover 投影的 Y 偏移（正数向下）、模糊半径与颜色透明度（颜色取主题墨色，见行 hover 处）。
 const ROW_HOVER_SHADOW_OFFSET_Y: Pixels = px(2.);
 const ROW_HOVER_SHADOW_BLUR: Pixels = px(12.);
-/// 柔光拖尾按几个 sigma 算：GPUI 的投影顶点着色器（`vs_shadow`）恰好把网格外扩 3σ，
-/// 片元里高斯又直接取 `sigma = blur_radius`，所以 3σ 就是能画到的最远处，且那里已经淡到看不见。
+/// GPUI 的投影顶点向外扩展 3σ。
 const ROW_HOVER_SHADOW_TAIL_SIGMAS: f32 = 3.;
 
 /// Some 是固定宽度；None 按 weight 分配剩余宽度。表头与行共用列定义。
@@ -81,8 +27,7 @@ pub struct TableColumn {
     pub title: SharedString,
     pub width: Option<Pixels>,
     pub weight: f32,
-    /// 表头的水平对齐。单元格内容由调用者自己构建，组件替它对齐不了，所以这里描述的
-    /// 其实是「这一列按什么方式对齐」；调用者应让单元格内容用同样的对齐，两边才对得上。
+    /// 表头对齐方式，调用方的单元格应采用相同对齐。
     pub align: TextAlign,
 }
 
@@ -101,7 +46,6 @@ impl TableColumn {
         self
     }
 
-    /// 表头靠右对齐，配套右对齐的数字类列使用。
     pub fn align_right(mut self) -> Self {
         self.align = TextAlign::Right;
         self
@@ -109,8 +53,7 @@ impl TableColumn {
 }
 
 fn cell(column: &TableColumn, content: AnyElement, padded: bool) -> Div {
-    // `min_w(0)` 是给 `truncate()` 让路的：flex 项默认最小宽度等于内容宽度，
-    // 不压到 0 的话列会被文字撑宽，而不是把文字截断成省略号。
+    // 允许 flex 项收缩，长文本才能截断。
     let cell = div()
         .min_w(px(0.))
         .overflow_hidden()
@@ -125,7 +68,6 @@ fn cell(column: &TableColumn, content: AnyElement, padded: bool) -> Div {
     }
 }
 
-/// 表头与数据行共用的骨架：撑满宽度、横向排列、列间距与字号一致，再按列宽把单元格摆好。
 fn table_row(
     columns: &[TableColumn],
     cells: impl IntoIterator<Item = AnyElement>,
@@ -147,29 +89,18 @@ fn table_row(
 
 /// 给阴影留出空间；GPUI 仍会与祖先裁剪框取交集。
 fn rows_clip(bounds: Bounds<Pixels>) -> ContentMask<Pixels> {
-    // 四边都要盖住 3σ 的拖尾，否则尾巴还剩百分之一点几的可见度时就被切断，边缘会留一道硬边。
-    // 调用这份代码的滚动容器要在水平方向留足 `PAGE_SIDE_PADDING`（40px > 36px），
-    // 并且那笔留白要是它的 padding —— 见 `PAGE_SIDE_PADDING` 的说明。
     let tail = ROW_HOVER_SHADOW_BLUR * ROW_HOVER_SHADOW_TAIL_SIGMAS;
     ContentMask {
         bounds: bounds.extend(Edges {
             left: tail,
             right: tail,
-            // 投影整体下移了 offset_y，所以上边可以少留、下边要多留，合起来仍是两个 tail。
             top: tail - ROW_HOVER_SHADOW_OFFSET_Y,
             bottom: tail + ROW_HOVER_SHADOW_OFFSET_Y,
         }),
     }
 }
 
-// ---------------------------------------------------------------------------
-// 2. 表格引擎
-// ---------------------------------------------------------------------------
-
-/// 跟随祖先滚动的固定行高表格。回调仅为可见范围及上下各四行缓冲创建单元格。
-///
-/// 祖先滚动容器由调用方提供，可以是整页滚动，也可以只包住表格区域 ——
-/// 本组件在 `prepaint` 里读当前裁剪框算出可见行，所以对滚动层级的位置没有要求。
+/// 只创建可见范围及上下缓冲行，滚动容器由调用方提供。
 #[expect(
     clippy::too_many_arguments,
     reason = "各回调职责独立，保留显式参数，避免为一个调用方引入配置层"
@@ -184,13 +115,10 @@ pub fn virtual_table<V: Render>(
     render_header: impl 'static + Fn(&TableColumn, usize) -> AnyElement,
     on_header_layout: impl 'static + Fn(Vec<Bounds<Pixels>>),
     on_row_hover: impl 'static + Fn(&mut V, u64, bool, &mut Context<V>),
-    // 行上右键（非左键的 click）时回调。只把行 key 和窗口坐标交回调用者：
-    // 组件不知道菜单是什么，由调用者决定在哪弹什么。
     on_row_aux_click: impl 'static + Fn(&mut V, u64, Point<Pixels>, &mut Window, &mut Context<V>),
     cx: &App,
 ) -> impl IntoElement {
     let colors = Theme::global(cx).tokens.colors;
-    // 每一行都要挂一份回调，所以包成 `Rc`：逐行 clone 的是引用，不是闭包本体。
     let on_row_hover = Rc::new(on_row_hover);
     let on_row_aux_click = Rc::new(on_row_aux_click);
     let header = table_row(
@@ -226,24 +154,19 @@ pub fn virtual_table<V: Render>(
                     .id(("row", key))
                     .h(ROW_HEIGHT)
                     .text_color(colors.foreground)
-                    // 悬浮状态交给调用者：`.hover()` 只能改这一层的样式，变不了子元素结构
-                    // （比如把序号换成播放键、在标题右侧长出操作图标）。
+                    // 结构变化由页面处理，hover 样式只能改变当前元素。
                     .on_hover({
                         let on_row_hover = on_row_hover.clone();
                         cx.listener(move |view, hovered: &bool, _, cx| {
                             on_row_hover(view, key, *hovered, cx);
                         })
                     })
-                    // 右键挂在整行上而不是某个图标上，行内任何位置都能唤出菜单。
-                    // 用 `on_aux_click`（非左键的 click），和行内「更多」按钮的 `on_click`
-                    // 是同一套按下-抬起判定，只是按键不同。
                     .on_aux_click({
                         let on_row_aux_click = on_row_aux_click.clone();
                         cx.listener(move |view, event: &ClickEvent, window, cx| {
                             on_row_aux_click(view, key, event.position(), window, cx);
                         })
                     })
-                    // hover 不是「把底色压深」，而是把整行托起来：底色换成项目的表面色
                     .hover(|style| {
                         style.bg(colors.surface).rounded(px(12.)).shadow(vec![
                             BoxShadow::new(
@@ -275,7 +198,6 @@ impl IntoElement for VirtualRows {
     }
 }
 
-/// 算出需要渲染的行区间，上下各多带 `OVERSCAN_ROWS` 行缓冲。
 fn visible_rows(count: usize, top: f32, bottom: f32) -> Range<usize> {
     let height = f32::from(ROW_HEIGHT);
     if count == 0 || bottom <= 0. || top >= count as f32 * height || bottom <= top {
@@ -323,8 +245,7 @@ impl Element for VirtualRows {
         window: &mut Window,
         cx: &mut App,
     ) -> Vec<AnyElement> {
-        // 外层 overflow 滚动容器在 prepaint 时已经设置了裁剪区域和滚动后的坐标。
-        // 因此不用复制滚动偏移，也不用在 render 阶段猜测顶部区域的高度。
+        // prepaint 时祖先已提交裁剪框和滚动后的坐标。
         let viewport = window.content_mask().bounds;
         if bounds.right() <= viewport.left() || bounds.left() >= viewport.right() {
             return Vec::new();
@@ -334,7 +255,6 @@ impl Element for VirtualRows {
             f32::from(viewport.top() - bounds.top()),
             f32::from(viewport.bottom() - bounds.top()),
         );
-        // 裁剪框比行盒子外扩一圈（见 `rows_clip`），好让 hover 投影的柔光画到行外面去。
         window.with_content_mask(Some(rows_clip(bounds)), |window| {
             range
                 .map(|index| {
@@ -368,7 +288,6 @@ impl Element for VirtualRows {
         window: &mut Window,
         cx: &mut App,
     ) {
-        // 同 prepaint，用同一个裁剪框：两处必须一致，否则预排版和绘制会对不上。
         window.with_content_mask(Some(rows_clip(bounds)), |window| {
             for row in rows {
                 row.paint(window, cx);
@@ -377,427 +296,9 @@ impl Element for VirtualRows {
     }
 }
 
-// ---------------------------------------------------------------------------
-// 3. 公共零件
-// ---------------------------------------------------------------------------
-
-/// 「当前 hover 在哪一行」的状态转移规则。两个列表页都只有这一个状态。
-///
-/// 离开事件只允许清掉「自己」那一行：鼠标从 A 移到 B 时事件可能「B 进入」后才
-/// 「A 离开」，无脑写成 `hovered.then_some(id)` 会把已经点亮的新行清掉，
-/// 表现就是序号变播放键时有时无。
-pub fn hovered_row_after(current: Option<u64>, id: u64, hovered: bool) -> Option<u64> {
-    if hovered {
-        Some(id)
-    } else if current == Some(id) {
-        None
-    } else {
-        current
-    }
-}
-
-/// 一首歌在列表行里要显示的内容。构造一次、行内多次复用，避免每帧重算。
-pub struct SongDisplay {
-    pub cover: Option<ImageSource>,
-    pub title: SharedString,
-    pub subtitle: std::ops::Range<usize>,
-    pub album: SharedString,
-    pub duration: SharedString,
-}
-
-impl SongDisplay {
-    pub fn new(song: &Song) -> Self {
-        let mut title = song.name.clone();
-        let start = title.len();
-        if let Some(subtitle) = song.tns.first().or_else(|| song.alia.first()) {
-            title.push_str(&format!("（{subtitle}）"));
-        }
-        let end = title.len();
-        Self {
-            cover: Some(track_cover_url(song.al.pic_url.as_deref(), 72).into()),
-            title: title.into(),
-            subtitle: start..end,
-            album: song
-                .al
-                .name
-                .as_deref()
-                .filter(|name| !name.trim().is_empty())
-                .unwrap_or("未知专辑")
-                .to_owned()
-                .into(),
-            duration: format_duration(song.duration()).into(),
-        }
-    }
-}
-
-/// 副标题自身的样子：灰字 + 细字重。
-///
-/// highlight 先 blend 再 fade_out：先替换 RGB，再恢复 alpha。所以播放中的红色标题
-/// 不会污染副标题，也无需预合成颜色。
-fn subtitle_style(colors: ColorTokens) -> HighlightStyle {
-    let subtitle_color = colors.muted_foreground;
-    HighlightStyle {
-        color: Some(subtitle_color.alpha(1.)),
-        font_weight: Some(SECONDARY_FONT_WEIGHT),
-        fade_out: Some(1. - subtitle_color.a),
-        ..Default::default()
-    }
-}
-
-/// 把标题切成「有序、不重叠、样式已调和好」的区间列表。
-///
-/// 命中区间和副标题区间会重叠，而 `combine_highlights` 的 `color` 语义是
-/// **blend 不是覆盖**（且重叠样式的遍历顺序不确定），两个都带 `color` 的样式
-/// 叠出来是个随机的中间色。所以这里把副标题区间按命中切开：命中段用命中色，
-/// 其余段保持灰字。
-///
-/// 单独抽出来是因为 `StyledText` 的 highlights 是只写字段（`with_highlights` 之后
-/// 读不回来），不抽出来就没法直接测切分结果。
-fn title_segments(
-    title: &str,
-    subtitle: &std::ops::Range<usize>,
-    keyword: &str,
-    colors: ColorTokens,
-) -> Vec<(std::ops::Range<usize>, HighlightStyle)> {
-    let subtitle_style = subtitle_style(colors);
-    let hit_style = super::match_highlight();
-
-    let mut segments: Vec<(std::ops::Range<usize>, HighlightStyle)> = Vec::new();
-    // `cursor` 标记副标题里还没归置到的位置，命中之间空出来的部分补回副标题样式。
-    // 副标题永远是标题的结尾（`SongDisplay` 就这么拼的），所以命中不会整段落在它之后。
-    let mut cursor = subtitle.start;
-    for range in super::keyword_ranges(title, keyword) {
-        if range.end <= subtitle.start {
-            // 完全在歌名里，直接命中色。
-            segments.push((range, hit_style));
-            continue;
-        }
-        let from = range.start.max(subtitle.start);
-        let to = range.end.min(subtitle.end);
-        // 命中跨过歌名/副标题边界时，歌名侧那一截也要标上，
-        // 否则 `keyword_ranges` 给的整段区间被截断后就静默丢了。
-        if range.start < subtitle.start {
-            segments.push((range.start..subtitle.start, hit_style));
-        }
-        if cursor < from {
-            segments.push((cursor..from, subtitle_style));
-        }
-        segments.push((from..to, hit_style));
-        cursor = to;
-    }
-    if cursor < subtitle.end {
-        segments.push((cursor..subtitle.end, subtitle_style));
-    }
-    segments.sort_by_key(|(range, _)| range.start);
-    segments
-}
-
-/// 使用同一段 StyledText，标题和副标题一起截断；颜色随当前主题计算。
-/// `keyword` 非空时标出命中片段（搜索结果里传真实关键词，其余地方传空串）。
-pub fn title_with_subtitle(
-    display: &SongDisplay,
-    keyword: &str,
-    colors: ColorTokens,
-) -> StyledText {
-    let text = StyledText::new(display.title.clone());
-    let segments = title_segments(&display.title, &display.subtitle, keyword, colors);
-    if segments.is_empty() {
-        text
-    } else {
-        text.with_highlights(segments)
-    }
-}
-
-/// 行内可点元素统一挂这个：拦下这次左键按下，不让它冒到整行。
-///
-/// 表格行为了右键菜单装了 aux-click 监听，行的「点击判定」因此会在按下时记下
-/// `pending_mouse_down`；而 gpui 的 `on_hover` 在按下期间一律报 false
-/// （见 `Interactivity` 的 hover listener：`has_mouse_down` 非空就不报 hover）。
-/// 于是按住一个图标稍稍移动，行 hover 就丢了，只在 hover 时渲染的图标当场消失。
-/// 图标自己先停传播，整行就不会记下这次按下；单击照旧，因为点击判定用的是
-/// 元素自己那份按下状态，它在同元素上比这层监听先执行。
-pub trait KeepRowHover: Sized {
-    fn keep_row_hover(self) -> Self;
-}
-
-impl<E: InteractiveElement + Sized> KeepRowHover for E {
-    fn keep_row_hover(self) -> Self {
-        self.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-    }
-}
-
-/// 行 hover 时才出现的图标：序号位置的播放键、标题右侧那排操作按钮，共用这一套样式。
-pub fn row_hover_icon(
-    id: (&'static str, u64),
-    path: &'static str,
-    label: &'static str,
-    size: Pixels,
-    colors: ColorTokens,
-) -> AnyElement {
-    svg()
-        .path(path)
-        .size(size)
-        .flex_none()
-        .text_color(colors.foreground.alpha(0.6))
-        .hover(|style| style.text_color(colors.foreground))
-        .id(id)
-        .role(Role::Button)
-        .aria_label(label)
-        // active 属于 StatefulInteractiveElement，必须跟在 `.id()` 之后（此时是 Stateful<Svg>）。
-        .active(|style| style.text_color(colors.foreground.alpha(PRESSED_ICON_ALPHA)))
-        .into_any_element()
-}
-
-/// 播放量：十万以下照写，十万起折算成万，万位满四位不再带小数。
-pub fn play_count_label(count: u64) -> String {
-    const WAN: u64 = 10_000;
-    if count < 10 * WAN {
-        return count.to_string();
-    }
-    let wan = count / WAN;
-    // 十分位截断而不是四舍五入：812568 是 81.2万，不是 81.3万。
-    let tenth = count % WAN / 1_000;
-    if wan >= 1_000 || tenth == 0 {
-        format!("{wan}万")
-    } else {
-        format!("{wan}.{tenth}万")
-    }
-}
-
-/// 「播放全部」：主题红实心按钮，白字白图标，无边框。
-pub fn play_all_button(colors: ColorTokens, compact: bool) -> Button {
-    Button::new(if compact {
-        "playlist-floating-play"
-    } else {
-        "playlist-play-all-button"
-    })
-    .h(ACTION_BUTTON_HEIGHT)
-    .flex_none()
-    .flex()
-    .items_center()
-    .justify_center()
-    .gap(px(4.))
-    // 宽度交给内容：图标 + 文字 + 左右内边距
-    .px(ACTION_BUTTON_PADDING)
-    .when(compact, |button| button.w(ACTION_BUTTON_HEIGHT).px(px(0.)))
-    .rounded_lg()
-    .bg(colors.primary)
-    // hover 只改颜色（向背景靠一档），按下统一降整体透明度
-    .hover(|style| style.bg(colors.primary.alpha(0.88)))
-    .active(|style| style.opacity(PRESSED_OPACITY))
-    .text_size(px(13.))
-    .text_color(colors.primary_foreground)
-    .child(
-        svg()
-            .path("icons/play.svg")
-            .size(px(18.))
-            .flex_none()
-            .text_color(colors.primary_foreground),
-    )
-    .aria_label("播放全部")
-    .when(!compact, |button| button.child("播放全部"))
-}
-
-/// 空状态在列表区水平居中，顶部对齐（不另加边距）。
-pub fn centered_empty(image: &'static str, tip: &str, colors: ColorTokens) -> impl IntoElement {
-    div()
-        .w_full()
-        .flex()
-        .justify_center()
-        .child(empty_state(image, tip, colors))
-}
-
 #[cfg(test)]
 mod tests {
-    use gpui::{HighlightStyle, Hsla, px, rgb};
-    use gpui_kit::base::ColorTokens;
-
-    use super::{
-        PAGE_SIDE_PADDING, ROW_HOVER_SHADOW_BLUR, ROW_HOVER_SHADOW_TAIL_SIGMAS, SongDisplay,
-        hovered_row_after, index_column_width, play_count_label, title_segments, visible_rows,
-    };
-    use crate::models::Song;
-    use crate::ui::components::keyword_ranges;
-    use crate::ui::theme::link_blue;
-
-    /// 命中区间直接喂给 `StyledText::with_highlights`，它要求有序、不重叠、
-    /// 端点在字符边界上；错位的后果是文本被整段替换，所以要逐条盯住偏移。
-    #[test]
-    fn keyword_ranges_point_at_original_offsets() {
-        // CJK：原文直接命中，偏移就是字节偏移（一个汉字 3 字节）。
-        assert_eq!(keyword_ranges("稻香", "稻"), vec![0..3]);
-        assert_eq!(keyword_ranges("稻香", "香"), vec![3..6]);
-        // 多次命中不重叠且有序："ababa"/"aba" 只报 0..3，不算 2..5（重叠段
-        // 会让 `compute_runs` 算出非法 run）。
-        assert_eq!(keyword_ranges("ababa", "aba"), vec![0..3]);
-        assert_eq!(keyword_ranges("哈哈哈", "哈"), vec![0..3, 3..6, 6..9]);
-        assert_eq!(keyword_ranges("aXbXc", "X"), vec![1..2, 3..4]);
-        // 前后缀混入时只截关键词本身，不能把整段都标上。
-        assert_eq!(keyword_ranges("Love Song", "ve S"), vec![2..6]);
-        // 空关键词 / 空文本不返回 0..0 这种空区间。
-        assert!(keyword_ranges("稻香", "").is_empty());
-        assert!(keyword_ranges("稻香", "   ").is_empty());
-        assert!(keyword_ranges("", "稻").is_empty());
-        assert!(keyword_ranges("稻香", "不存在").is_empty());
-    }
-
-    /// `combine_highlights` 里 `color: None` 的一侧用 `.or()` 让另一侧原样保留，
-    /// 与合并顺序无关 —— 这是它唯一能安全共存的样式组合。两个都带 `color` 时
-    /// 做的是 blend 且顺序不确定，没法写成断言，所以 `title_segments` 才要自己切区间。
-    /// 这里只钉住可确定的那一半行为（拆 run 而不丢区间）。
-    #[test]
-    fn combine_highlights_splits_runs_and_a_none_color_does_not_clobber() {
-        let no_color = HighlightStyle {
-            background_color: Some(Hsla {
-                a: 0.16,
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let gray = HighlightStyle {
-            color: Some(Hsla {
-                a: 0.4,
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-
-        // 完全重合：合成一段，两个字段都保住（`color: None` 的一侧不冲掉对方的颜色）。
-        let combined: Vec<_> =
-            gpui::combine_highlights([(0..3, no_color)], [(0..3, gray)]).collect();
-        assert_eq!(combined.len(), 1);
-        assert_eq!(combined[0].0, 0..3);
-        assert_eq!(combined[0].1.background_color, no_color.background_color);
-        assert_eq!(combined[0].1.color, gray.color);
-
-        // 反过来给（None 的一侧在第二个迭代器）结果相同：这一条与顺序无关。
-        let reversed: Vec<_> =
-            gpui::combine_highlights([(0..3, gray)], [(0..3, no_color)]).collect();
-        assert_eq!(reversed, combined);
-
-        // 部分重叠：拆成三段而不是丢掉中间那段。
-        let combined: Vec<_> =
-            gpui::combine_highlights([(1..4, no_color)], [(0..6, gray)]).collect();
-        assert_eq!(
-            combined.iter().map(|(r, _)| r.clone()).collect::<Vec<_>>(),
-            [0..1, 1..4, 4..6]
-        );
-        assert!(combined[1].1.background_color.is_some());
-        assert!(combined[0].1.background_color.is_none());
-        assert!(combined[2].1.background_color.is_none());
-    }
-
-    /// 大小写不敏感的那条路径要自己映射回原文偏移：小写化会改变字节长度，
-    /// 直接拿小写串的偏移会错位或切在非字符边界上。
-    #[test]
-    fn keyword_ranges_are_case_insensitive_but_stay_on_original_bytes() {
-        assert_eq!(keyword_ranges("Sunny Day", "sunny"), vec![0..5]);
-        assert_eq!(keyword_ranges("SUNNY DAY", "sunny"), vec![0..5]);
-        assert_eq!(keyword_ranges("Taylor Swift", "taylor"), vec![0..6]);
-        // 大小写混排：命中片段的字节宽度按**原文**算，不是按小写串算。
-        assert_eq!(keyword_ranges("ÄBC", "äbc"), vec![0..4]);
-        // `İ` 小写化成 `i̇` 是 2 字节 → 3 字节。区间要覆盖整个原文字符，
-        // 不能只取小写串的首字节变成 0..0。
-        assert_eq!(keyword_ranges("İstanbul", "i"), vec![0..2]);
-        // 端点必须落在字符边界上。
-        let text = "Ωİstanbul Straße";
-        for range in keyword_ranges(text, "i") {
-            assert!(text.is_char_boundary(range.start));
-            assert!(text.is_char_boundary(range.end));
-        }
-    }
-
-    /// 回归：「字节 → 原文偏移」映射表必须和 `lowered` 等长。之前 `origins` 按字符
-    /// push、下标却按字节查，非 ASCII 文本 + 大小写不一致的关键词时越界 panic
-    /// （全 ASCII 时 `len_utf8() == 1`，两张表恰好一样长，测不出来）。
-    #[test]
-    fn keyword_ranges_survive_multibyte_text_with_a_non_literal_keyword() {
-        // 「稻香（daoxiang）」：全角括号各 3 字节，搜 "DAO" 走小写化分支。
-        let title = "稻香（daoxiang）";
-        let ranges = keyword_ranges(title, "DAO");
-        assert_eq!(ranges, vec![9..12]);
-        assert!(title.is_char_boundary(ranges[0].start));
-        assert!(title.is_char_boundary(ranges[0].end));
-
-        // 再叠上小写化会变长的字符（`İ` 2 字节 → 3 字节），确认表长仍对得上：
-        // "İstanbul" 9 字节 + 全角左括号 3 字节 = 12，"live" 落在 12..16。
-        assert_eq!(keyword_ranges("İstanbul（live）", "LIVE"), vec![12..16]);
-        // 命中在多字节字符之后：下标要跨过前面的 3 字节括号，不能错位。
-        assert_eq!(keyword_ranges("（live）稻香", "LIVE"), vec![3..7]);
-        // 纯 ASCII + 大小写不一致（表长天然相等，作为对照）。
-        assert_eq!(keyword_ranges("Sunny Day", "DAY"), vec![6..9]);
-    }
-
-    /// 标题要输出「一组有序、不重叠、样式已调和好」的区间：副标题按命中切开，
-    /// 命中段是命中蓝、其余段是副标题的灰。区间算错时 `compute_runs` 会算出
-    /// 非法的 run，文字直接不显示。
-    #[test]
-    fn title_segments_split_the_subtitle_around_hits() {
-        let colors = ColorTokens {
-            foreground: rgb(0x283248).into(),
-            muted_foreground: Hsla {
-                a: 0.6,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        // 「稻香（daoxiang）」：稻/香 各 3 字节，全角括号各 3 字节。
-        // 歌名 0..6，副标题 6..20（结尾的「）」也是 3 字节）。
-        let display = SongDisplay::new(&song_with_subtitle("稻香", "daoxiang"));
-        let subtitle = display.subtitle.clone();
-        assert_eq!(&display.title, "稻香（daoxiang）");
-        assert_eq!(subtitle, 6..20);
-        let shape = |keyword: &str| {
-            title_segments(&display.title, &subtitle, keyword, colors)
-                .into_iter()
-                .map(|(range, style)| (range, style.color == Some(link_blue())))
-                .collect::<Vec<_>>()
-        };
-
-        // 命中落在副标题里：副标题被切成「灰 / 蓝 / 灰」三段。
-        // 「daoxiang」占 9..17，其中 "xiang" 是 12..17。
-        assert_eq!(
-            shape("xiang"),
-            vec![(6..12, false), (12..17, true), (17..20, false)]
-        );
-        // 命中在歌名里：歌名那一段蓝，副标题仍是一整段灰。
-        assert_eq!(shape("稻"), vec![(0..3, true), (6..20, false)]);
-        // 无命中：只剩副标题那一整段灰。
-        assert_eq!(shape(""), vec![(6..20, false)]);
-        // 跨副标题首尾（"香（"）：歌名尾部 3..6 和副标题头部 6..9 都算命中，
-        // 中间不留灰段，歌名侧那一截也不能丢。
-        assert_eq!(
-            shape("香（"),
-            vec![(3..6, true), (6..9, true), (9..20, false)]
-        );
-
-        // 不管哪种关键词，产出都必须有序、不重叠、且端点落在字符边界上。
-        for keyword in ["xiang", "稻", "", "g", "稻香", "dao", "a", "香", "（", "）"] {
-            let segments = shape(keyword);
-            for pair in segments.windows(2) {
-                assert!(
-                    pair[0].0.end <= pair[1].0.start,
-                    "区间重叠或乱序: {pair:?}（keyword={keyword:?}）"
-                );
-            }
-            for (range, _) in &segments {
-                assert!(display.title.is_char_boundary(range.start), "{keyword:?}");
-                assert!(display.title.is_char_boundary(range.end), "{keyword:?}");
-            }
-        }
-    }
-
-    fn song_with_subtitle(name: &str, tns: &str) -> Song {
-        serde_json::from_value(serde_json::json!({
-            "id": 1,
-            "name": name,
-            "ar": [{"id": 1, "name": "周杰伦"}],
-            "al": {"id": 1, "name": "叶惠美"},
-            "dt": 0,
-            "tns": [tns],
-        }))
-        .unwrap()
-    }
+    use super::visible_rows;
 
     #[test]
     fn visible_range_tracks_outer_viewport() {
@@ -809,48 +310,5 @@ mod tests {
         assert_eq!(visible_rows(1193, 66808., 68000.), 0..0);
         assert_eq!(visible_rows(0, 0., 500.), 0..0);
         assert_eq!(visible_rows(10, 100., 100.), 0..0);
-    }
-
-    /// 「后到的离开事件」不能把已经点亮的新行清掉，否则行内序号/播放键的切换会时有时无。
-    #[test]
-    fn leaving_a_row_only_clears_that_row() {
-        // 进入 B，然后 A 离开（无论先后到达）都要停在 B。
-        assert_eq!(hovered_row_after(Some(1), 2, true), Some(2));
-        assert_eq!(hovered_row_after(Some(2), 1, false), Some(2));
-        assert_eq!(hovered_row_after(Some(3), 9, false), Some(3));
-        // 同一行自己进出。
-        assert_eq!(hovered_row_after(None, 7, true), Some(7));
-        assert_eq!(hovered_row_after(Some(7), 7, false), None);
-        assert_eq!(hovered_row_after(None, 1, false), None);
-    }
-
-    /// 投影拖尾必须小于内容区留白，否则水平方向会被滚动容器切出硬边。
-    #[test]
-    fn side_padding_exceeds_the_shadow_tail() {
-        let tail = ROW_HOVER_SHADOW_BLUR * ROW_HOVER_SHADOW_TAIL_SIGMAS;
-        assert!(f32::from(PAGE_SIDE_PADDING) > f32::from(tail));
-    }
-
-    /// 下面的期望值按 13px 字号算出来的，改字号时这里会红。
-    #[test]
-    fn index_column_follows_digits_but_never_below_the_play_icon() {
-        // 一位数只有 7.8px，下限 20px 兜住播放键。
-        assert_eq!(index_column_width(9), px(20.));
-        assert_eq!(index_column_width(30), px(20.));
-        assert_eq!(index_column_width(999), px(24.));
-        // `{:02}` 只补到两位不截断，1193 是四位数。
-        assert_eq!(index_column_width(1193), px(32.));
-    }
-
-    #[test]
-    fn play_count_switches_to_wan_and_truncates_rather_than_rounds() {
-        assert_eq!(play_count_label(0), "0");
-        assert_eq!(play_count_label(99_999), "99999");
-        assert_eq!(play_count_label(100_000), "10万");
-        // 十分位截断：812568 是 81.2万，不是 81.3万。
-        assert_eq!(play_count_label(812_568), "81.2万");
-        assert_eq!(play_count_label(150_000), "15万");
-        // 万位满四位不再带小数。
-        assert_eq!(play_count_label(12_345_678), "1234万");
     }
 }

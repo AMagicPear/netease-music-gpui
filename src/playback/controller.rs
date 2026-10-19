@@ -133,10 +133,10 @@ impl PlaybackController {
                 })
                 .detach();
                 cx.observe_self(|this, cx| {
-                    if let Some(media) = &mut this.system_media {
-                        if let Err(error) = media.sync(&this.state, this.engine.has_source()) {
-                            eprintln!("同步系统媒体控件失败：{error}");
-                        }
+                    if let Some(media) = &mut this.system_media
+                        && let Err(error) = media.sync(&this.state, this.engine.has_source())
+                    {
+                        eprintln!("同步系统媒体控件失败：{error}");
                     }
                     this.sync_media_cover(cx);
                 })
@@ -462,12 +462,6 @@ impl PlaybackController {
         self.current_list_song()
     }
 
-    /// 播完一首后前进一格；返回 None 表示整个列表播完。
-    /// 单曲循环不在这里处理：那是「不前进」，由控制器决定。
-    fn advance_list(&mut self) -> Option<Song> {
-        self.step_list(1)
-    }
-
     /// 就地洗牌：列表此刻的顺序就是之后的播放顺序，不需要另存一份原始顺序。
     fn apply_mode_to_list(&mut self, mode: PlayMode) {
         if !mode.shuffles() {
@@ -722,7 +716,7 @@ impl PlaybackController {
             self.replay(cx);
             return;
         }
-        let Some(song) = self.advance_list() else {
+        let Some(song) = self.step_list(1) else {
             // 顺序播放到队尾：停在末尾不动，位置保留，再按播放会重播当前歌曲。
             self.engine.stop();
             self.save_cache();
@@ -950,8 +944,8 @@ mod tests {
         // 同一首歌在列表里出现两次：游标按位置走，不会被 id 反查带回第一次出现的地方。
         let mut controller = controller_with(&[1, 2, 1, 3], 1, PlayMode::Sequential);
         assert_eq!(controller.queue_cursor, Some(0));
-        assert_eq!(controller.advance_list().unwrap().id, 2);
-        assert_eq!(controller.advance_list().unwrap().id, 1);
+        assert_eq!(controller.step_list(1).unwrap().id, 2);
+        assert_eq!(controller.step_list(1).unwrap().id, 1);
         assert_eq!(controller.queue_cursor, Some(2));
     }
 
@@ -975,6 +969,8 @@ mod tests {
         let mut sequential = controller_with(&[1, 2, 3], 1, PlayMode::Sequential);
         assert!(sequential.step_list(-1).is_none());
         assert_eq!(sequential.step_list(1).unwrap().id, 2);
+        assert_eq!(sequential.step_list(1).unwrap().id, 3);
+        assert!(sequential.step_list(1).is_none());
         let mut last = controller_with(&[1, 2, 3], 3, PlayMode::Sequential);
         assert!(last.step_list(1).is_none());
 
@@ -990,17 +986,6 @@ mod tests {
     }
 
     #[test]
-    fn finishing_a_song_follows_the_list_and_the_mode() {
-        let mut sequential = controller_with(&[1, 2, 3], 1, PlayMode::Sequential);
-        assert_eq!(sequential.advance_list().unwrap().id, 2);
-        assert_eq!(sequential.advance_list().unwrap().id, 3);
-        assert!(sequential.advance_list().is_none());
-
-        let mut repeat_all = controller_with(&[1, 2, 3], 3, PlayMode::RepeatAll);
-        assert_eq!(repeat_all.advance_list().unwrap().id, 1);
-    }
-
-    #[test]
     fn shuffle_rewrites_the_list_order_and_keeps_the_current_song() {
         // 借列表循环走完整条列表：洗牌后每首歌仍然恰好排在播放序列上一次。
         let mut controller = controller_with(&[1, 2, 3, 4, 5], 3, PlayMode::RepeatAll);
@@ -1010,7 +995,7 @@ mod tests {
 
         let mut played = vec![controller.current_list_song().unwrap().id];
         while played.len() < controller.queue.len() {
-            played.push(controller.advance_list().unwrap().id);
+            played.push(controller.step_list(1).unwrap().id);
         }
         played.sort_unstable();
         assert_eq!(played, before);
@@ -1071,7 +1056,7 @@ mod tests {
             assert_eq!(restored.state.mode, PlayMode::Shuffle);
             if saved_cursor == Some(2) {
                 assert_eq!(restored.current_list_song().unwrap().name, "第二个版本");
-                assert_eq!(restored.advance_list().unwrap().id, 3);
+                assert_eq!(restored.step_list(1).unwrap().id, 3);
             } else {
                 assert_eq!(restored.current_list_song().unwrap().name, "第一个版本");
             }

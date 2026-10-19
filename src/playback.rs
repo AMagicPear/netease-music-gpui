@@ -10,13 +10,9 @@ pub use controller::PlaybackController;
 use crate::models::{AudioQualityLevel, PlayMode, Song};
 use std::time::Duration;
 
-/// 播放状态的变化通知，按语义分型，消费者只订阅自己关心的变体。
-///
-/// 为什么不用裸 `observe`：`observe` 只能回答「有事发生」，消费者想知道
-/// 「什么变了」就得各自持有一份字段快照做元组 diff（播放栏五元组、歌词页
-/// 三元组、搜索/歌单页各一份……）。改成 typed event 后，判断一次做完，
-/// 消费者拿到变体即可行动，本地不再留镜像状态。
+/// 按变化类型通知，避免位置推进触发无关视图重绘。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[expect(clippy::enum_variant_names, reason = "Changed 明确表示状态变化通知")]
 pub enum PlaybackEvent {
     /// 歌曲、队列、模式、音质、播放/缓冲/加载/错误状态变化。
     SnapshotChanged,
@@ -47,7 +43,7 @@ pub struct PlaybackSnapshot {
     pub actual_quality: Option<AudioQualityLevel>,
     /// 下载、解码或设备错误；失败后停止，可从保留的位置重试。
     pub error: Option<String>,
-    /// 0..=1，默认 1。音量 UI 尚未实现。
+    /// 0..=1，默认 1。
     pub volume: f32,
 }
 

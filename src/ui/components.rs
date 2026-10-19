@@ -1,14 +1,13 @@
 use crate::models::AudioQualityLevel;
 use gpui::{
-    Div, Entity, Hsla, InteractiveElement, IntoElement, MouseButton, Role, SharedString, Stateful,
+    Div, Entity, Hsla, InteractiveElement, IntoElement, MouseButton, Role, Stateful,
     StatefulInteractiveElement, WindowControlArea, div, img, px, svg,
 };
 use gpui::{ParentElement as _, Styled as _};
 use gpui_kit::base::ColorTokens;
 use gpui_kit::base::input::InputState;
-use std::ops::Range;
 
-use crate::ui::theme::{PRESSED_ICON_ALPHA, link_blue};
+use crate::ui::theme::PRESSED_ICON_ALPHA;
 
 mod collect_window;
 mod drag_preview;
@@ -19,8 +18,10 @@ mod popover;
 mod progress_bar;
 mod side_panel;
 mod song_menu;
+mod song_table;
 mod spinner;
 mod tab_bar;
+mod text;
 mod vinyl;
 mod vinyl_stage;
 mod virtual_table;
@@ -34,15 +35,19 @@ pub use song_menu::{Collect, PlayNext, show_song_menu};
 // 播放队列浮层、音质弹窗、账号弹层共用同一份圆角与投影；
 // 子模块与 ui 模块（shell）都通过这里取名。
 pub(in crate::ui) use popover::{SURFACE_RADIUS, SurfacePopover, surface_shadow};
+pub use song_table::{
+    ACTION_BUTTON_HEIGHT, ACTION_BUTTON_PADDING, DURATION_COLUMN_WIDTH, KeepRowHover,
+    LIKE_COLUMN_WIDTH, SECONDARY_FONT_WEIGHT, SongDisplay, centered_empty, hovered_row_after,
+    index_column_width, play_all_button, play_count_label, row_hover_icon, title_with_subtitle,
+};
 pub use spinner::spinner;
 pub use tab_bar::{TabBar, TabChanged, TabItem};
+use text::match_highlight;
+pub(super) use text::{keyword_ranges, match_highlights, text_with_matches};
 pub(in crate::ui) use vinyl::{RotationClock, Vinyl};
 pub use vinyl_stage::{Tonearm, vinyl_stage};
 pub use virtual_table::{
-    ACTION_BUTTON_HEIGHT, ACTION_BUTTON_PADDING, CELL_PADDING, COLUMN_GAP, DURATION_COLUMN_WIDTH,
-    HEADER_HEIGHT, KeepRowHover, LIKE_COLUMN_WIDTH, PAGE_SIDE_PADDING, ROW_HEIGHT,
-    SECONDARY_FONT_WEIGHT, SongDisplay, TableColumn, centered_empty, hovered_row_after,
-    index_column_width, play_all_button, play_count_label, row_hover_icon, title_with_subtitle,
+    CELL_PADDING, COLUMN_GAP, HEADER_HEIGHT, PAGE_SIDE_PADDING, ROW_HEIGHT, TableColumn,
     virtual_table,
 };
 
@@ -71,7 +76,6 @@ pub(super) fn icon_hover_color(mut base: Hsla, colors: ColorTokens) -> Hsla {
 // 下面是跨页面共用的展示规则。同一个规则只在歌单列表和播放栏各写一遍很容易漂移
 // （比如换了素材只改一处），所以集中在这里，由调用方决定怎么渲染。
 
-/// Windows 用原生命中区；macOS/Linux 在按下时把拖拽交给系统。
 /// 隐藏 macOS 窗口红绿灯里的部分按钮。登录窗只隐藏绿灯（保留可最小化），
 /// 收藏窗黄灯绿灯都隐藏。gpui 的 WindowOptions 没有“隐藏某个灯”的开关，
 /// style mask 只能整体去能力（隐藏 / 灰显），所以直接操作原生 NSWindow。
@@ -99,16 +103,17 @@ pub(super) fn hide_traffic_lights(window: &gpui::Window, hide_minimize: bool) {
         if let Some(zoom) = window.standardWindowButton(NSWindowButton::ZoomButton) {
             zoom.setHidden(true);
         }
-        if hide_minimize {
-            if let Some(minimize) = window.standardWindowButton(NSWindowButton::MiniaturizeButton) {
-                minimize.setHidden(true);
-            }
+        if hide_minimize
+            && let Some(minimize) = window.standardWindowButton(NSWindowButton::MiniaturizeButton)
+        {
+            minimize.setHidden(true);
         }
         // 双击标题栏按系统设置可能触发最大化，去掉 FullScreen 可用性一并禁掉。
         window.setStyleMask(window.styleMask() & !NSWindowStyleMask::FullScreen);
     }
 }
 
+/// Windows 使用原生命中区，macOS/Linux 在按下时将拖拽交给系统。
 pub(super) fn window_drag_area(id: &'static str) -> Stateful<Div> {
     div()
         .id(id)
@@ -144,92 +149,6 @@ pub(super) fn empty_state(image: &'static str, tip: &str, colors: ColorTokens) -
                 .text_color(colors.muted_foreground)
                 .child(tip.to_string()),
         )
-}
-
-/// 关键词在 `text` 里命中的字节区间：有序、不重叠、端点在字符边界上，
-/// 即 `StyledText::with_highlights` 要求的样子。空关键词返回空。
-///
-/// 匹配和大小写折叠都在这里做，过滤（`song_matches`）与高亮共用同一套语义。
-/// **不能**写成 `text.to_lowercase().match_indices(keyword)`：小写化会改变部分字符的
-/// 字节长度（`İ` 2 字节 → `i̇` 3 字节），拿小写串的偏移当原文用会错位，
-/// 所以折叠路径要维护一张「小写串字节 → 原文偏移」的映射表。
-pub(super) fn keyword_ranges(text: &str, keyword: &str) -> Vec<Range<usize>> {
-    let keyword = keyword.trim();
-    if keyword.is_empty() || text.is_empty() {
-        return Vec::new();
-    }
-    // 原文直接命中（CJK 常见）时 `match_indices` 给的就是原文偏移，不必付折叠的代价。
-    let direct: Vec<_> = text
-        .match_indices(keyword)
-        .map(|(start, matched)| start..start + matched.len())
-        .collect();
-    if !direct.is_empty() {
-        return direct;
-    }
-    let mut lowered = String::with_capacity(text.len());
-    // `origins[i]` = `lowered` 第 i 个字节所属原文字符的起始偏移，按字节补齐。
-    let mut origins: Vec<usize> = Vec::with_capacity(text.len());
-    for (index, ch) in text.char_indices() {
-        for folded in ch.to_lowercase() {
-            lowered.push(folded);
-            origins.resize(origins.len() + folded.len_utf8(), index);
-        }
-    }
-    lowered
-        .match_indices(&keyword.to_lowercase())
-        .map(|(start, matched)| {
-            let from = origins[start];
-            // 命中到末尾时没有「下一个字节」可查，退回原文长度。
-            let to = origins
-                .get(start + matched.len())
-                .copied()
-                .unwrap_or(text.len());
-            if to > from {
-                return from..to;
-            }
-            // 命中落在一个原文字符内部（小写化变长时区间塌成 `from == to`），
-            // 标整个原文字符，别让这行「搜得到、却看不到高亮」。
-            let width = text[from..]
-                .chars()
-                .next()
-                .map(char::len_utf8)
-                .unwrap_or_default();
-            from..from + width
-        })
-        .collect()
-}
-
-/// 命中片段的样式：文字染成蓝而不是铺底色 —— 「正在播放」的行文字本来就是主色红，
-/// 叠红底等于什么信息都没加。用昵称的蓝而不用红：红已经是「正在播放」的专用信号，
-/// 搜索命中再占用它会稀释语义。带 `color` 的样式不能和副标题的灰丢给
-/// `combine_highlights`（它是 blend 不是覆盖），详见 `title_segments` 的说明。
-fn match_highlight() -> gpui::HighlightStyle {
-    gpui::HighlightStyle {
-        color: Some(link_blue()),
-        ..Default::default()
-    }
-}
-
-/// `text` 的命中区间平移 `offset` 字节后，配上命中样式。
-///
-/// 拼接多段文本（歌手名、标题 + 副标题）时，各段单独算出的区间只在本段内有效，
-/// 要挪到整串里的位置才对得上最终渲染的那段文本。
-pub(super) fn match_highlights(
-    text: &str,
-    offset: usize,
-    keyword: &str,
-) -> Vec<(Range<usize>, gpui::HighlightStyle)> {
-    let style = match_highlight();
-    keyword_ranges(text, keyword)
-        .into_iter()
-        .map(|range| (range.start + offset..range.end + offset, style))
-        .collect()
-}
-
-/// 纯文本 + 命中高亮。专辑格、时长这类没有副标题、单一字段的行用它。
-pub(super) fn text_with_matches(text: SharedString, keyword: &str) -> gpui::StyledText {
-    let hits = match_highlights(&text, 0, keyword);
-    gpui::StyledText::new(text).with_highlights(hits)
 }
 
 /// 搜索框右侧的「清空」按钮：点了把输入框置空。顶栏全局搜索和歌单内搜索共用，

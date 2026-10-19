@@ -16,18 +16,18 @@ impl CoverColor {
     }
     /// 与 img 共用 GPUI 缓存；新图加载中保留上一张封面的颜色。
     pub(super) fn load(&mut self, url: &str, window: &mut Window, cx: &mut App) -> Option<Hsla> {
-        if self.cached.as_ref().map(|cached| cached.0.as_str()) != Some(url) {
-            if let Some(image) = crate::ui::assets::load_track_cover(url, window, cx) {
-                let color = image.ok().and_then(|image| {
-                    let size = image.size(0);
-                    cover_color(
-                        image.as_bytes(0)?,
-                        size.width.0.try_into().ok()?,
-                        size.height.0.try_into().ok()?,
-                    )
-                });
-                self.cached = Some((url.to_owned(), color));
-            }
+        if self.cached.as_ref().map(|cached| cached.0.as_str()) != Some(url)
+            && let Some(image) = crate::ui::assets::load_track_cover(url, window, cx)
+        {
+            let color = image.ok().and_then(|image| {
+                let size = image.size(0);
+                cover_color(
+                    image.as_bytes(0)?,
+                    size.width.0.try_into().ok()?,
+                    size.height.0.try_into().ok()?,
+                )
+            });
+            self.cached = Some((url.to_owned(), color));
         }
         self.current()
     }

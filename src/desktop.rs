@@ -344,50 +344,12 @@ fn play_orpheus_target(target: OrpheusTarget, playback: Entity<PlaybackControlle
                 return;
             }
         };
-        let _ = playback.update(cx, |playback, cx| match target {
+        playback.update(cx, |playback, cx| match target {
             OrpheusTarget::Song(id) => playback.play_list(0, songs, id, cx),
             OrpheusTarget::Playlist(id) => playback.play_list_from_start(id, songs, cx),
         });
     })
     .detach();
-}
-
-#[cfg(test)]
-mod tests {
-    // 不能用 `use super::*`：父模块顶部是 `use gpui::*`，glob 会把 GPUI 的全部
-    // 项重新导入 tests 模块，`#[test]` 展开时要为新模块重做名字解析，递归深度
-    // 直接超过默认上限 128。这里只显式引入用到的名字。
-    use super::{BASE64, OrpheusTarget, parse_orpheus_url};
-    // BASE64 只是引擎常量，调用 decode/encode 还需要 Engine trait 在作用域里。
-    use base64::Engine as _;
-
-    #[test]
-    fn parses_song_url_from_web_page() {
-        // music.163.com 歌曲页「点击打开客户端」实际发出的链接。
-        let url = "orpheus://eyJ0eXBlIjoic29uZyIsImlkIjoiMjE5NDgwNzciLCJjbWQiOiJwbGF5In0=";
-        assert_eq!(parse_orpheus_url(url), Some(OrpheusTarget::Song(21948077)));
-    }
-
-    #[test]
-    fn parses_playlist_and_tolerates_missing_padding() {
-        let url = "orpheus://eyJ0eXBlIjoicGxheWxpc3QiLCJpZCI6IjM3Nzg2NzgiLCJjbWQiOiJwbGF5In0";
-        assert_eq!(
-            parse_orpheus_url(url),
-            Some(OrpheusTarget::Playlist(3778678))
-        );
-    }
-
-    #[test]
-    fn rejects_unrelated_payloads() {
-        // base64 有效但不是 JSON。
-        assert_eq!(parse_orpheus_url("orpheus://aGVsbG8="), None);
-        assert_eq!(parse_orpheus_url("https://music.163.com/song?id=1"), None);
-        assert_eq!(parse_orpheus_url("orpheus://"), None);
-        // JSON 有效但不是歌曲或歌单。这里直接 encode，而不是 decode 一段手写的
-        // base64：base64 载荷长度必须是 4 的倍数，手写字符串很容易漏掉填充。
-        let encoded = BASE64.encode(br#"{"type":"album","id":"1"}"#);
-        assert_eq!(parse_orpheus_url(&format!("orpheus://{encoded}")), None);
-    }
 }
 
 pub fn configure_window(window: &Window, cx: &App) {
@@ -640,8 +602,42 @@ fn rasterize_logo(renderer: &SvgRenderer, bytes: &[u8]) -> Result<Vec<u8>> {
         .ok_or_else(|| anyhow!("图标栅格化失败"))?
         .to_vec();
     // GPUI 图像为 BGRA，系统托盘接口要求 RGBA。
-    for pixel in rgba.chunks_exact_mut(4) {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
     Ok(rgba)
+}
+
+#[cfg(test)]
+mod tests {
+    // 避免 glob 引入 GPUI 的 test 宏。
+    use super::{BASE64, OrpheusTarget, parse_orpheus_url};
+    use base64::Engine as _;
+
+    #[test]
+    fn parses_song_url_from_web_page() {
+        // music.163.com 歌曲页「点击打开客户端」实际发出的链接。
+        let url = "orpheus://eyJ0eXBlIjoic29uZyIsImlkIjoiMjE5NDgwNzciLCJjbWQiOiJwbGF5In0=";
+        assert_eq!(parse_orpheus_url(url), Some(OrpheusTarget::Song(21948077)));
+    }
+
+    #[test]
+    fn parses_playlist_and_tolerates_missing_padding() {
+        let url = "orpheus://eyJ0eXBlIjoicGxheWxpc3QiLCJpZCI6IjM3Nzg2NzgiLCJjbWQiOiJwbGF5In0";
+        assert_eq!(
+            parse_orpheus_url(url),
+            Some(OrpheusTarget::Playlist(3778678))
+        );
+    }
+
+    #[test]
+    fn rejects_unrelated_payloads() {
+        // base64 有效但不是 JSON。
+        assert_eq!(parse_orpheus_url("orpheus://aGVsbG8="), None);
+        assert_eq!(parse_orpheus_url("https://music.163.com/song?id=1"), None);
+        assert_eq!(parse_orpheus_url("orpheus://"), None);
+        // JSON 有效但资源类型不支持。
+        let encoded = BASE64.encode(br#"{"type":"album","id":"1"}"#);
+        assert_eq!(parse_orpheus_url(&format!("orpheus://{encoded}")), None);
+    }
 }

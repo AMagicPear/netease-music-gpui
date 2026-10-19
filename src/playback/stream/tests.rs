@@ -1028,7 +1028,12 @@ fn playback_fades_per_frame_and_pause_stops_consumption() {
         assert_eq!(first[0], first[1]);
         let mut fade = vec![0.; ((rate as f32 * 0.08).ceil() as usize + 1) * 2];
         output.write_playback(&mut fade, 0.5, true);
-        assert!(fade.chunks_exact(2).all(|frame| frame[0] == frame[1]));
+        assert!(
+            fade.as_chunks::<2>()
+                .0
+                .iter()
+                .all(|frame| frame[0] == frame[1])
+        );
         assert!(fade.windows(2).all(|pair| pair[0] <= pair[1]));
         assert!((fade.last().unwrap() - 0.5).abs() < 0.001);
         output.write_playback(&mut fade, 0.5, false);

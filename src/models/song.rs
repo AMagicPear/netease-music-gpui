@@ -158,9 +158,11 @@ mod tests {
     /// 母带、臻音这些档位只出现在 privileges 里，本体变体字段表达不了。
     #[test]
     fn best_quality_level_prefers_privileges_over_song_variants() {
-        let mut song = Song::default();
-        song.sq = Some(variant(999_000));
-        song.privilege = Some(privilege("jymaster"));
+        let mut song = Song {
+            sq: Some(variant(999_000)),
+            privilege: Some(privilege("jymaster")),
+            ..Default::default()
+        };
         assert_eq!(song.best_quality_level(), Some(AudioQualityLevel::JyMaster));
 
         // 「较高」及以下依旧不显示徽章，与只看变体字段时一致。

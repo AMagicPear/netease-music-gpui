@@ -37,16 +37,15 @@ pub(super) fn open(
     existing: Option<AnyWindowHandle>,
     cx: &mut App,
 ) -> Option<AnyWindowHandle> {
-    if let Some(handle) = existing {
-        if handle
+    if let Some(handle) = existing
+        && handle
             .update(cx, |_, window, cx| {
                 cx.activate(true);
                 window.activate_window();
             })
             .is_ok()
-        {
-            return Some(handle);
-        }
+    {
+        return Some(handle);
     }
     let bounds = Bounds::centered_at(
         parent.window_bounds().get_bounds().center(),

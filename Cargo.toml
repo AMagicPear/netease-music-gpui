@@ -31,6 +31,7 @@ sha2 = "0.10"
 # ncm-api-rs 已带入同一版本，不新增下载。
 base64 = "0.22"
 tempfile = "3"
+smallvec = "1"
 # 二维码编码；SVG 直接交给 GPUI 渲染，不需要图像编码依赖。
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
@@ -41,7 +42,6 @@ windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 raw-window-handle = "0.6"
 objc2 = "0.6"
-smallvec = "1"
 objc2-foundation = "0.3.2"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSView", "NSWindow", "NSControl", "NSButton", "NSBitmapImageRep", "NSImage", "NSImageRep", "NSGraphics", "NSStatusItem", "NSStatusBarButton"] }
 

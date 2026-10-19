@@ -1,18 +1,10 @@
-mod featured;
-mod following;
-mod my_collection;
-mod my_podcast;
 pub(super) mod playlist;
-mod podcast;
-mod recent;
-// 推荐页持有推荐歌单 store（由 MainContent 创建注入），同歌单页 / 搜索页。
 pub(super) mod recommend;
-mod roaming;
 pub(super) mod search;
 
 use gpui::*;
 
-/// 主内容区可切换的页面，侧边栏里的每一个导航项都对应其中一个。
+/// 内容区路由；带 ID 的页面共用 View，按路由加载资源。
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum ContentPage {
     Recommend,
@@ -117,33 +109,20 @@ impl ContentPage {
         matches!(self, Self::Following | Self::MyPodcast)
     }
 
-    /// 遍历所有页面，供 `MainContent` 预创建。
     pub(super) fn all() -> impl Iterator<Item = ContentPage> {
         MAIN_PAGES.into_iter().chain(LIBRARY_PAGES)
     }
 
-    /// 创建该导航项对应的页面 View。
-    ///
-    /// 静态页面长期持有；带 ID 的歌单和搜索结果页由 MainContent 的单个 View 承接。
-    /// 推荐页同理：它要持有推荐歌单 store，也在 MainContent 里创建。
+    /// 业务页面由 MainContent 注入依赖，其余页面共用占位 View。
     pub(super) fn build(self, cx: &mut App) -> Option<AnyView> {
-        Some(match self {
-            Self::Featured => cx.new(|_| featured::FeaturedPage).into(),
-            Self::Podcast => cx.new(|_| podcast::PodcastPage).into(),
-            Self::Roaming => cx.new(|_| roaming::RoamingPage).into(),
-            Self::Following => cx.new(|_| following::FollowingPage).into(),
+        match self {
             Self::Recommend
             | Self::FavoriteMusic
             | Self::Playlist(_)
             | Self::SongComments(_)
-            | Self::Search => {
-                return None;
-            }
-            Self::Recent => cx.new(|_| recent::RecentPage).into(),
-            Self::MyPodcast => cx.new(|_| my_podcast::MyPodcastPage).into(),
-            Self::MyCollection => cx.new(|_| my_collection::MyCollectionPage).into(),
-            Self::DownloadManagement | Self::MyCloud => cx.new(|_| PlaceholderPage(self)).into(),
-        })
+            | Self::Search => None,
+            _ => Some(cx.new(|_| PlaceholderPage(self)).into()),
+        }
     }
 }
 

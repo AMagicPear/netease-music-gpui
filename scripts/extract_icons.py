@@ -65,9 +65,6 @@ SVG_CAMEL = {
     "zoomAndPan",
 }
 
-MARKER = re.compile(r',"([A-Za-z0-9_\-]+)",\[(\d+),(\d+),(\d+),(\d+)\]\)')
-
-
 def attribute_name(name):
     if name in SVG_CAMEL:
         return name

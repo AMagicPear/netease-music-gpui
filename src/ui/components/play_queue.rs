@@ -365,9 +365,9 @@ impl ListDelegate for QueueDelegate {
             group,
             hover_color: colors.muted,
             round_bottom_left: index + 1 == count,
-            on_double_click: Some(on_double_click),
-            on_right_click: Some(on_right_click),
-            on_hover: Some(on_hover),
+            on_double_click,
+            on_right_click,
+            on_hover,
             children: row_content(&song, index, state, colors, on_cover_click, on_like_click),
         })
     }
@@ -645,11 +645,11 @@ struct QueueRow {
     /// 末行的 hover 底色正好压在面板左下圆角上，单独把那角磨圆，
     /// 免得盖出一个直角（`overflow_hidden` 只做矩形裁剪）。
     round_bottom_left: bool,
-    on_double_click: Option<RowCallback<ClickEvent>>,
+    on_double_click: RowCallback<ClickEvent>,
     /// 行上右键（非左键的 click）。挂了它就弹「更多」那份菜单，效果和行内图标一致。
-    on_right_click: Option<RowCallback<ClickEvent>>,
+    on_right_click: RowCallback<ClickEvent>,
     /// 进出本行时回调。悬停状态由委托保存，这里只负责把事件送回去。
-    on_hover: Option<RowCallback<bool>>,
+    on_hover: RowCallback<bool>,
     children: Vec<AnyElement>,
 }
 
@@ -690,18 +690,9 @@ impl RenderOnce for QueueRow {
             // hover 只把底色压深一层，和音质浮窗的选项行同一效果。
             .hover(|style| style.bg(hover_color))
             .when(round_bottom_left, |row| row.rounded_bl(SURFACE_RADIUS))
-            .map(|row| match on_double_click {
-                Some(handler) => row.on_double_click(handler),
-                None => row,
-            })
-            .map(|row| match on_right_click {
-                Some(handler) => row.on_aux_click(handler),
-                None => row,
-            })
-            .map(|row| match on_hover {
-                Some(handler) => row.on_hover(handler),
-                None => row,
-            })
+            .on_double_click(on_double_click)
+            .on_aux_click(on_right_click)
+            .on_hover(on_hover)
             .children(children)
     }
 }

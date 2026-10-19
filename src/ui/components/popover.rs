@@ -27,6 +27,8 @@ pub(in crate::ui) fn surface_shadow(colors: crate::ui::components::ColorTokens) 
 const SURFACE_MOTION: Duration = Duration::from_millis(150);
 const SURFACE_TRAVEL: Pixels = px(6.);
 
+type MouseDownListener = Rc<dyn Fn(&MouseDownEvent, &mut Window, &mut App)>;
+
 /// 锚定触发器的浮层：统一的表面外观（surface 底色、圆角、投影）、
 /// 进出场动画（下方浮起 + 淡入）以及「点外面收起、点里面不冒泡」的交互。
 ///
@@ -41,7 +43,7 @@ pub(in crate::ui) struct SurfacePopover {
     trigger: AnyElement,
     anchor: Anchor,
     offset: Pixels,
-    on_mouse_down_out: Option<Rc<dyn Fn(&MouseDownEvent, &mut Window, &mut App)>>,
+    on_mouse_down_out: Option<MouseDownListener>,
     children: SmallVec<[AnyElement; 1]>,
     style: StyleRefinement,
 }
