@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -75,6 +76,18 @@ pub struct AudioQuality {
     pub sr: Option<u32>,
     pub vd: Option<f64>,
 }
+/// privileges 与 songs 是两个独立数组，只靠 id 对应，顺序不保证一致。
+/// 歌单、搜索和每日推荐都各自带这两份数组，合并规则放在这里，调用方只负责取出字段。
+pub(crate) fn attach_privileges(songs: &mut [Song], privileges: Vec<Privilege>) {
+    let mut by_id: HashMap<u64, Privilege> =
+        privileges.into_iter().map(|item| (item.id, item)).collect();
+    for song in songs {
+        if let Some(privilege) = by_id.remove(&song.id) {
+            song.privilege = Some(privilege);
+        }
+    }
+}
+
 impl Song {
     pub fn duration(&self) -> Duration {
         Duration::from_millis(self.dt)

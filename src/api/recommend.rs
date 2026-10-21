@@ -2,8 +2,8 @@ use ncm_api_rs::Query;
 
 use super::{ApiClient, MusicApi};
 use crate::models::{
-    FeaturedActivity, HomepageBlock, RecommendEntry, RecommendedPlaylist, parse_activities,
-    parse_entries, parse_homepage_blocks, parse_playlists, parse_radar,
+    FeaturedActivity, HomepageBlock, RecommendEntry, RecommendedPlaylist, Song, parse_activities,
+    parse_daily_songs, parse_entries, parse_homepage_blocks, parse_playlists, parse_radar,
 };
 
 impl MusicApi {
@@ -17,6 +17,12 @@ impl MusicApi {
     ) -> Result<Vec<RecommendedPlaylist>, String> {
         let response = Self::request(client.personal_page_playlist_rcmd(&Query::new())).await?;
         Ok(parse_playlists(&response.body))
+    }
+
+    /// 每日推荐歌曲，需要登录态。
+    pub async fn daily_songs(client: ApiClient) -> Result<Vec<Song>, String> {
+        let response = Self::request(client.recommend_songs(&Query::new())).await?;
+        parse_daily_songs(&response.body)
     }
 
     pub async fn radar_playlists(client: ApiClient) -> Result<Vec<RecommendedPlaylist>, String> {

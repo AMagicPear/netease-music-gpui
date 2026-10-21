@@ -11,8 +11,8 @@ use super::{HEADER_HEIGHT, HEADER_TOP_INSET, hover_icon, mini_and_window_buttons
 use crate::models::{Playlist, Song};
 use crate::playback::PlaybackController;
 use crate::state::{
-    account::AccountState, library::MusicLibrary, recommend::RecommendStore,
-    search_results::SearchResults,
+    account::AccountState, daily::DailySongsStore, library::MusicLibrary,
+    recommend::RecommendStore, search_results::SearchResults,
 };
 use crate::ui::assets::thumbnail_url;
 use crate::ui::comments::SongCommentsPage;
@@ -24,7 +24,8 @@ use crate::ui::cover_color::Backdrop;
 use crate::ui::events::{ContentLayoutChanged, PlaylistCommentsTab};
 use crate::ui::login;
 use crate::ui::pages::{
-    ContentPage, playlist::PlaylistPage, recommend::RecommendPage, search::SearchPage,
+    ContentPage, daily::DailySongsPage, playlist::PlaylistPage, recommend::RecommendPage,
+    search::SearchPage,
 };
 use crate::ui::sidebar::{LoginRequested, SidebarChanged, SidebarPage};
 use crate::ui::theme::PRESSED_ICON_ALPHA;
@@ -47,6 +48,8 @@ pub struct MainContent {
     /// 占位页面长期持有；业务页面在下面单独注入依赖。
     pages: HashMap<ContentPage, AnyView>,
     recommend_page: Entity<RecommendPage>,
+    /// 日推页长期持有：切走再回来不重复请求，日期数据由 store 按账号刷新。
+    daily_page: Entity<DailySongsPage>,
     pub(super) playlist_page: Entity<PlaylistPage>,
     song_comments_page: Entity<SongCommentsPage>,
     search_page: Entity<SearchPage>,
@@ -104,6 +107,9 @@ impl MainContent {
         let song_comments_page = cx.new(|cx| SongCommentsPage::new(window, cx));
         let recommended = cx.new(|cx| RecommendStore::new(user_profile.clone(), cx));
         let recommend_page = cx.new(|_| RecommendPage::new(recommended));
+        let daily_store = cx.new(|cx| DailySongsStore::new(user_profile.clone(), cx));
+        let daily_page =
+            cx.new(|cx| DailySongsPage::new(daily_store, library.clone(), playback.clone(), cx));
         let library_subscription = cx.observe(&library, |this, _, cx| {
             // 收藏歌单的 ID 要等账号索引返回后才能解析。
             this.open_playlist(this.active_page, cx);
@@ -160,6 +166,7 @@ impl MainContent {
             account_id: 0,
             pages,
             recommend_page,
+            daily_page,
             playlist_page,
             song_comments_page,
             search_page,
@@ -532,6 +539,7 @@ impl Render for MainContent {
                 window,
                 cx,
             )),
+            ContentPage::DailySongs => Some(self.daily_page.clone().into_any_element()),
             ContentPage::FavoriteMusic | ContentPage::Playlist(_) => Some(PlaylistPage::content(
                 self.playlist_page.clone(),
                 window.viewport_size().width - self.sidebar_width - px(80.),

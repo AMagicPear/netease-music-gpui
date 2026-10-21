@@ -3,7 +3,7 @@ use std::time::Duration;
 use gpui::*;
 use gpui_kit::base::{Button, ColorTokens, Theme};
 
-use crate::models::{FeaturedActivity, RecommendedPlaylist};
+use crate::models::{FeaturedActivity, Playlist, RecommendedPlaylist};
 use crate::state::recommend::{QuickEntry, QuickEntryKind, RecommendStore};
 use crate::ui::assets::{track_cover_image, track_cover_url};
 use crate::ui::components::{centered_empty, play_count_label, spinner};
@@ -89,6 +89,8 @@ impl RecommendPage {
                 entries,
                 &self.entry_colors,
                 covers,
+                store.radar.first(),
+                cx,
             ));
         }
         page = page.child(self.recommended_section(columns, colors, cx));
@@ -130,6 +132,17 @@ fn section_title(text: &'static str, colors: ColorTokens) -> impl IntoElement {
         .child(text)
 }
 
+/// 第一排里真正能点进去的入口。私人雷达的落点就是雷达区块的首个歌单，
+/// 两个区块的卡片指向同一份数据，不在页面里另存一份。
+enum QuickTarget {
+    DailySongs,
+    /// 摘要用于先画歌单页头；`Playlist` 很大，这里只影响展示，装箱避免拉大整个枚举。
+    Playlist {
+        id: u64,
+        summary: Box<Playlist>,
+    },
+}
+
 /// 卡片平分一行；窗口较窄时只显示前 columns 张。
 fn quick_entries(
     today: u8,
@@ -137,6 +150,8 @@ fn quick_entries(
     entries: &[QuickEntry],
     entry_colors: &[CoverColor],
     covers: &[SharedString],
+    radar: Option<&RecommendedPlaylist>,
+    cx: &Context<RecommendPage>,
 ) -> impl IntoElement {
     div()
         .flex()
@@ -154,7 +169,15 @@ fn quick_entries(
                         .get(index)
                         .cloned()
                         .unwrap_or_else(|| PLACEHOLDER_COVER.into());
-                    quick_entry(entry, today, strip, cover)
+                    let target = match entry.kind {
+                        QuickEntryKind::DailySongs => Some(QuickTarget::DailySongs),
+                        QuickEntryKind::Radar => radar.map(|playlist| QuickTarget::Playlist {
+                            id: playlist.id,
+                            summary: Box::new(playlist.to_summary()),
+                        }),
+                        _ => None,
+                    };
+                    quick_entry(entry, today, strip, cover, index, target, cx)
                 }),
         )
 }
@@ -164,79 +187,104 @@ fn quick_entry(
     today: u8,
     strip: Hsla,
     cover: SharedString,
+    index: usize,
+    target: Option<QuickTarget>,
+    cx: &Context<RecommendPage>,
 ) -> impl IntoElement {
-    div().flex_1().min_w(px(0.)).flex().flex_col().child(
-        // overflow_hidden 只按矩形裁剪，顶角和底角需分别设置在子元素上。
-        div()
-            .w_full()
-            .rounded(COVER_RADIUS)
-            .overflow_hidden()
-            .bg(strip)
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .w_full()
-                    .aspect_ratio(1.)
-                    .relative()
-                    .child(
-                        img(cover)
-                            .size_full()
-                            .object_fit(ObjectFit::Cover)
-                            .rounded_t(COVER_RADIUS),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .rounded_t(COVER_RADIUS)
-                            .bg(cover_shade()),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .top(px(6.))
-                            .left(px(8.))
-                            .right(px(8.))
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .children(match entry.kind {
-                                QuickEntryKind::DailySongs => Some(date_badge(today)),
-                                QuickEntryKind::Roam => Some(roam_badge()),
-                                _ => None,
-                            })
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.))
-                                    .text_size(px(16.))
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(white())
-                                    .truncate()
-                                    .child(entry.title.clone()),
-                            ),
+    let card = div()
+        .flex_1()
+        .min_w(px(0.))
+        .flex()
+        .flex_col()
+        .id(("recommend-entry", index))
+        .child(
+            // overflow_hidden 只按矩形裁剪，顶角和底角需分别设置在子元素上。
+            div()
+                .w_full()
+                .rounded(COVER_RADIUS)
+                .overflow_hidden()
+                .bg(strip)
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .w_full()
+                        .aspect_ratio(1.)
+                        .relative()
+                        .child(
+                            img(cover)
+                                .size_full()
+                                .object_fit(ObjectFit::Cover)
+                                .rounded_t(COVER_RADIUS),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .rounded_t(COVER_RADIUS)
+                                .bg(cover_shade()),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .top(px(6.))
+                                .left(px(8.))
+                                .right(px(8.))
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .children(match entry.kind {
+                                    QuickEntryKind::DailySongs => Some(date_badge(today)),
+                                    QuickEntryKind::Roam => Some(roam_badge()),
+                                    _ => None,
+                                })
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w(px(0.))
+                                        .text_size(px(16.))
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(white())
+                                        .truncate()
+                                        .child(entry.title.clone()),
+                                ),
+                        ),
+                )
+                .child(
+                    div()
+                        .h(CARD_TEXT_HEIGHT)
+                        .bg(strip)
+                        .rounded_b(COVER_RADIUS)
+                        .px(px(10.))
+                        .flex()
+                        .flex_col()
+                        .justify_center()
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .line_height(px(16.))
+                                .line_clamp(2)
+                                .text_color(white())
+                                .child(entry.caption.clone()),
+                        ),
+                ),
+        );
+    match target {
+        Some(target) => {
+            card.cursor_pointer()
+                .on_click(cx.listener(move |_, _, _, cx| match &target {
+                    QuickTarget::DailySongs => NavigationBus::emit(cx, Navigate::DailySongs),
+                    QuickTarget::Playlist { id, summary } => NavigationBus::emit(
+                        cx,
+                        Navigate::Playlist {
+                            id: *id,
+                            summary: Some(summary.as_ref().clone()),
+                        },
                     ),
-            )
-            .child(
-                div()
-                    .h(CARD_TEXT_HEIGHT)
-                    .bg(strip)
-                    .rounded_b(COVER_RADIUS)
-                    .px(px(10.))
-                    .flex()
-                    .flex_col()
-                    .justify_center()
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .line_height(px(16.))
-                            .line_clamp(2)
-                            .text_color(white())
-                            .child(entry.caption.clone()),
-                    ),
-            ),
-    )
+                }))
+        }
+        None => card,
+    }
 }
 
 /// 在编译期嵌入的日历遮罩中插入当天数字，数字处透明透出封面。

@@ -4,7 +4,7 @@ use ncm_api_rs::Query;
 
 use super::{ApiClient, MusicApi};
 use crate::models::{
-    AudioQualityLevel, AudioSourceInfo, LyricLine, Privilege, Song, SongComments,
+    AudioQualityLevel, AudioSourceInfo, LyricLine, Song, SongComments, attach_privileges,
     parse_comment_page,
 };
 
@@ -241,17 +241,6 @@ fn song_source_info(body: &serde_json::Value, song_id: u64) -> Result<AudioSourc
             .as_str()
             .and_then(AudioQualityLevel::from_api_level),
     })
-}
-
-/// privileges 与 songs 是两个独立数组，只靠 id 对应，顺序不保证一致。
-fn attach_privileges(songs: &mut [Song], privileges: Vec<Privilege>) {
-    let mut by_id: HashMap<u64, Privilege> =
-        privileges.into_iter().map(|item| (item.id, item)).collect();
-    for song in songs {
-        if let Some(privilege) = by_id.remove(&song.id) {
-            song.privilege = Some(privilege);
-        }
-    }
 }
 
 #[cfg(test)]

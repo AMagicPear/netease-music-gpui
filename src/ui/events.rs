@@ -12,6 +12,8 @@ pub(crate) enum Navigate {
         summary: Option<Playlist>,
     },
     SongComments(Song),
+    /// 每日推荐不是歌单，单独一条路由；页面的数据由 DailySongsStore 自己加载。
+    DailySongs,
 }
 
 pub(crate) struct NavigationBus;

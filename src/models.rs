@@ -23,8 +23,10 @@ pub use play_mode::PlayMode;
 pub use playlist::{Playlist, RecommendedPlaylist, TrackId};
 pub use recommend::{FeaturedActivity, RecommendEntry};
 pub(crate) use recommend::{
-    parse_activities, parse_entries, parse_playlists, parse_radar, playlists_from_creatives,
+    parse_activities, parse_daily_songs, parse_entries, parse_playlists, parse_radar,
+    playlists_from_creatives,
 };
-pub use song::{Privilege, Song};
+pub use song::Song;
+pub(crate) use song::attach_privileges;
 pub use song_detail::LyricLine;
 pub use user::{UserProfile, VipInfo};

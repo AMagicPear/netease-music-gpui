@@ -4,6 +4,7 @@ use serde_json::Value;
 
 use super::homepage::{CreativeTarget, HomepageCreative, parse_creatives};
 use super::playlist::RecommendedPlaylist;
+use super::song::{Song, attach_privileges};
 
 /// 顶部「每日推荐 + 风格日推」混排区块。
 pub const DAILY_MIX_BLOCK_CODE: &str = "PC_HOMEPAGE_DAILY_MIX";
@@ -72,6 +73,17 @@ fn parse_entry(item: &Value) -> Option<RecommendEntry> {
             .to_owned(),
         resource_id,
     })
+}
+
+/// 每日推荐歌曲：`data.dailySongs` 是歌曲数组，权益可能内嵌在每首歌里，
+/// 也可能单独放在 `data.privileges`，两种形状都合并。
+pub(crate) fn parse_daily_songs(value: &Value) -> Result<Vec<Song>, String> {
+    let data = &value["data"];
+    let mut songs: Vec<Song> = serde_json::from_value(data["dailySongs"].clone())
+        .map_err(|error| format!("每日推荐格式无效：{error}"))?;
+    let privileges = serde_json::from_value(data["privileges"].clone()).unwrap_or_default();
+    attach_privileges(&mut songs, privileges);
+    Ok(songs)
 }
 
 /// 解析 `/banner/get` 的 `banners`。只要带图和标题的，运营位没图时直接跳过。
@@ -153,8 +165,8 @@ pub(crate) fn playlists_from_creatives(creatives: &[HomepageCreative]) -> Vec<Re
 #[cfg(test)]
 mod tests {
     use super::{
-        DAILY_MIX_BLOCK_CODE, parse_activities, parse_entries, parse_playlists, parse_radar,
-        strip_radar_suffix,
+        DAILY_MIX_BLOCK_CODE, parse_activities, parse_daily_songs, parse_entries, parse_playlists,
+        parse_radar, strip_radar_suffix,
     };
 
     #[test]
@@ -194,6 +206,32 @@ mod tests {
         );
         assert_eq!(entries[1].resource_id, 727950554);
         assert_eq!(entries[1].cover_text, "欧美流行日推");
+    }
+
+    #[test]
+    fn parses_daily_songs_and_attaches_privileges_by_id() {
+        let songs = parse_daily_songs(&serde_json::json!({
+            "data": {
+                "dailySongs": [
+                    {"id": 1, "name": "第一首", "ar": [], "al": {"id": 3, "name": "专辑"}, "dt": 1000},
+                    {"id": 2, "name": "第二首", "ar": [], "al": {"id": 4, "name": "专辑"}, "dt": 2000}
+                ],
+                "privileges": [{"id": 2, "playMaxBrLevel": "lossless"}]
+            }
+        }))
+        .unwrap();
+        assert_eq!(songs.len(), 2);
+        assert_eq!(songs[0].name, "第一首");
+        assert!(songs[0].privilege.is_none());
+        assert_eq!(
+            songs[1]
+                .privilege
+                .as_ref()
+                .and_then(|privilege| privilege.play_max_br_level.as_deref()),
+            Some("lossless")
+        );
+        // 缺少 dailySongs 时不能静默当成「今天没有推荐」。
+        assert!(parse_daily_songs(&serde_json::json!({"data": {}})).is_err());
     }
 
     #[test]

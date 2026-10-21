@@ -110,6 +110,22 @@ fn recommend_entries_can_parse_real_results() {
 
 #[test]
 #[ignore = "需要登录会话（或 COOKIE 环境变量）和网络连接"]
+fn daily_songs_can_parse_real_results() {
+    let api = MusicApi::from_env().expect("无法获取登录会话");
+    let songs = api
+        .runtime
+        .block_on(MusicApi::daily_songs(api.client.clone()))
+        .expect("每日推荐失败");
+    assert!(!songs.is_empty());
+    for song in &songs {
+        assert!(song.id > 0);
+        assert!(!song.name.is_empty());
+        assert!(song.al.id > 0);
+    }
+}
+
+#[test]
+#[ignore = "需要登录会话（或 COOKIE 环境变量）和网络连接"]
 fn recommended_playlists_can_parse_real_results() {
     let api = MusicApi::from_env().expect("无法获取登录会话");
     let playlists = api

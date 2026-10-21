@@ -1,4 +1,5 @@
 pub mod account;
+pub mod daily;
 pub mod library;
 pub mod playlist_detail;
 pub mod recommend;

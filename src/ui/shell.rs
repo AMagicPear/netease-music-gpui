@@ -57,6 +57,11 @@ impl MainWindow {
                     this.open_playlist_nav(*id, summary.clone(), cx)
                 }
                 Navigate::SongComments(song) => this.open_song_comments(song.clone(), window, cx),
+                Navigate::DailySongs => {
+                    this.main_content.update(cx, |content, cx| {
+                        content.navigate(ContentPage::DailySongs, cx)
+                    });
+                }
             },
         );
         // 封面预取只跟随歌曲和预加载候选，不处理位置推进。

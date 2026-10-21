@@ -1,3 +1,4 @@
+pub(super) mod daily;
 pub(super) mod playlist;
 pub(super) mod recommend;
 pub(super) mod search;
@@ -14,6 +15,8 @@ pub(super) enum ContentPage {
     Following,
     FavoriteMusic,
     Playlist(u64),
+    /// 每日推荐：顶部入口进来，侧栏没有对应按钮。
+    DailySongs,
     /// 歌曲评论页：评论图标进来，侧栏没有对应按钮。
     SongComments(u64),
     Recent,
@@ -55,6 +58,7 @@ impl ContentPage {
             Self::Following => "following",
             Self::FavoriteMusic => "favorite-music",
             Self::Playlist(id) => return format!("playlist-{id}").into(),
+            Self::DailySongs => "daily-songs",
             Self::SongComments(id) => return format!("song-comments-{id}").into(),
             Self::Recent => "recent",
             Self::MyPodcast => "my-podcast",
@@ -75,6 +79,7 @@ impl ContentPage {
             Self::Following => "关注",
             Self::FavoriteMusic => "我喜欢的音乐",
             Self::Playlist(_) => "歌单",
+            Self::DailySongs => "每日推荐",
             Self::SongComments(_) => "歌曲评论",
             Self::Recent => "最近播放",
             Self::MyPodcast => "我的播客",
@@ -94,6 +99,7 @@ impl ContentPage {
             Self::Following => "icons/sidebar/sidebar_community.svg",
             Self::FavoriteMusic => "icons/sidebar/sidebar_like.svg",
             Self::Playlist(_) => "icons/playlist.svg",
+            Self::DailySongs => "icons/sidebar/sidebar_home.svg",
             Self::SongComments(_) => "icons/comment.svg",
             Self::Recent => "icons/sidebar/sidebar_history.svg",
             Self::MyPodcast => "icons/sidebar/sidebar_my_podcast.svg",
@@ -119,6 +125,7 @@ impl ContentPage {
             Self::Recommend
             | Self::FavoriteMusic
             | Self::Playlist(_)
+            | Self::DailySongs
             | Self::SongComments(_)
             | Self::Search => None,
             _ => Some(cx.new(|_| PlaceholderPage(self)).into()),
