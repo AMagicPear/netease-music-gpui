@@ -110,6 +110,7 @@ impl QuickEntry {
 /// 顶部入口和精选活动游客也能取；雷达歌单和个性化推荐歌单要登录态。
 pub struct RecommendStore {
     pub entries: Vec<QuickEntry>,
+    pub radar_first_song_cover: Option<SharedString>,
     pub radar: Vec<RecommendedPlaylist>,
     pub playlists: Vec<RecommendedPlaylist>,
     pub featured: Vec<FeaturedActivity>,
@@ -135,6 +136,7 @@ impl RecommendStore {
         });
         let mut this = Self {
             entries: default_entries(),
+            radar_first_song_cover: None,
             radar: Vec::new(),
             playlists: Vec::new(),
             featured: Vec::new(),
@@ -173,6 +175,7 @@ impl RecommendStore {
         // 换账号后立即清除上一位用户的内容。
         if self.user_id != Some(user_id) {
             self.entries = default_entries();
+            self.radar_first_song_cover = None;
             self.radar.clear();
             self.playlists.clear();
             self.featured.clear();
@@ -212,6 +215,7 @@ impl RecommendStore {
                     .unwrap_or_else(|_| Err("雷达歌单请求任务失败".into()));
                 let _ = this.update(cx, |this, cx| {
                     if this.apply_radar(generation, result) {
+                        this.load_radar_first_song(cx);
                         cx.notify();
                     }
                 });
@@ -318,6 +322,7 @@ impl RecommendStore {
         self.radar_request = None;
         if let Ok(playlists) = result {
             self.radar = playlists;
+            self.radar_first_song_cover = None;
             self.apply_radar_to_entry();
         }
         true
@@ -339,6 +344,35 @@ impl RecommendStore {
         if !first.name.is_empty() {
             entry.caption = first.name.clone().into();
         }
+    }
+
+    pub fn load_radar_first_song(&mut self, cx: &mut Context<Self>) {
+        let Some(playlist) = self.radar.first() else {
+            return;
+        };
+        let playlist_id = playlist.id;
+        let generation = self.generation;
+        let (runtime, client) = {
+            let api = MusicApi::global(cx);
+            (api.runtime.handle().clone(), api.client.clone())
+        };
+        let request = runtime.spawn(MusicApi::playlist_first_song(client, playlist_id));
+        cx.spawn(async move |this, cx| {
+            let result = request.await.ok().and_then(Result::ok);
+            let _ = this.update(cx, |this, cx| {
+                if this.generation == generation
+                    && this
+                        .radar
+                        .first()
+                        .is_some_and(|playlist| playlist.id == playlist_id)
+                {
+                    this.radar_first_song_cover =
+                        result.and_then(|song| song.al.pic_url).map(Into::into);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// 推荐歌单落地：这是页面唯一的 `loading` / `error` 来源（刷新按钮在它上面）。
@@ -406,6 +440,7 @@ mod tests {
     fn store() -> RecommendStore {
         RecommendStore {
             entries: default_entries(),
+            radar_first_song_cover: None,
             radar: Vec::new(),
             playlists: Vec::new(),
             featured: Vec::new(),

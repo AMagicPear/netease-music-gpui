@@ -4,6 +4,7 @@ use gpui::*;
 use gpui_kit::base::{Button, ColorTokens, Theme};
 
 use crate::models::{FeaturedActivity, Playlist, RecommendedPlaylist};
+use crate::state::daily::DailySongsStore;
 use crate::state::recommend::{QuickEntry, QuickEntryKind, RecommendStore};
 use crate::ui::assets::{track_cover_image, track_cover_url};
 use crate::ui::components::{centered_empty, play_count_label, spinner};
@@ -22,14 +23,16 @@ const PLACEHOLDER_COVER: &str = "images/trackBlank.png";
 /// shell 通过 content 注入可用宽度，所有区块共用同一列数。
 pub struct RecommendPage {
     store: Entity<RecommendStore>,
+    daily: Entity<DailySongsStore>,
     /// 与 entries 按下标对齐，新封面加载中保留上一张的颜色。
     entry_colors: Vec<CoverColor>,
 }
 
 impl RecommendPage {
-    pub fn new(store: Entity<RecommendStore>) -> Self {
+    pub fn new(store: Entity<RecommendStore>, daily: Entity<DailySongsStore>) -> Self {
         Self {
             store,
+            daily,
             entry_colors: Vec::new(),
         }
     }
@@ -52,13 +55,27 @@ impl RecommendPage {
     }
 
     fn entry_covers(&self, cx: &Context<Self>) -> Vec<SharedString> {
-        self.store
+        let store = self.store.read(cx);
+        let daily_cover = self
+            .daily
             .read(cx)
+            .songs
+            .first()
+            .and_then(|song| song.al.pic_url.as_deref());
+        store
             .entries
             .iter()
-            .map(|entry| match &entry.cover {
-                Some(cover) => track_cover_url(Some(cover), 300).into(),
-                None => PLACEHOLDER_COVER.into(),
+            .map(|entry| match entry.kind {
+                QuickEntryKind::DailySongs if daily_cover.is_some() => {
+                    track_cover_url(daily_cover, 300).into()
+                }
+                QuickEntryKind::Radar if store.radar_first_song_cover.is_some() => {
+                    track_cover_url(store.radar_first_song_cover.as_deref(), 300).into()
+                }
+                _ => match &entry.cover {
+                    Some(cover) => track_cover_url(Some(cover), 300).into(),
+                    None => PLACEHOLDER_COVER.into(),
+                },
             })
             .collect()
     }
@@ -163,7 +180,7 @@ fn quick_entries(
                 .enumerate()
                 .map(|(index, entry)| {
                     let strip =
-                        dark_gradient(entry_colors.get(index).and_then(CoverColor::current)).0[1]
+                        dark_gradient(entry_colors.get(index).and_then(CoverColor::current)).0[0]
                             .into();
                     let cover = covers
                         .get(index)

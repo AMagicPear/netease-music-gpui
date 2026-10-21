@@ -9,6 +9,15 @@ use crate::models::{Playlist, Song, SongComments, TrackId, parse_comment_page};
 const COLLECT_BATCH: usize = 100;
 
 impl MusicApi {
+    pub async fn playlist_first_song(client: ApiClient, playlist_id: u64) -> Result<Song, String> {
+        let playlist = Self::playlist_meta(client.clone(), playlist_id).await?;
+        let track = playlist
+            .track_ids
+            .first()
+            .ok_or_else(|| format!("歌单 {playlist_id} 没有歌曲"))?;
+        Self::song_detail(client, track.id).await
+    }
+
     pub async fn user_playlists(client: &ApiClient, user_id: u64) -> Result<Vec<Playlist>, String> {
         let mut playlists = Vec::new();
         loop {

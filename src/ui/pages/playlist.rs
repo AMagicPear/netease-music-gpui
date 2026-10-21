@@ -11,7 +11,7 @@ use gpui_kit::component::avatar::Avatar;
 use gpui_kit::component::native_menu::NativeMenu;
 use std::cell::Cell;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// 标题、专辑按剩余宽度的比例分配；拖动后保留该比例。
 const ALBUM_SHARE_MIN: f32 = 0.1;
@@ -46,11 +46,11 @@ use crate::ui::assets::thumbnail_url;
 use crate::ui::comments::{CommentResource, CommentsPanel};
 use crate::ui::components::{
     ACTION_BUTTON_HEIGHT, ACTION_BUTTON_PADDING, CELL_PADDING, COLUMN_GAP, DURATION_COLUMN_WIDTH,
-    HEADER_HEIGHT, KeepRowHover, LIKE_COLUMN_WIDTH, ResizeDragPreview, SECONDARY_FONT_WEIGHT,
-    SongDisplay, TabBar, TabChanged, TabItem, TableColumn, artist_label, centered_empty,
-    hovered_row_after, index_column_width, like_icon_path, play_all_button, play_count_label,
-    quality_badge_path, row_hover_icon, search_clear_button, spinner, text_with_matches,
-    title_with_subtitle, virtual_table,
+    HEADER_HEIGHT, KeepRowHover, LIKE_COLUMN_WIDTH, PlayingIndicator, ResizeDragPreview,
+    SECONDARY_FONT_WEIGHT, SongDisplay, TabBar, TabChanged, TabItem, TableColumn, artist_label,
+    centered_empty, hovered_row_after, index_column_width, like_icon_path, play_all_button,
+    play_count_label, quality_badge_path, row_hover_icon, search_clear_button, spinner,
+    text_with_matches, title_with_subtitle, virtual_table,
 };
 use crate::ui::cover_color::{Backdrop, blend_color};
 use crate::ui::events::{Navigate, NavigationBus, PlaylistCommentsTab, PlaylistMetadataChanged};
@@ -113,7 +113,7 @@ pub struct PlaylistPage {
     hovered_row: Option<u64>,
     table_header_hidden: Rc<Cell<bool>>,
     measured_size: Rc<Cell<Option<Size<Pixels>>>>,
-    playing_indicator: Entity<PlayingIndicator>,
+    playing_indicator: PlayingIndicator,
 }
 
 impl EventEmitter<PlaylistCommentsTab> for PlaylistPage {}
@@ -215,73 +215,13 @@ fn row_actions(
         .into_any_element()
 }
 
-#[derive(Clone, Copy)]
-struct IndicatorPlacement {
-    bounds: Bounds<Pixels>,
-    mask: ContentMask<Pixels>,
-}
-
-/// 与缓存的歌单 View 同级挂载，动画通知不经过歌单的视图路径。
-struct PlayingIndicator {
-    placement: Rc<Cell<Option<IndicatorPlacement>>>,
-    started_at: Instant,
-}
-
-fn indicator_bars(bounds: Bounds<Pixels>, progress: f32) -> [Bounds<Pixels>; 3] {
-    [0, 1, 2].map(|index| {
-        let phase = index as f32 * 0.33;
-        let height = px(2. + ((progress + phase) * std::f32::consts::TAU).sin().abs() * 13.);
-        Bounds::new(
-            point(
-                bounds.left() + px(index as f32 * 5.),
-                bounds.bottom() - height,
-            ),
-            size(px(2.), height),
-        )
-    })
-}
-
-impl Render for PlayingIndicator {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let placement = self.placement.clone();
-        let started_at = self.started_at;
-        let color = Theme::global(cx).tokens.colors.primary;
-        canvas(
-            |_, _, _| (),
-            move |_, _, window, cx| {
-                // 此时歌单已完成 prepaint，位置来自本帧或仍有效的缓存。
-                let Some(placement) = placement.get() else {
-                    return;
-                };
-                if !placement.bounds.intersects(&placement.mask.bounds) {
-                    return;
-                }
-                let progress = if cx.reduce_motion() {
-                    0.
-                } else {
-                    started_at.elapsed().as_secs_f32() / 2.
-                };
-                window.with_content_mask(Some(placement.mask), |window| {
-                    for bounds in indicator_bars(placement.bounds, progress) {
-                        window.paint_quad(fill(bounds, color));
-                    }
-                });
-                if !cx.reduce_motion() {
-                    window.request_animation_frame();
-                }
-            },
-        )
-        .absolute()
-        .inset_0()
-    }
-}
-
 impl PlaylistPage {
     pub fn new(
         window: &mut Window,
         library: Entity<MusicLibrary>,
         playback: Entity<PlaybackController>,
         backdrop: Backdrop,
+        playing_indicator: PlayingIndicator,
         cx: &mut Context<Self>,
     ) -> Self {
         let detail = cx.new(|_| PlaylistDetail::default());
@@ -420,10 +360,6 @@ impl PlaylistPage {
             cx.emit(PlaylistMetadataChanged);
             cx.notify();
         });
-        let playing_indicator = cx.new(|_| PlayingIndicator {
-            placement: Rc::new(Cell::new(None)),
-            started_at: Instant::now(),
-        });
         // 搜索框的状态交给 `InputState` 自己管：它内部已经建好 `FocusHandle`
         // 并登记为 tab stop，聚焦、选中、输入法都归它，这里不重复造。
         let search_input = cx.new(|cx| {
@@ -490,10 +426,6 @@ impl PlaylistPage {
                 .into_any_element(),
             _ => view.into_any_element(),
         }
-    }
-
-    pub fn playing_overlay(&self) -> AnyElement {
-        self.playing_indicator.clone().into_any_element()
     }
 
     pub fn cover_url(&self, cx: &App) -> Option<String> {
@@ -1284,21 +1216,8 @@ impl PlaylistPage {
                     )
                     .into_any_element()
             } else if is_current_song && is_playing {
-                let placement = self.playing_indicator.read(cx).placement.clone();
                 index_cell
-                    .child(
-                        canvas(
-                            move |bounds, window, _| {
-                                placement.set(Some(IndicatorPlacement {
-                                    bounds,
-                                    mask: window.content_mask(),
-                                }));
-                            },
-                            |_, _, _, _| {},
-                        )
-                        .w(px(12.))
-                        .h(px(15.)),
-                    )
+                    .child(self.playing_indicator.anchor())
                     .into_any_element()
             } else {
                 index_cell
@@ -1412,7 +1331,7 @@ fn icon_action_button(
 
 impl Render for PlaylistPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.playing_indicator.read(cx).placement.set(None);
+        self.playing_indicator.clear();
         self.table_header_hidden.set(false);
         if self.comments_active(cx) {
             return self.comments.render();

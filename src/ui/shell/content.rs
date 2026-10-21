@@ -17,8 +17,8 @@ use crate::state::{
 use crate::ui::assets::thumbnail_url;
 use crate::ui::comments::SongCommentsPage;
 use crate::ui::components::{
-    PAGE_SIDE_PADDING, ResizeDragPreview, SidePanel, SidePanelContent, SurfacePopover,
-    search_clear_button, window_drag_area,
+    PAGE_SIDE_PADDING, PlayingIndicator, ResizeDragPreview, SidePanel, SidePanelContent,
+    SurfacePopover, search_clear_button, window_drag_area,
 };
 use crate::ui::cover_color::Backdrop;
 use crate::ui::events::{ContentLayoutChanged, PlaylistCommentsTab};
@@ -58,6 +58,7 @@ pub struct MainContent {
     side_panel: Entity<SidePanel>,
     page_scroll: HashMap<ContentPage, ScrollHandle>,
     pub(super) playlist_backdrop: Backdrop,
+    playing_indicator: PlayingIndicator,
     _sidebar_subscription: Subscription,
     _sidebar_login_subscription: Subscription,
     _user_profile_subscription: Subscription,
@@ -91,12 +92,14 @@ impl MainContent {
         );
         // 吸顶编辑框要按自己的屏幕位置从这份渐变里取色，所以两边共用同一个句柄。
         let playlist_backdrop = Backdrop::default();
+        let playing_indicator = PlayingIndicator::default();
         let playlist_page = cx.new(|cx| {
             PlaylistPage::new(
                 window,
                 library.clone(),
                 playback.clone(),
                 playlist_backdrop.clone(),
+                playing_indicator.clone(),
                 cx,
             )
         });
@@ -106,10 +109,17 @@ impl MainContent {
             });
         let song_comments_page = cx.new(|cx| SongCommentsPage::new(window, cx));
         let recommended = cx.new(|cx| RecommendStore::new(user_profile.clone(), cx));
-        let recommend_page = cx.new(|_| RecommendPage::new(recommended));
         let daily_store = cx.new(|cx| DailySongsStore::new(user_profile.clone(), cx));
-        let daily_page =
-            cx.new(|cx| DailySongsPage::new(daily_store, library.clone(), playback.clone(), cx));
+        let recommend_page = cx.new(|_| RecommendPage::new(recommended, daily_store.clone()));
+        let daily_page = cx.new(|cx| {
+            DailySongsPage::new(
+                daily_store,
+                library.clone(),
+                playback.clone(),
+                playing_indicator.clone(),
+                cx,
+            )
+        });
         let library_subscription = cx.observe(&library, |this, _, cx| {
             // 收藏歌单的 ID 要等账号索引返回后才能解析。
             this.open_playlist(this.active_page, cx);
@@ -129,6 +139,7 @@ impl MainContent {
                 library.clone(),
                 playback.clone(),
                 search_results.clone(),
+                playing_indicator.clone(),
                 cx,
             )
         });
@@ -174,6 +185,7 @@ impl MainContent {
             library,
             side_panel,
             playlist_backdrop,
+            playing_indicator,
             page_scroll: ContentPage::all()
                 .map(|page| (page, ScrollHandle::default()))
                 .collect(),
@@ -215,6 +227,9 @@ impl MainContent {
     /// 返回历史页面时不再入栈。
     fn show_page(&mut self, page: ContentPage, cx: &mut Context<Self>) {
         let changed = self.active_page != page;
+        if changed {
+            self.playing_indicator.clear();
+        }
         self.active_page = page;
         self.sidebar
             .update(cx, |sidebar, cx| sidebar.set_active_page(page, cx));
@@ -659,12 +674,15 @@ impl Render for MainContent {
 }
 
 impl MainContent {
-    /// 播放进度指示留在外层：它按页面内容区的裁剪框绘制（见 `PlayingIndicator`），
+    /// 播放指示留在外层：它按页面内容区的裁剪框绘制（见 `PlayingIndicator`），
     /// 画不进滚动条那一条，没有遮挡问题，所以不必跟着悬浮页头搬进页面区。
-    pub(super) fn playlist_overlays(&self, cx: &mut Context<Self>) -> Option<Div> {
+    pub(super) fn song_list_overlays(&self, cx: &mut Context<Self>) -> Option<Div> {
         matches!(
             self.active_page,
-            ContentPage::FavoriteMusic | ContentPage::Playlist(_)
+            ContentPage::FavoriteMusic
+                | ContentPage::Playlist(_)
+                | ContentPage::DailySongs
+                | ContentPage::Search
         )
         .then(|| {
             div()
@@ -674,7 +692,10 @@ impl MainContent {
                 .top(px(HEADER_HEIGHT))
                 .bottom_0()
                 .overflow_hidden()
-                .child(self.playlist_page.read(cx).playing_overlay())
+                .child(
+                    self.playing_indicator
+                        .overlay(Theme::global(cx).tokens.colors.primary),
+                )
         })
     }
 }

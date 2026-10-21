@@ -8,18 +8,22 @@ use std::rc::Rc;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_kit::base::{Button, ColorTokens, Theme};
+use gpui_kit::component::native_menu::NativeMenu;
 
 use crate::models::Song;
 use crate::playback::{PlaybackController, PlaybackEvent};
 use crate::state::{daily::DailySongsStore, library::MusicLibrary};
 use crate::ui::assets::track_cover_image;
 use crate::ui::components::{
-    CELL_PADDING, DURATION_COLUMN_WIDTH, KeepRowHover, LIKE_COLUMN_WIDTH, SECONDARY_FONT_WEIGHT,
-    SongDisplay, TableColumn, artist_label, centered_empty, hovered_row_after, index_column_width,
-    like_icon_path, play_all_button, quality_badge_path, row_hover_icon, spinner,
-    title_with_subtitle, virtual_table,
+    ACTION_BUTTON_HEIGHT, ACTION_BUTTON_PADDING, CELL_PADDING, DURATION_COLUMN_WIDTH, KeepRowHover,
+    LIKE_COLUMN_WIDTH, PlayingIndicator, SECONDARY_FONT_WEIGHT, SongDisplay, TableColumn,
+    artist_label, centered_empty, hovered_row_after, index_column_width, like_icon_path,
+    play_all_button, quality_badge_path, row_hover_icon, spinner, title_with_subtitle,
+    virtual_table,
 };
-use crate::ui::theme::{DOLPHIN_FAMILY, IconSize};
+use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_OPACITY};
+
+actions!(daily, [Share, BatchOperation, AddAllToPlaylist]);
 
 /// 日推不是歌单，没有可用的歌单 ID；队列来源用 0，与搜索页一致。
 const DAILY_SOURCE: u64 = 0;
@@ -41,6 +45,7 @@ pub struct DailySongsPage {
     _library_subscription: Subscription,
     playback: Entity<PlaybackController>,
     _playback_subscription: Subscription,
+    playing_indicator: PlayingIndicator,
     columns: Rc<Vec<TableColumn>>,
     hovered_row: Option<u64>,
 }
@@ -50,6 +55,7 @@ impl DailySongsPage {
         store: Entity<DailySongsStore>,
         library: Entity<MusicLibrary>,
         playback: Entity<PlaybackController>,
+        playing_indicator: PlayingIndicator,
         cx: &mut Context<Self>,
     ) -> Self {
         let store_subscription = cx.observe(&store, |this, store, cx| {
@@ -72,6 +78,7 @@ impl DailySongsPage {
             _library_subscription: library_subscription,
             playback,
             _playback_subscription: playback_subscription,
+            playing_indicator,
             columns: table_columns(row_count),
             hovered_row: None,
         }
@@ -96,43 +103,104 @@ impl DailySongsPage {
         let count = self.store.read(cx).songs.len();
         let today =
             time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
-        let subtitle = format!(
-            "{}月{}日 · 根据你的口味每天更新",
-            u8::from(today.month()),
-            today.day()
-        );
         div()
             .flex()
-            .items_end()
-            .justify_between()
-            .gap(px(16.))
+            .flex_col()
+            .gap(px(8.))
             .child(
                 div()
                     .flex()
-                    .flex_col()
-                    .gap(px(4.))
+                    .items_end()
+                    .gap(px(8.))
                     .child(
                         div()
-                            .text_size(px(24.))
-                            .font_weight(FontWeight::BOLD)
+                            .flex()
+                            .items_end()
+                            .gap(px(5.))
+                            .font_family(DOLPHIN_FAMILY)
                             .text_color(colors.foreground)
-                            .child("每日推荐"),
+                            .child(div().text_size(px(40.)).child(today.day().to_string()))
+                            .child(
+                                div()
+                                    .mb(px(5.))
+                                    .flex()
+                                    .items_end()
+                                    .gap(px(4.))
+                                    .text_size(px(20.))
+                                    .child("/")
+                                    .child(u8::from(today.month()).to_string()),
+                            ),
                     )
                     .child(
                         div()
-                            .text_size(px(13.))
-                            .text_color(colors.muted_foreground)
-                            .child(subtitle),
+                            .mb(px(4.))
+                            .text_size(px(22.))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(colors.foreground)
+                            .child("每日推荐"),
                     ),
+            )
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .text_color(colors.muted_foreground)
+                    .child("根据你的音乐口味生成，每天6:00更新"),
             )
             .when(count > 0, |row| {
                 row.child(
-                    play_all_button(colors, false).on_click(cx.listener(|this, _, _, cx| {
-                        let songs = this.store.read(cx).songs.clone();
-                        this.playback.update(cx, |playback, cx| {
-                            playback.play_list_from_start(DAILY_SOURCE, songs, cx);
-                        });
-                    })),
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(12.))
+                        .child(play_all_button(colors, false).on_click(cx.listener(
+                            |this, _, _, cx| {
+                                let songs = this.store.read(cx).songs.clone();
+                                this.playback.update(cx, |playback, cx| {
+                                    playback.play_list_from_start(DAILY_SOURCE, songs, cx);
+                                });
+                            },
+                        )))
+                        .child(
+                            Button::new("daily-download-button")
+                                .h(ACTION_BUTTON_HEIGHT)
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .gap(px(4.))
+                                .px(ACTION_BUTTON_PADDING)
+                                .border_1()
+                                .border_color(colors.foreground.alpha(0.06))
+                                .rounded_lg()
+                                .bg(colors.foreground.alpha(0.03))
+                                .hover(|style| style.bg(colors.foreground.alpha(0.08)))
+                                .active(|style| style.opacity(PRESSED_OPACITY))
+                                .text_size(px(13.))
+                                .text_color(colors.secondary_foreground)
+                                .child(
+                                    svg()
+                                        .path("icons/download.svg")
+                                        .size(px(18.))
+                                        .flex_none()
+                                        .text_color(colors.secondary_foreground),
+                                )
+                                .child("下载"),
+                        )
+                        .child(
+                            daily_icon_button(
+                                "daily-more-button",
+                                "icons/xpoint.svg",
+                                "更多",
+                                colors,
+                            )
+                            .on_click(|event, window, cx| {
+                                NativeMenu::new()
+                                    .menu("分享…", Box::new(Share))
+                                    .menu("批量操作", Box::new(BatchOperation))
+                                    .menu("添加全部至播放列表", Box::new(AddAllToPlaylist))
+                                    .show(event.position(), window, cx);
+                            }),
+                        ),
                 )
             })
             .into_any_element()
@@ -295,8 +363,7 @@ impl DailySongsPage {
                     .into_any_element()
             } else if is_current_song && is_playing {
                 index_cell
-                    .text_color(colors.primary)
-                    .child("·")
+                    .child(self.playing_indicator.anchor())
                     .into_any_element()
             } else {
                 index_cell
@@ -419,8 +486,37 @@ impl DailySongsPage {
     }
 }
 
+fn daily_icon_button(
+    id: &'static str,
+    path: &'static str,
+    label: &'static str,
+    colors: ColorTokens,
+) -> Button {
+    Button::new(id)
+        .aria_label(label)
+        .size(ACTION_BUTTON_HEIGHT)
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .border_1()
+        .border_color(colors.foreground.alpha(0.06))
+        .rounded_lg()
+        .bg(colors.foreground.alpha(0.03))
+        .hover(|style| style.bg(colors.foreground.alpha(0.08)))
+        .active(|style| style.opacity(PRESSED_OPACITY))
+        .child(
+            svg()
+                .path(path)
+                .size(px(16.))
+                .flex_none()
+                .text_color(colors.secondary_foreground),
+        )
+}
+
 impl Render for DailySongsPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.playing_indicator.clear();
         let colors = Theme::global(cx).tokens.colors;
         div()
             .w_full()

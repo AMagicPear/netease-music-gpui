@@ -234,7 +234,7 @@ impl Render for MainWindow {
                     // 保留歌单 overlay 在专辑页滑入层下方，避免打断悬浮标题的退场动画。
                     .children(
                         self.main_content
-                            .update(cx, |content, cx| content.playlist_overlays(cx)),
+                            .update(cx, |content, cx| content.song_list_overlays(cx)),
                     )
                     .child(
                         self.now_playing_page

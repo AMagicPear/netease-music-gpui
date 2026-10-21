@@ -11,10 +11,10 @@ use crate::state::search_results::SearchResults;
 use crate::ui::assets::{track_cover_image, track_cover_url};
 use crate::ui::components::{
     ACTION_BUTTON_HEIGHT, CELL_PADDING, DURATION_COLUMN_WIDTH, KeepRowHover, LIKE_COLUMN_WIDTH,
-    PAGE_SIDE_PADDING, ROW_HEIGHT, SECONDARY_FONT_WEIGHT, SongDisplay, TabBar, TabChanged, TabItem,
-    TableColumn, artist_label, centered_empty, hovered_row_after, index_column_width,
-    like_icon_path, play_all_button, play_count_label, quality_badge_path, row_hover_icon, spinner,
-    title_with_subtitle, virtual_table,
+    PAGE_SIDE_PADDING, PlayingIndicator, ROW_HEIGHT, SECONDARY_FONT_WEIGHT, SongDisplay, TabBar,
+    TabChanged, TabItem, TableColumn, artist_label, centered_empty, hovered_row_after,
+    index_column_width, like_icon_path, play_all_button, play_count_label, quality_badge_path,
+    row_hover_icon, spinner, title_with_subtitle, virtual_table,
 };
 use crate::ui::events::{Navigate, NavigationBus};
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize};
@@ -79,6 +79,7 @@ pub struct SearchPage {
     table_scroll: ScrollHandle,
     /// hover 中的行，用 id 标记，不随列表刷新错位。
     hovered_row: Option<u64>,
+    playing_indicator: PlayingIndicator,
 }
 
 /// 单曲 / 综合的列定义。搜索结果不做排序，表头就是纯文字。
@@ -116,6 +117,7 @@ impl SearchPage {
         library: Entity<MusicLibrary>,
         playback: Entity<PlaybackController>,
         results: Entity<SearchResults>,
+        playing_indicator: PlayingIndicator,
         cx: &mut Context<Self>,
     ) -> Self {
         let tabs = cx.new(|_| {
@@ -164,6 +166,7 @@ impl SearchPage {
             playlist_columns: playlist_table_columns(0),
             table_scroll: ScrollHandle::default(),
             hovered_row: None,
+            playing_indicator,
         }
     }
 
@@ -595,10 +598,9 @@ impl SearchPage {
                     )
                     .into_any_element()
             } else if is_current_song && is_playing {
-                // 正在播放的行：主题红高亮标题已经足够，序号位置留空。
+                // 与歌单、日推共用同一个播放动效。
                 index_cell
-                    .text_color(colors.primary)
-                    .child("·")
+                    .child(self.playing_indicator.anchor())
                     .into_any_element()
             } else {
                 index_cell
@@ -728,6 +730,7 @@ impl SearchPage {
 
 impl Render for SearchPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.playing_indicator.clear();
         let colors = Theme::global(cx).tokens.colors;
         let tab = self.tabs.read(cx).selected_index();
         let kind = SEARCH_TABS[tab].0;
