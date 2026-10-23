@@ -91,7 +91,15 @@ impl RecommendPage {
             .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
             .day();
         let store = self.store.read(cx);
-        let entries = &store.entries;
+        let mut entries = store.entries.clone();
+        for entry in &mut entries {
+            if entry.kind == QuickEntryKind::DailySongs {
+                entry.caption = self.daily.read(cx).songs.first().map_or_else(
+                    || "每日推荐".into(),
+                    |song| format!("每日推荐 | 从「{}」听起", song.name).into(),
+                );
+            }
+        }
         let natural_columns = columns_for(available_width);
         let columns = if entries.is_empty() {
             natural_columns
@@ -103,7 +111,7 @@ impl RecommendPage {
             page = page.child(quick_entries(
                 today,
                 columns,
-                entries,
+                &entries,
                 &self.entry_colors,
                 covers,
                 store.radar.first(),
@@ -128,7 +136,11 @@ impl RecommendPage {
             );
         }
         if !store.featured.is_empty() {
-            page = page.child(featured_activities(colors, &store.featured));
+            page = page.child(featured_activities(
+                colors,
+                &store.featured,
+                svg_font_family(&Theme::global(cx).tokens.typography.sans),
+            ));
         }
         page.into_any_element()
     }
@@ -553,7 +565,11 @@ fn recommended_card(
         }))
 }
 
-fn featured_activities(colors: ColorTokens, activities: &[FeaturedActivity]) -> impl IntoElement {
+fn featured_activities(
+    colors: ColorTokens,
+    activities: &[FeaturedActivity],
+    font_family: &str,
+) -> impl IntoElement {
     let mut row = div().flex().gap(px(CARD_GAP));
     for activity in activities.iter().take(3) {
         // 横幅直接使用原图，避免 CDN 的正方形裁剪截掉两侧文字。
@@ -591,14 +607,9 @@ fn featured_activities(colors: ColorTokens, activities: &[FeaturedActivity]) -> 
                 .child(
                     div()
                         .absolute()
-                        .left(px(14.))
-                        .right(px(14.))
-                        .bottom(px(12.))
-                        .text_size(px(14.))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(white())
-                        .line_clamp(1)
-                        .child(activity.title.clone()),
+                        .right(px(5.))
+                        .bottom(px(5.))
+                        .child(activity_label(&activity.title, font_family)),
                 ),
         );
     }
@@ -608,4 +619,38 @@ fn featured_activities(colors: ColorTokens, activities: &[FeaturedActivity]) -> 
         .gap(px(16.))
         .child(section_title("精选活动", colors))
         .child(row)
+}
+
+fn activity_label(title: &str, font_family: &str) -> AnyElement {
+    let escape_xml = |text: &str| {
+        text
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+    };
+    let title = escape_xml(title);
+    let font_family = escape_xml(font_family);
+    let width = title.chars().count() as f32 * 10. + 6.;
+    let source = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="16" viewBox="0 0 {width} 16"><defs><mask id="title-cut"><rect width="100%" height="100%" fill="white"/><text x="50%" y="11.5" text-anchor="middle" font-family="{font_family}" font-size="10" font-weight="600" fill="black">{title}</text></mask></defs><rect x="0" y="0" width="100%" height="100%" rx="4" fill="white" fill-opacity="0.902" mask="url(#title-cut)"/></svg>"##
+    );
+    svg()
+        .data(source.as_bytes())
+        .w(px(width))
+        .h(px(16.))
+        .text_color(white())
+        .into_any_element()
+}
+
+fn svg_font_family(global: &str) -> &str {
+    if global != ".SystemUIFont" {
+        return global;
+    }
+    if cfg!(target_os = "macos") {
+        "PingFang SC"
+    } else {
+        "sans-serif"
+    }
 }
