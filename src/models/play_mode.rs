@@ -19,15 +19,21 @@ pub enum PlayMode {
     RepeatAll,
     /// 随机播放：先把列表顺序打乱，再顺着打乱后的顺序播。
     Shuffle,
+    /// 心动模式：在「我喜欢的音乐」上接着放推荐流，播到队尾自动续订一批。
+    /// 只有播放「我喜欢的音乐」时，播放栏循环才包含这一档。
+    Heart,
 }
 
 impl PlayMode {
-    /// 播放栏按钮依次经过的全部方式，顺序与官方一致。
-    pub const ALL: [Self; 4] = [
+    /// 全部播放方式，按钮循环就按这个顺序走。
+    ///
+    /// 心动模式排在最后：播放别的歌单时这一档并不存在，按钮直接跳过。
+    pub const ALL: [Self; 5] = [
         Self::Sequential,
         Self::RepeatOne,
         Self::RepeatAll,
         Self::Shuffle,
+        Self::Heart,
     ];
 
     pub fn label(self) -> &'static str {
@@ -36,6 +42,7 @@ impl PlayMode {
             Self::RepeatOne => "单曲循环",
             Self::RepeatAll => "列表循环",
             Self::Shuffle => "随机播放",
+            Self::Heart => "心动模式",
         }
     }
 
@@ -46,6 +53,7 @@ impl PlayMode {
             Self::RepeatOne => "icons/播放顺序/单曲循环.svg",
             Self::RepeatAll => "icons/播放顺序/歌单循环.svg",
             Self::Shuffle => "icons/播放顺序/随机.svg",
+            Self::Heart => "icons/播放顺序/心动模式.svg",
         }
     }
 
@@ -53,6 +61,18 @@ impl PlayMode {
     pub fn next(self) -> Self {
         let index = Self::ALL.iter().position(|mode| *mode == self).unwrap_or(0);
         Self::ALL[(index + 1) % Self::ALL.len()]
+    }
+
+    /// 按钮循环真正要走的那一档。
+    ///
+    /// 心动模式建立在「我喜欢的音乐」上，所以只有正播放这张歌单时它才存在；
+    /// 播放别的歌单时这一档直接跳过，按钮从随机播放绕回顺序播放。
+    pub fn next_reachable(self, heart_reachable: bool) -> Self {
+        let next = self.next();
+        if next == Self::Heart && !heart_reachable {
+            return next.next();
+        }
+        next
     }
 
     /// 是否用洗好的顺序替换列表本身的顺序；打乱后就按这个顺序播，
@@ -111,6 +131,8 @@ mod tests {
             (PlayMode::RepeatOne, false, false, true),
             (PlayMode::RepeatAll, false, true, false),
             (PlayMode::Shuffle, true, false, false),
+            // 心动模式按服务端给的顺序播，队尾靠自动续订补新的一批，不绕回队首。
+            (PlayMode::Heart, false, false, false),
         ];
         assert_eq!(expected.len(), PlayMode::ALL.len());
         for (mode, shuffles, wraps, repeats) in expected {
@@ -118,5 +140,19 @@ mod tests {
             assert_eq!(mode.wraps(), wraps, "{mode:?} 边界策略不符");
             assert_eq!(mode.repeats_current(), repeats, "{mode:?} 续播策略不符");
         }
+    }
+
+    #[test]
+    fn heart_is_only_reachable_while_the_favorite_playlist_plays() {
+        // 随机播放之后就是心动模式。
+        assert_eq!(PlayMode::Shuffle.next(), PlayMode::Heart);
+        // 不在「我喜欢的音乐」上时这一档不存在，按钮直接绕回顺序播放。
+        assert_eq!(
+            PlayMode::Shuffle.next_reachable(false),
+            PlayMode::Sequential
+        );
+        assert_eq!(PlayMode::Shuffle.next_reachable(true), PlayMode::Heart);
+        // 心动模式本身也在循环里，离开它回到顺序播放。
+        assert_eq!(PlayMode::Heart.next_reachable(true), PlayMode::Sequential);
     }
 }

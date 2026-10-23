@@ -6,6 +6,13 @@ use super::homepage::{CreativeTarget, HomepageCreative, parse_creatives};
 use super::playlist::RecommendedPlaylist;
 use super::song::{Song, attach_privileges};
 
+/// 首页心动卡片预先准备的队列，封面和实际起播歌曲来自同一批结果。
+#[derive(Debug, Clone)]
+pub struct HeartRecommendation {
+    pub playlist_id: u64,
+    pub songs: Vec<Song>,
+}
+
 /// 顶部「每日推荐 + 风格日推」混排区块。
 pub const DAILY_MIX_BLOCK_CODE: &str = "PC_HOMEPAGE_DAILY_MIX";
 /// 私人雷达所在区块。

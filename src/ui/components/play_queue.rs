@@ -18,7 +18,7 @@ use super::{
     SURFACE_RADIUS, artist_label, format_duration, like_icon_path, quality_badge_path,
     side_panel::panel_height,
 };
-use crate::models::Song;
+use crate::models::{PlayMode, Song};
 use crate::playback::{PlaybackController, PlaybackEvent};
 use crate::state::library::MusicLibrary;
 use crate::ui::assets::{track_cover_image, track_cover_url};
@@ -80,7 +80,6 @@ pub(in crate::ui) fn header_text_button(
 }
 
 pub struct PlayQueue {
-    library: Entity<MusicLibrary>,
     playback: Entity<PlaybackController>,
     list: Entity<ListState<QueueDelegate>>,
     /// 面板当前是否展示本内容（由 [`super::side_panel::SidePanel`] 维护）。
@@ -126,7 +125,6 @@ impl PlayQueue {
         });
 
         Self {
-            library,
             playback,
             list,
             visible: false,
@@ -159,7 +157,7 @@ impl Render for PlayQueue {
         let colors = Theme::global(cx).tokens.colors;
         let count = self.playback.read(cx).queue().len();
         let state = self.playback.read(cx).snapshot();
-        let heart = state.heart_mode || state.heart_loading;
+        let heart = state.mode == PlayMode::Heart || state.heart_loading;
         let heart_loading = state.heart_loading;
         let heart_error = state.heart_error.clone();
         if self.scroll_to_current {
@@ -263,12 +261,11 @@ impl Render for PlayQueue {
                                     .aria_label("重试心动推荐")
                                     .child("重试")
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        let user_id = this.library.read(cx).user_id;
                                         this.playback.update(cx, |playback, cx| {
-                                            if playback.snapshot().heart_mode {
+                                            if playback.snapshot().mode == PlayMode::Heart {
                                                 playback.retry_heart_mode(cx);
                                             } else {
-                                                playback.start_heart_mode(user_id, cx);
+                                                playback.set_mode(PlayMode::Heart, cx);
                                             }
                                         });
                                     })),

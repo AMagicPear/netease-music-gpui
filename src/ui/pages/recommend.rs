@@ -3,7 +3,7 @@ use std::time::Duration;
 use gpui::*;
 use gpui_kit::base::{Button, ColorTokens, Theme};
 
-use crate::models::{FeaturedActivity, Playlist, RecommendedPlaylist};
+use crate::models::{FeaturedActivity, PlayMode, Playlist, RecommendedPlaylist};
 use crate::playback::{PlaybackController, PlaybackEvent};
 use crate::state::daily::DailySongsStore;
 use crate::state::library::MusicLibrary;
@@ -22,13 +22,22 @@ const CARD_TEXT_HEIGHT: Pixels = px(48.);
 const TARGET_CARD_WIDTH: f32 = 135.;
 const PLACEHOLDER_COVER: &str = "images/trackBlank.png";
 
+struct PendingHeartPlayback {
+    user_id: u64,
+    revision: u64,
+    mode: PlayMode,
+    play_requested: bool,
+}
+
 /// shell 通过 content 注入可用宽度，所有区块共用同一列数。
 pub struct RecommendPage {
     store: Entity<RecommendStore>,
+    _store_subscription: Subscription,
+    _playback_subscription: Subscription,
+    pending_heart: Option<PendingHeartPlayback>,
     daily: Entity<DailySongsStore>,
     library: Entity<MusicLibrary>,
     playback: Entity<PlaybackController>,
-    _playback_subscription: Subscription,
     /// 与 entries 按下标对齐，新封面加载中保留上一张的颜色。
     entry_colors: Vec<CoverColor>,
 }
@@ -41,17 +50,43 @@ impl RecommendPage {
         playback: Entity<PlaybackController>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let subscription = cx.subscribe(&playback, |_, _, event, cx| {
+        let subscription = cx.observe(&store, |this, store, cx| {
+            if let Some(pending) = &this.pending_heart {
+                let user_id = pending.user_id;
+                let store = store.read(cx);
+                if this.library.read(cx).user_id != user_id || !store.heart_loading {
+                    this.pending_heart = None;
+                    if this.library.read(cx).user_id == user_id
+                        && let Some(heart) = store.heart.clone()
+                    {
+                        this.playback.update(cx, |playback, cx| {
+                            playback.play_heart_recommendation(user_id, heart, cx);
+                        });
+                    }
+                }
+            }
+            cx.notify();
+        });
+        let playback_subscription = cx.subscribe(&playback, |this, playback, event, cx| {
             if matches!(event, PlaybackEvent::SnapshotChanged) {
-                cx.notify();
+                let playback = playback.read(cx);
+                if this.pending_heart.as_ref().is_some_and(|pending| {
+                    pending.revision != playback.snapshot().revision
+                        || pending.mode != playback.snapshot().mode
+                        || pending.play_requested != playback.is_play_requested()
+                }) {
+                    this.pending_heart = None;
+                }
             }
         });
         Self {
             store,
+            _store_subscription: subscription,
+            _playback_subscription: playback_subscription,
+            pending_heart: None,
             daily,
             library,
             playback,
-            _playback_subscription: subscription,
             entry_colors: Vec::new(),
         }
     }
@@ -88,6 +123,17 @@ impl RecommendPage {
                 QuickEntryKind::DailySongs if daily_cover.is_some() => {
                     track_cover_url(daily_cover, 300).into()
                 }
+                QuickEntryKind::HeartMode => {
+                    let cover = store
+                        .heart
+                        .as_ref()
+                        .and_then(|heart| heart.songs.first())
+                        .and_then(|song| song.al.pic_url.as_deref());
+                    cover.map_or_else(
+                        || PLACEHOLDER_COVER.into(),
+                        |cover| track_cover_url(Some(cover), 300).into(),
+                    )
+                }
                 QuickEntryKind::Radar if store.radar_first_song_cover.is_some() => {
                     track_cover_url(store.radar_first_song_cover.as_deref(), 300).into()
                 }
@@ -111,21 +157,20 @@ impl RecommendPage {
             .day();
         let store = self.store.read(cx);
         let mut entries = store.entries.clone();
-        let playback = self.playback.read(cx).snapshot();
         for entry in &mut entries {
             if entry.kind == QuickEntryKind::HeartMode {
-                entry.caption = if playback.heart_loading {
-                    "正在获取心动推荐…点击可取消".into()
-                } else if let Some(error) = &playback.heart_error {
+                entry.caption = if let Some(song) =
+                    store.heart.as_ref().and_then(|heart| heart.songs.first())
+                {
+                    format!("心动模式 | 从「{}」听起", song.name).into()
+                } else if store.heart_loading {
+                    "正在准备心动推荐…".into()
+                } else if let Some(error) = &store.heart_error {
                     format!("{error} · 点击重试").into()
-                } else if playback.heart_mode {
-                    if self.playback.read(cx).is_play_requested() {
-                        "心动模式播放中 · 点击退出".into()
-                    } else {
-                        "心动模式已暂停 · 点击退出".into()
-                    }
+                } else if self.library.read(cx).user_id == 0 {
+                    "登录后从你喜欢的歌听起".into()
                 } else {
-                    entry.caption.clone()
+                    "你的红心歌曲和更多相似推荐".into()
                 };
             }
             if entry.kind == QuickEntryKind::DailySongs {
@@ -344,18 +389,22 @@ fn quick_entry(
                 QuickTarget::DailySongs => NavigationBus::emit(cx, Navigate::DailySongs),
                 QuickTarget::HeartMode => {
                     let user_id = this.library.read(cx).user_id;
-                    this.playback.update(cx, |playback, cx| {
-                        let state = playback.snapshot();
-                        if state.heart_loading {
-                            playback.exit_heart_mode(cx);
-                        } else if state.heart_mode && state.heart_error.is_some() {
-                            playback.retry_heart_mode(cx);
-                        } else if state.heart_mode {
-                            playback.exit_heart_mode(cx);
-                        } else {
-                            playback.start_heart_mode(user_id, cx);
-                        }
-                    });
+                    let recommendation = this.store.read(cx).heart.clone();
+                    if let Some(heart) = recommendation {
+                        this.pending_heart = None;
+                        this.playback.update(cx, |playback, cx| {
+                            playback.play_heart_recommendation(user_id, heart, cx);
+                        });
+                    } else if user_id != 0 {
+                        let playback = this.playback.read(cx);
+                        this.pending_heart = Some(PendingHeartPlayback {
+                            user_id,
+                            revision: playback.snapshot().revision,
+                            mode: playback.snapshot().mode,
+                            play_requested: playback.is_play_requested(),
+                        });
+                        this.store.update(cx, |store, cx| store.load_heart(cx));
+                    }
                 }
                 QuickTarget::Playlist { id, summary } => NavigationBus::emit(
                     cx,

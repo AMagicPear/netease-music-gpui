@@ -21,7 +21,7 @@ pub use message::MessageItem;
 pub(crate) use message::{parse_comments, parse_forwards, parse_notices, parse_private};
 pub use play_mode::PlayMode;
 pub use playlist::{Playlist, RecommendedPlaylist, TrackId};
-pub use recommend::{FeaturedActivity, RecommendEntry};
+pub use recommend::{FeaturedActivity, HeartRecommendation, RecommendEntry};
 pub(crate) use recommend::{
     parse_activities, parse_daily_songs, parse_entries, parse_playlists, parse_radar,
     playlists_from_creatives,

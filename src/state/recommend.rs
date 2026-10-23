@@ -5,8 +5,8 @@ use gpui::{Context, Entity, ReadGlobal, SharedString, Subscription};
 use super::account::AccountState;
 use crate::api::MusicApi;
 use crate::models::{
-    FeaturedActivity, PLAYLIST_BLOCK_CODE, RecommendEntry, RecommendedPlaylist,
-    playlists_from_creatives,
+    FeaturedActivity, HeartRecommendation, PLAYLIST_BLOCK_CODE, RecommendEntry,
+    RecommendedPlaylist, playlists_from_creatives,
 };
 
 /// 顶部入口的展示类型；每日推荐和私人漫游有独立角标。
@@ -110,6 +110,10 @@ impl QuickEntry {
 /// 顶部入口和精选活动游客也能取；雷达歌单和个性化推荐歌单要登录态。
 pub struct RecommendStore {
     pub entries: Vec<QuickEntry>,
+    pub heart: Option<HeartRecommendation>,
+    pub heart_loading: bool,
+    pub heart_error: Option<String>,
+    heart_request: Option<tokio::task::AbortHandle>,
     pub radar_first_song_cover: Option<SharedString>,
     pub radar: Vec<RecommendedPlaylist>,
     pub playlists: Vec<RecommendedPlaylist>,
@@ -136,6 +140,10 @@ impl RecommendStore {
         });
         let mut this = Self {
             entries: default_entries(),
+            heart: None,
+            heart_loading: false,
+            heart_error: None,
+            heart_request: None,
             radar_first_song_cover: None,
             radar: Vec::new(),
             playlists: Vec::new(),
@@ -175,6 +183,8 @@ impl RecommendStore {
         // 换账号后立即清除上一位用户的内容。
         if self.user_id != Some(user_id) {
             self.entries = default_entries();
+            self.heart = None;
+            self.heart_error = None;
             self.radar_first_song_cover = None;
             self.radar.clear();
             self.playlists.clear();
@@ -184,6 +194,7 @@ impl RecommendStore {
         self.user_id = Some(user_id);
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
+        self.load_heart(cx);
         self.error = None;
         self.loading = true;
         let (runtime, client) = {
@@ -268,6 +279,57 @@ impl RecommendStore {
         cx.notify();
     }
 
+    /// 预取只更新推荐页，不触碰正在播放的队列。
+    pub fn load_heart(&mut self, cx: &mut Context<Self>) {
+        let user_id = self.user_id.unwrap_or_default();
+        if user_id == 0 || self.heart_request.is_some() {
+            return;
+        }
+        self.heart_loading = true;
+        self.heart_error = None;
+        let generation = self.generation;
+        let api = MusicApi::global(cx);
+        let client = api.client.clone();
+        let request = api.runtime.spawn(async move {
+            let playlist_id = MusicApi::heart_playlist(&client, user_id).await?;
+            let songs = MusicApi::heart_songs(client, playlist_id).await?;
+            Ok(HeartRecommendation { playlist_id, songs })
+        });
+        self.heart_request = Some(request.abort_handle());
+        cx.spawn(async move |this, cx| {
+            let result = request
+                .await
+                .unwrap_or_else(|_| Err("心动推荐请求失败，请重试".into()));
+            let _ = this.update(cx, |this, cx| {
+                if this.apply_heart(generation, result) {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn apply_heart(
+        &mut self,
+        generation: u64,
+        result: Result<HeartRecommendation, String>,
+    ) -> bool {
+        if generation != self.generation {
+            return false;
+        }
+        self.heart_request = None;
+        self.heart_loading = false;
+        match result {
+            Ok(recommendation) => {
+                self.heart = Some(recommendation);
+                self.heart_error = None;
+            }
+            Err(error) => self.heart_error = Some(error),
+        }
+        true
+    }
+
     /// 同一身份只取一次；失败或主动刷新时允许重试。
     fn should_load(&self, user_id: u64, force: bool) -> bool {
         force || self.user_id != Some(user_id) || self.error.is_some()
@@ -299,9 +361,17 @@ impl RecommendStore {
                 entries[0].caption = daily.title.clone().into();
             }
         }
+        if let Some(heart) = api_entries
+            .iter()
+            .find(|entry| entry.resource_type == "star")
+            .and_then(QuickEntry::from_api)
+        {
+            entries[1] = heart;
+        }
         let dynamic: Vec<QuickEntry> = api_entries
             .iter()
             .filter_map(QuickEntry::from_api)
+            .filter(|entry| entry.kind != QuickEntryKind::HeartMode)
             .collect();
         if !dynamic.is_empty() {
             entries.splice(5..6, dynamic);
@@ -413,7 +483,9 @@ impl RecommendStore {
     }
 
     fn abort_requests(&mut self) {
+        self.heart_loading = false;
         for request in [
+            &mut self.heart_request,
             &mut self.entries_request,
             &mut self.radar_request,
             &mut self.playlist_request,
@@ -440,6 +512,10 @@ mod tests {
     fn store() -> RecommendStore {
         RecommendStore {
             entries: default_entries(),
+            heart: None,
+            heart_loading: false,
+            heart_error: None,
+            heart_request: None,
             radar_first_song_cover: None,
             radar: Vec::new(),
             playlists: Vec::new(),
@@ -455,6 +531,43 @@ mod tests {
             featured_request: None,
             _user_subscription: None,
         }
+    }
+
+    #[test]
+    fn heart_preview_discards_old_account_results_and_retains_ready_batch_on_failure() {
+        let mut store = store();
+        store.generation = 2;
+        let batch = || crate::models::HeartRecommendation {
+            playlist_id: 7,
+            songs: vec![crate::models::Song {
+                id: 3,
+                ..Default::default()
+            }],
+        };
+        assert!(!store.apply_heart(1, Ok(batch())));
+        assert!(store.heart.is_none());
+        assert!(store.apply_heart(2, Ok(batch())));
+        assert_eq!(store.heart.as_ref().unwrap().songs[0].id, 3);
+        store.apply_heart(2, Err("断网".into()));
+        assert!(store.heart_error.is_some());
+        assert_eq!(store.heart.as_ref().unwrap().songs[0].id, 3);
+    }
+
+    #[test]
+    fn api_heart_entry_updates_fixed_card_without_duplicating_it() {
+        let mut store = store();
+        let mut heart = entry("", "心动推荐", "心动模式");
+        heart.resource_type = "star".into();
+        store.apply_entries(0, Ok(vec![heart]));
+        assert_eq!(
+            store
+                .entries
+                .iter()
+                .filter(|entry| entry.kind == QuickEntryKind::HeartMode)
+                .count(),
+            1
+        );
+        assert_eq!(store.entries[1].caption.as_ref(), "心动推荐");
     }
 
     fn entry(sub_resource_type: &str, title: &str, cover_text: &str) -> RecommendEntry {

@@ -30,6 +30,7 @@ mod dock_actions {
             RepeatOneTrack,
             RepeatAllTracks,
             ShufflePlayback,
+            HeartMode,
         ]
     );
 }
@@ -167,6 +168,18 @@ fn install_dock_menu(
             playback.update(cx, |p, cx| p.set_mode(PlayMode::Shuffle, cx))
         }
     });
+    cx.on_action({
+        let playback = playback.clone();
+        move |_: &HeartMode, cx: &mut App| {
+            playback.update(cx, |p, cx| {
+                if p.snapshot().mode == PlayMode::Heart {
+                    p.exit_heart_mode(cx);
+                } else {
+                    p.set_mode(PlayMode::Heart, cx);
+                }
+            });
+        }
+    });
 
     // 播放控制器每 100 ms 就 notify 一次，菜单内容只有在这三个字段变化时才需要重建。
     let last_state = std::rc::Rc::new(std::cell::RefCell::new(None));
@@ -197,13 +210,15 @@ fn install_dock_menu(
     ]
 }
 
-/// Dock 菜单上会随状态变化的字段；这三个字段都不变时菜单不必重建。
+/// Dock 菜单上会随状态变化的字段；这几个字段都不变时菜单不必重建。
 #[cfg(target_os = "macos")]
 #[derive(Clone, Copy, PartialEq)]
 struct DockMenuState {
     playing: bool,
     mode: PlayMode,
     liked: bool,
+    /// 心动模式建立在「我喜欢的音乐」上；播放别的歌单时这一档不存在。
+    heart_reachable: bool,
 }
 
 #[cfg(target_os = "macos")]
@@ -221,6 +236,7 @@ fn dock_menu_state(
             .current_song
             .as_ref()
             .is_some_and(|song| library.read(cx).liked_song_ids.contains(&song.id)),
+        heart_reachable: player.heart_reachable(),
     }
 }
 
@@ -230,8 +246,9 @@ fn build_dock_menu(state: DockMenuState) -> Vec<gpui::MenuItem> {
         playing,
         mode,
         liked,
+        heart_reachable,
     } = state;
-    vec![
+    let mut items = vec![
         gpui::MenuItem::action(
             if playing { "暂停" } else { "播放" },
             dock_actions::TogglePlayback,
@@ -254,7 +271,15 @@ fn build_dock_menu(state: DockMenuState) -> Vec<gpui::MenuItem> {
         ),
         gpui::MenuItem::action("随机播放", dock_actions::ShufflePlayback)
             .checked(mode == PlayMode::Shuffle),
-    ]
+    ];
+    // 心动模式建立在「我喜欢的音乐」上；播放别的歌单时这一档不存在。
+    if heart_reachable {
+        items.push(
+            gpui::MenuItem::action("心动模式", dock_actions::HeartMode)
+                .checked(mode == PlayMode::Heart),
+        );
+    }
+    items
 }
 
 /// 网页「点击打开客户端」按钮的唤起目标。官方网页把参数 JSON 编成 base64

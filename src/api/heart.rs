@@ -56,17 +56,29 @@ impl MusicApi {
     }
 
     pub async fn heart_songs(client: ApiClient, playlist_id: u64) -> Result<Vec<Song>, String> {
+        Self::heart_songs_from_seed(client, playlist_id, None).await
+    }
+
+    pub async fn heart_songs_from_seed(
+        client: ApiClient,
+        playlist_id: u64,
+        seed: Option<u64>,
+    ) -> Result<Vec<Song>, String> {
         if playlist_id == 0 {
             return Err("心动歌单 ID 无效".into());
         }
-        // 每批重新取红心种子：取消喜欢后不继续使用旧种子，也不依赖未明确的 count 分页语义。
-        let playlist = Self::playlist_meta(client.clone(), playlist_id).await?;
-        let seed_id = playlist
-            .track_ids
-            .choose(&mut rand::rng())
-            .map(|track| track.id)
-            .filter(|id| *id != 0)
-            .ok_or_else(|| "先收藏几首喜欢的音乐，再开启心动模式吧".to_string())?;
+        let seed_id = if let Some(seed) = seed.filter(|id| *id != 0) {
+            seed
+        } else {
+            // 续订时重新取红心种子，避免一直使用已取消喜欢的歌曲。
+            Self::playlist_meta(client.clone(), playlist_id)
+                .await?
+                .track_ids
+                .choose(&mut rand::rng())
+                .map(|track| track.id)
+                .filter(|id| *id != 0)
+                .ok_or_else(|| "先收藏几首喜欢的音乐，再开启心动模式吧".to_string())?
+        };
         let response = Self::request(
             client.playmode_intelligence_list(
                 &Query::new()

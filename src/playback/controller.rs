@@ -42,6 +42,7 @@ pub struct PlaybackController {
     heart_generation: u64,
     heart_request: Option<tokio::task::AbortHandle>,
     heart_waiting: bool,
+    heart_continue: bool,
     engine: PlayerEngine,
     /// 当前播放列表。它是一份自己的顺序，和任何页面上的歌单互不影响：
     /// 换来源、洗牌、插入歌曲都只改这里，页面歌单的排序或过滤不会带走播放。
@@ -52,6 +53,9 @@ pub struct PlaybackController {
     queue_cursor: Option<usize>,
     /// 列表的来源歌单，只用来显示「来自哪个歌单」。
     queue_source: Option<u64>,
+    /// 「我喜欢的音乐」的歌单 id。心动模式建立在它上面，所以它同时决定
+    /// 心动模式这一档在按钮循环里可不可达。
+    heart_source: Option<HeartSession>,
     play_when_ready: bool,
     request: Option<tokio::task::AbortHandle>,
     pending_position: Duration,
@@ -86,11 +90,13 @@ impl PlaybackController {
             heart_generation: 0,
             heart_request: None,
             heart_waiting: false,
+            heart_continue: false,
             engine: PlayerEngine::default(),
             queue: Vec::new(),
             queue_order: Vec::new(),
             queue_cursor: None,
             queue_source: None,
+            heart_source: None,
             play_when_ready: false,
             request: None,
             pending_position: Duration::ZERO,
@@ -237,6 +243,39 @@ impl PlaybackController {
         self.queue_source
     }
 
+    /// 音乐库提供账号与红心歌单来源；控制器据此判断 Heart 是否可选。
+    pub fn set_heart_source(
+        &mut self,
+        user_id: u64,
+        playlist_id: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
+        let source = playlist_id
+            .filter(|id| *id != 0 && user_id != 0)
+            .map(|playlist_id| HeartSession {
+                user_id,
+                playlist_id,
+            });
+        if self.heart_source == source {
+            return;
+        }
+        self.heart_source = source;
+        self.publish(cx, PlaybackEvent::SnapshotChanged);
+    }
+
+    pub fn heart_reachable(&self) -> bool {
+        self.current_list_song().is_some()
+            && self
+                .heart_source
+                .as_ref()
+                .is_some_and(|source| self.queue_source == Some(source.playlist_id))
+    }
+
+    /// 心动模式是否已经生效：模式本身就是这一档，看 mode 就够了。
+    fn heart_active(&self) -> bool {
+        self.state.mode == PlayMode::Heart
+    }
+
     /// 已实际提交音频预加载的候选；UI 自行决定封面尺寸及图片预取。
     pub(crate) fn preloading_song(&self) -> Option<Song> {
         self.preload.as_ref().map(|preload| preload.song.clone())
@@ -255,7 +294,7 @@ impl PlaybackController {
     /// 播放列表面板双击某一项：游标移到这一项并立即播放。
     /// 队列项是按位置引用的，不按歌曲 id 反查，列表里有重复歌曲也不会选错。
     pub fn play_queue_index(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.state.heart_loading && !self.state.heart_mode {
+        if self.state.heart_loading && !self.heart_active() {
             self.cancel_heart();
         }
         let Some(song) = self.queue.get(index).cloned() else {
@@ -347,10 +386,14 @@ impl PlaybackController {
             && session.playlist_id == cache.playlist_id
             && !self.queue.is_empty()
         {
-            self.state.heart_mode = true;
-            self.state.mode = PlayMode::Sequential;
+            // 兼容旧缓存：旧版心动会话的 mode 是 Sequential。
+            self.state.mode = PlayMode::Heart;
             self.heart = Some(session);
             self.queue_order = (0..self.queue.len()).collect();
+        } else if self.state.mode == PlayMode::Heart {
+            // 没有可用的心动会话（换了账号或缓存不完整），退回顺序播放，
+            // 别把界面停在一档跑不起来的模式上。
+            self.state.mode = PlayMode::Sequential;
         }
     }
 
@@ -684,10 +727,10 @@ impl PlaybackController {
     }
 
     pub fn resume(&mut self, cx: &mut Context<Self>) {
-        if self.state.heart_loading && !self.state.heart_mode {
+        if self.state.heart_loading && !self.heart_active() && !self.heart_continue {
             self.heart_waiting = true;
         }
-        if self.state.heart_mode
+        if self.heart_active()
             && !self.state.loading
             && !self.state.duration.is_zero()
             && self.state.position >= self.state.duration
@@ -770,7 +813,7 @@ impl PlaybackController {
     }
 
     fn change_song(&mut self, direction: isize, cx: &mut Context<Self>) {
-        if self.state.heart_loading && !self.state.heart_mode {
+        if self.state.heart_loading && !self.heart_active() {
             self.cancel_heart();
         }
         if let Some(song) = self.step_list(direction) {
@@ -782,6 +825,11 @@ impl PlaybackController {
 
     /// 一首歌播完后按当前播放方式决定去向。
     fn advance_on_finished(&mut self, cx: &mut Context<Self>) {
+        if self.state.heart_loading && self.heart_continue {
+            self.heart_waiting = true;
+            self.publish(cx, PlaybackEvent::SnapshotChanged);
+            return;
+        }
         if self.state.mode.repeats_current() {
             self.replay(cx);
             return;
@@ -817,16 +865,28 @@ impl PlaybackController {
     }
 
     /// 播放栏按钮切换到下一种播放方式。
+    ///
+    /// 心动模式只有正播放「我喜欢的音乐」时才算这一轮循环里的一档：走到它
+    /// 就切进心动模式，再点一次进入顺序播放。
     pub fn cycle_mode(&mut self, cx: &mut Context<Self>) {
-        if self.state.heart_mode || self.state.heart_loading {
+        if self.heart_active() || self.state.heart_loading {
             self.exit_heart_mode(cx);
             return;
         }
-        self.set_mode(self.state.mode.next(), cx);
+        let next = self.state.mode.next_reachable(self.heart_reachable());
+        self.set_mode(next, cx);
     }
 
+    /// 所有模式共用的入口；Heart 的资格检查和异步推荐也由控制器负责。
     pub fn set_mode(&mut self, mode: PlayMode, cx: &mut Context<Self>) {
+        if mode == PlayMode::Heart {
+            if !self.heart_active() {
+                self.start_heart_mode(cx);
+            }
+            return;
+        }
         let was_heart = self.heart.is_some() || self.state.heart_error.is_some();
+        // 先清理推荐请求，再应用目标模式。
         self.cancel_heart();
         if self.state.mode == mode && !was_heart {
             return;
@@ -936,7 +996,7 @@ impl PlaybackController {
         };
         self.persistence.request_playback(PlaybackState {
             playlist_id,
-            heart: self.heart.clone().filter(|_| self.state.heart_mode),
+            heart: self.heart.clone().filter(|_| self.heart_active()),
             queue: self.queue.clone(),
             queue_order: self.queue_order.clone(),
             song_id: song.id,

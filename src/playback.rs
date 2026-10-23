@@ -40,7 +40,7 @@ pub struct PlaybackSnapshot {
     pub buffering: bool,
     /// 当前播放方式；决定播完后的去向和随机/循环时的手动切歌。
     pub mode: PlayMode,
-    pub heart_mode: bool,
+    /// 正在获取首批或续订的心动推荐；是否已生效由 mode 判断。
     pub heart_loading: bool,
     pub heart_error: Option<String>,
     pub quality: AudioQualityLevel,
@@ -62,7 +62,6 @@ impl Default for PlaybackSnapshot {
             loading: false,
             buffering: false,
             mode: PlayMode::default(),
-            heart_mode: false,
             heart_loading: false,
             heart_error: None,
             quality: AudioQualityLevel::default(),

@@ -3,13 +3,13 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use super::*;
+use crate::models::HeartRecommendation;
 
 /// 只持久化续播所需的身份和来源；请求、错误和等待状态不会跨启动恢复。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub(crate) struct HeartSession {
     pub user_id: u64,
     pub playlist_id: u64,
-    pub previous_mode: PlayMode,
 }
 
 const REFILL_REMAINING: usize = 3;
@@ -22,14 +22,13 @@ impl PlaybackController {
         if let Some(request) = self.heart_request.take() {
             request.abort();
         }
-        if let Some(session) = self.heart.take()
-            && self.state.heart_mode
-        {
-            self.state.mode = session.previous_mode;
-            self.apply_mode_to_list(session.previous_mode);
+        self.heart = None;
+        if self.heart_active() {
+            self.state.mode = PlayMode::Sequential;
+            self.apply_mode_to_list(PlayMode::Sequential);
         }
+        self.heart_continue = false;
         self.heart_waiting = false;
-        self.state.heart_mode = false;
         self.state.heart_loading = false;
         self.state.heart_error = None;
     }
@@ -51,23 +50,43 @@ impl PlaybackController {
         }
     }
 
-    pub fn start_heart_mode(&mut self, user_id: u64, cx: &mut Context<Self>) {
-        if self.state.heart_loading {
+    pub(super) fn start_heart_mode(&mut self, cx: &mut Context<Self>) {
+        if self.state.heart_loading || !self.heart_reachable() {
+            return;
+        }
+        let source = self.heart_source.clone();
+        self.cancel_heart();
+        self.heart = source;
+        self.heart_continue = true;
+        self.heart_waiting = false;
+        self.request_heart(cx);
+    }
+
+    /// 首页卡片是一份已准备好的新队列，与当前播放模式无关。
+    pub fn play_heart_recommendation(
+        &mut self,
+        user_id: u64,
+        recommendation: HeartRecommendation,
+        cx: &mut Context<Self>,
+    ) {
+        if user_id == 0 {
             return;
         }
         self.cancel_heart();
-        if user_id == 0 {
-            self.state.heart_error = Some("请先登录，再开启心动模式".into());
-            self.publish(cx, PlaybackEvent::SnapshotChanged);
-            return;
-        }
         self.heart = Some(HeartSession {
             user_id,
-            playlist_id: 0,
-            previous_mode: self.state.mode,
+            playlist_id: recommendation.playlist_id,
         });
         self.heart_waiting = true;
-        self.request_heart(cx);
+        if let Some((song, play)) = self.finish_heart(
+            self.heart_generation,
+            Ok((recommendation.playlist_id, recommendation.songs)),
+        ) {
+            self.load_song(song, Duration::ZERO, play, cx);
+        }
+        self.save_cache();
+        self.publish(cx, PlaybackEvent::SnapshotChanged);
+        self.maybe_preload(cx);
     }
 
     pub fn retry_heart_mode(&mut self, cx: &mut Context<Self>) {
@@ -93,13 +112,17 @@ impl PlaybackController {
         let generation = self.heart_generation;
         let api = MusicApi::global(cx);
         let client = api.client.clone();
+        let seed = self
+            .heart_continue
+            .then(|| self.current_list_song().map(|song| song.id))
+            .flatten();
         let request = api.runtime.spawn(async move {
             let playlist_id = if session.playlist_id == 0 {
                 MusicApi::heart_playlist(&client, session.user_id).await?
             } else {
                 session.playlist_id
             };
-            let songs = MusicApi::heart_songs(client, playlist_id).await?;
+            let songs = MusicApi::heart_songs_from_seed(client, playlist_id, seed).await?;
             Ok((playlist_id, songs))
         });
         self.heart_request = Some(request.abort_handle());
@@ -135,7 +158,7 @@ impl PlaybackController {
         let mut session = self.heart.clone()?;
         self.heart_request = None;
         self.state.heart_loading = false;
-        let initial = !self.state.heart_mode;
+        let initial = !self.heart_active();
         let waiting = self.heart_waiting;
         let result = result.and_then(|(playlist_id, songs)| {
             if playlist_id == 0 || songs.is_empty() {
@@ -150,6 +173,7 @@ impl PlaybackController {
                 self.heart_waiting = false;
                 if initial {
                     self.heart = None;
+                    self.heart_continue = false;
                 }
                 return None;
             }
@@ -157,13 +181,32 @@ impl PlaybackController {
         self.heart_waiting = false;
         self.state.heart_error = None;
         if initial {
-            self.set_list(Some(playlist_id), songs, None);
-            self.queue_cursor = Some(0);
+            let continuing = self.heart_continue;
+            self.heart_continue = false;
+            if continuing {
+                // 保留当前音源、进度与暂停意图，只替换尚未播放的部分。
+                let cursor = self.queue_cursor?;
+                self.queue.truncate(cursor + 1);
+                if !self.append_heart_songs(songs) {
+                    self.queue_order = (0..self.queue.len()).collect();
+                    self.state.heart_error = Some("这批推荐没有新歌曲，点击重试换一批".into());
+                }
+                self.cancel_preload();
+            } else {
+                self.set_list(Some(playlist_id), songs, None);
+                self.queue_cursor = Some(0);
+            }
             session.playlist_id = playlist_id;
             self.heart = Some(session);
-            self.state.heart_mode = true;
-            self.state.mode = PlayMode::Sequential;
-            return self.current_list_song().map(|song| (song, waiting));
+            // 心动模式生效：模式本身变成这一档，队列仍然按顺序往下走。
+            self.state.mode = PlayMode::Heart;
+            return if continuing && waiting {
+                self.step_list(1).map(|song| (song, true))
+            } else if continuing {
+                None
+            } else {
+                self.current_list_song().map(|song| (song, waiting))
+            };
         }
         if !self.append_heart_songs(songs) {
             self.state.heart_error = Some("这批推荐没有新歌曲，点击重试换一批".into());
@@ -201,7 +244,7 @@ impl PlaybackController {
     }
 
     pub(super) fn maybe_refill_heart(&mut self, cx: &mut Context<Self>) {
-        if self.state.heart_mode
+        if self.heart_active()
             && !self.state.heart_loading
             && self.state.heart_error.is_none()
             && self.queue_cursor.is_some_and(|cursor| {
@@ -214,7 +257,7 @@ impl PlaybackController {
 
     /// 到队尾后等待推荐；暂停、退出和换队列都能撤销自动切入的意图。
     pub(super) fn wait_for_heart(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self.state.heart_mode {
+        if !self.heart_active() {
             return false;
         }
         self.heart_waiting = true;
@@ -248,7 +291,6 @@ mod tests {
         controller.heart = Some(HeartSession {
             user_id: 1,
             playlist_id: 0,
-            previous_mode: PlayMode::Shuffle,
         });
         controller.state.heart_loading = true;
         controller.heart_waiting = true;
@@ -267,6 +309,103 @@ mod tests {
     }
 
     #[test]
+    fn heart_requires_a_selected_song_from_the_favorite_playlist() {
+        let mut controller = pending();
+        assert!(!controller.heart_reachable());
+        controller.heart_source = Some(HeartSession {
+            user_id: 1,
+            playlist_id: 7,
+        });
+        assert!(!controller.heart_reachable());
+        controller.heart_source = Some(HeartSession {
+            user_id: 1,
+            playlist_id: 9,
+        });
+        assert!(controller.heart_reachable());
+        controller.queue_cursor = None;
+        assert!(!controller.heart_reachable());
+        controller.queue_source = Some(0);
+        controller.heart_source = None;
+        assert!(!controller.heart_reachable());
+    }
+
+    #[test]
+    fn entering_from_player_keeps_current_song_position_and_play_intent() {
+        for play in [false, true] {
+            let mut controller = pending();
+            controller.queue_cursor = Some(1);
+            controller.state.current_song = controller.current_list_song();
+            controller.state.position = Duration::from_secs(12);
+            controller.state.is_playing = play;
+            controller.heart_continue = true;
+            controller.heart_waiting = false;
+            assert!(
+                controller
+                    .finish_heart(controller.heart_generation, Ok((9, songs(&[91, 3, 2, 3]))))
+                    .is_none()
+            );
+            assert_eq!(ids(&controller), [90, 91, 3, 2]);
+            assert_eq!(controller.current_list_song().unwrap().id, 91);
+            assert_eq!(controller.state.current_song.as_ref().unwrap().id, 91);
+            assert_eq!(controller.state.position, Duration::from_secs(12));
+            assert_eq!(controller.state.is_playing, play);
+            assert_eq!(controller.state.mode, PlayMode::Heart);
+            assert_eq!(controller.queue_source, Some(9));
+        }
+    }
+
+    #[test]
+    fn initial_player_batch_advances_only_if_song_finished_while_waiting() {
+        for waiting in [false, true] {
+            let mut controller = pending();
+            controller.heart_continue = true;
+            controller.heart_waiting = waiting;
+            let selected =
+                controller.finish_heart(controller.heart_generation, Ok((9, songs(&[3, 2]))));
+            assert_eq!(
+                selected.map(|(song, play)| (song.id, play)),
+                waiting.then_some((3, true))
+            );
+            assert_eq!(
+                controller.current_list_song().unwrap().id,
+                if waiting { 3 } else { 90 }
+            );
+        }
+    }
+
+    #[test]
+    fn new_home_batch_replaces_an_existing_heart_queue() {
+        let mut controller = active(&[1, 2, 3]);
+        controller.cancel_heart();
+        controller.heart = Some(HeartSession {
+            user_id: 1,
+            playlist_id: 7,
+        });
+        controller.heart_waiting = true;
+        let (song, play) = controller
+            .finish_heart(controller.heart_generation, Ok((7, songs(&[8, 9]))))
+            .unwrap();
+        assert_eq!((song.id, play), (8, true));
+        assert_eq!(ids(&controller), [8, 9]);
+        assert_eq!(controller.state.mode, PlayMode::Heart);
+    }
+
+    #[test]
+    fn old_session_previous_mode_is_ignored() {
+        let session: HeartSession = serde_json::from_value(serde_json::json!({
+            "user_id": 1, "playlist_id": 7, "previous_mode": "Shuffle"
+        }))
+        .unwrap();
+        assert_eq!(
+            session,
+            HeartSession {
+                user_id: 1,
+                playlist_id: 7
+            }
+        );
+    }
+
+    #[test]
     fn heart_first_batch_preserves_server_order_and_pause_intent() {
         for play in [false, true] {
             let mut controller = pending();
@@ -276,8 +415,7 @@ mod tests {
                 .unwrap();
             assert_eq!((selected.0.id, selected.1), (3, play));
             assert_eq!(ids(&controller), [3, 1, 2]);
-            assert_eq!(controller.state.mode, PlayMode::Sequential);
-            assert!(controller.state.heart_mode);
+            assert_eq!(controller.state.mode, PlayMode::Heart);
             assert!(!controller.state.heart_loading);
         }
     }
@@ -294,7 +432,6 @@ mod tests {
             assert_eq!(ids(&controller), [90, 91]);
             assert_eq!(controller.state.current_song.as_ref().unwrap().id, 90);
             assert_eq!(controller.state.mode, PlayMode::Shuffle);
-            assert!(!controller.state.heart_mode);
             assert!(controller.state.heart_error.is_some());
             assert!(controller.heart.is_none());
         }
@@ -317,7 +454,7 @@ mod tests {
                     .is_none()
             );
             assert_eq!(ids(&controller), expected);
-            assert!(!controller.state.heart_mode);
+            assert_ne!(controller.state.mode, PlayMode::Heart);
             assert!(!controller.state.heart_loading);
         }
     }
@@ -377,7 +514,7 @@ mod tests {
             assert_eq!(ids(&controller), [1, 2]);
             assert_eq!(controller.queue_cursor, Some(1));
             assert!(controller.state.heart_error.is_some());
-            assert!(controller.state.heart_mode);
+            assert_eq!(controller.state.mode, PlayMode::Heart);
             assert!(!controller.state.heart_loading);
             assert!(!controller.heart_waiting);
         }
@@ -402,7 +539,7 @@ mod tests {
     }
 
     #[test]
-    fn heart_session_round_trip_restores_without_playing_and_exit_restores_previous_mode() {
+    fn heart_session_round_trip_restores_without_playing_and_exit_is_sequential() {
         let mut controller = active(&[3, 1, 2]);
         controller.queue_cursor = Some(1);
         controller.state.position = Duration::from_secs(12);
@@ -414,11 +551,11 @@ mod tests {
         assert_eq!(restored.heart, controller.heart);
         assert_eq!(ids(&restored), [3, 1, 2]);
         assert_eq!(restored.queue_cursor, Some(1));
-        assert!(restored.state.heart_mode);
+        assert_eq!(restored.state.mode, PlayMode::Heart);
         assert!(!restored.state.is_playing);
         assert!(!restored.state.heart_loading);
         restored.cancel_heart();
-        assert_eq!(restored.state.mode, PlayMode::Shuffle);
+        assert_eq!(restored.state.mode, PlayMode::Sequential);
         assert_eq!(restored.current_list_song().unwrap().id, 1);
     }
 }

@@ -134,10 +134,32 @@ impl MainContent {
                 cx,
             )
         });
-        let library_subscription = cx.observe(&library, |this, _, cx| {
-            // 收藏歌单的 ID 要等账号索引返回后才能解析。
-            this.open_playlist(this.active_page, cx);
-            cx.notify();
+        playback.update(cx, |playback, cx| {
+            playback.set_heart_source(
+                library.read(cx).user_id,
+                library
+                    .read(cx)
+                    .favorite_playlist()
+                    .map(|playlist| playlist.id),
+                cx,
+            );
+        });
+        let library_subscription = cx.observe(&library, {
+            let playback = playback.clone();
+            move |this, library, cx| {
+                // 收藏歌单的 ID 要等账号索引返回后才能解析。
+                this.open_playlist(this.active_page, cx);
+                // 心动模式是「我喜欢的音乐」上的推荐流，把这张歌单的 id 告诉播放器：
+                // 按钮循环才知道这一档现在存不存在。
+                let heart_playlist = library
+                    .read(cx)
+                    .favorite_playlist()
+                    .map(|playlist| playlist.id);
+                playback.update(cx, |playback, cx| {
+                    playback.set_heart_source(library.read(cx).user_id, heart_playlist, cx)
+                });
+                cx.notify();
+            }
         });
         let search_input = cx.new(|cx| {
             let mut state = InputState::new(window, cx).placeholder("搜索音乐");

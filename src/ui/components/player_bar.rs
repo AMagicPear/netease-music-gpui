@@ -10,6 +10,7 @@ use super::progress_bar::ProgressBar;
 use super::side_panel::{SidePanel, SidePanelContent};
 use super::volume_control::VolumeControl;
 use super::{LAYER_PROGRESS_BAR, Vinyl, artist_label, icon_hover_color, like_icon_path};
+use crate::models::PlayMode;
 use crate::playback::{PlaybackController, PlaybackEvent};
 use crate::state::library::MusicLibrary;
 use crate::state::song_counts::SongCounts;
@@ -331,7 +332,9 @@ impl Render for PlayerBar {
         let counts = self.song_counts.read(cx).counts();
         let snapshot = self.playback.read(cx).snapshot();
         let mode = snapshot.mode;
-        let heart = snapshot.heart_mode || snapshot.heart_loading;
+        // 心动模式生效后模式本身就是那一档；还在加载时队列尚未换上，
+        // 模式还是原来那一档，就先用心动图标提示正在准备。
+        let loading_heart = snapshot.heart_loading && mode != PlayMode::Heart;
         let selected_quality = snapshot.quality;
         // 优先显示实际拿到的音质，降级时不会谎报。
         let quality_label = snapshot
@@ -486,18 +489,17 @@ impl Render for PlayerBar {
                             .child(
                                 hover_icon(
                                     "player-order-button",
-                                    if heart {
-                                        "退出心动模式"
+                                    if loading_heart {
+                                        "正在获取心动推荐…"
                                     } else {
                                         mode.label()
                                     },
-                                    if heart {
-                                        "icons/播放顺序/心动模式.svg"
+                                    if loading_heart {
+                                        PlayMode::Heart.icon_path()
                                     } else {
                                         mode.icon_path()
                                     },
                                     IconSize::Large.pixels(),
-                                    // 心动模式与普通播放模式用同一种灰色，靠图标形状区分即可。
                                     colors.muted_foreground,
                                     colors,
                                 )
