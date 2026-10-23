@@ -47,6 +47,9 @@ struct WriterState {
 pub struct PlaybackState {
     pub playlist_id: u64,
     pub queue: Vec<Song>,
+    /// 与 queue 平行的原始位置；旧缓存缺失时沿用已保存顺序。
+    #[serde(default)]
+    pub queue_order: Vec<usize>,
     pub song_id: u64,
     /// 精确恢复重复歌曲所在的队列项；旧缓存仍按 song_id 查找。
     #[serde(default)]
@@ -326,6 +329,7 @@ mod tests {
             }],
             song_id: 7,
             queue_cursor: Some(0),
+            queue_order: vec![0],
             position: Duration::from_secs(13),
             mode: PlayMode::Shuffle,
             quality: AudioQualityLevel::Lossless,
@@ -380,6 +384,7 @@ mod tests {
             queue: Vec::new(),
             song_id: 2,
             queue_cursor: None,
+            queue_order: Vec::new(),
             position: Duration::ZERO,
             mode: PlayMode::Sequential,
             quality: AudioQualityLevel::Standard,

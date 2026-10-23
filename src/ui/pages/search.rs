@@ -369,6 +369,7 @@ impl SearchPage {
             },
             |_| {},
             |this, key, hovered, cx| this.set_hovered_row(key, hovered, cx),
+            |this, key, cx| this.play_from(key, cx),
             // 行上右键与歌单页一致：弹出同一份歌曲原生菜单。
             |this, key, position, window, cx| {
                 let Some(song) = this
@@ -404,6 +405,7 @@ impl SearchPage {
             },
             |_| {},
             |this, key, hovered, cx| this.set_hovered_row(key, hovered, cx),
+            |_, _, _| {},
             // 歌单行还没有对应的原生菜单（官方客户端给的是「分享 / 收藏」），
             // 先不接右键，等菜单真做好了再挂上。
             |_, _, _, _, _| {},

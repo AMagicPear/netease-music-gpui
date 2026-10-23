@@ -12,7 +12,7 @@ use crate::{
     persistence::{Persistence, PlaybackState},
 };
 use gpui::{App, Context, EventEmitter, ReadGlobal, Window};
-use rand::{Rng, seq::SliceRandom};
+use rand::seq::SliceRandom;
 use souvlaki::{MediaControlEvent, SeekDirection};
 use std::{sync::Arc, time::Duration};
 
@@ -39,6 +39,8 @@ pub struct PlaybackController {
     /// 当前播放列表。它是一份自己的顺序，和任何页面上的歌单互不影响：
     /// 换来源、洗牌、插入歌曲都只改这里，页面歌单的排序或过滤不会带走播放。
     queue: Vec<Song>,
+    /// 每个队列项在未洗牌列表中的位置；重复歌曲也有独立位置。
+    queue_order: Vec<usize>,
     /// 当前歌曲在 `queue` 中的位置；有它就不必按歌曲 id 反查，列表里有重复歌曲也没问题。
     queue_cursor: Option<usize>,
     /// 列表的来源歌单，只用来显示「来自哪个歌单」。
@@ -75,6 +77,7 @@ impl PlaybackController {
             state: PlaybackSnapshot::default(),
             engine: PlayerEngine::default(),
             queue: Vec::new(),
+            queue_order: Vec::new(),
             queue_cursor: None,
             queue_source: None,
             play_when_ready: false,
@@ -296,6 +299,7 @@ impl PlaybackController {
     ) -> Option<Song> {
         self.cancel_preload();
         self.queue_source = source;
+        self.queue_order = (0..songs.len()).collect();
         self.queue = songs;
         self.queue_cursor =
             song_id.and_then(|song_id| self.queue.iter().position(|song| song.id == song_id));
@@ -311,6 +315,12 @@ impl PlaybackController {
                 .is_some_and(|song| song.id == cache.song_id)
         });
         self.set_list(Some(cache.playlist_id), cache.queue, Some(cache.song_id));
+        let mut order = cache.queue_order.clone();
+        order.sort_unstable();
+        if order.iter().copied().eq(0..self.queue.len()) {
+            self.queue_order = cache.queue_order;
+        }
+        // shortcut: 旧缓存没有原始顺序，沿用缓存顺序，重新播放歌单后即可恢复。
         if cursor.is_some() {
             self.queue_cursor = cursor;
         }
@@ -462,36 +472,44 @@ impl PlaybackController {
         self.current_list_song()
     }
 
-    /// 就地洗牌：列表此刻的顺序就是之后的播放顺序，不需要另存一份原始顺序。
+    /// 调整队列顺序但保留当前具体队列项，不重载音源或重置进度。
     fn apply_mode_to_list(&mut self, mode: PlayMode) {
-        if !mode.shuffles() {
-            return;
-        }
-        let len = self.queue.len();
-        if len < 2 {
-            return;
-        }
-        let mut rng = rand::rng();
-        if let Some(current) = self.queue_cursor.filter(|&cursor| cursor < len) {
-            // 先单独保留当前具体队列项，再随机放回，重复 id 的元数据也不会串位。
-            self.queue.swap(0, current);
-            self.queue[1..].shuffle(&mut rng);
-            let cursor = rng.random_range(0..len);
-            self.queue.swap(0, cursor);
-            self.queue_cursor = Some(cursor);
+        let current = self
+            .queue_cursor
+            .and_then(|cursor| self.queue_order.get(cursor).copied());
+        let mut entries: Vec<_> = self
+            .queue_order
+            .drain(..)
+            .zip(self.queue.drain(..))
+            .collect();
+        if mode.shuffles() {
+            entries.shuffle(&mut rand::rng());
         } else {
-            self.queue.shuffle(&mut rng);
-            self.queue_cursor = None;
+            entries.sort_by_key(|(order, _)| *order);
         }
+        self.queue_cursor =
+            current.and_then(|current| entries.iter().position(|(order, _)| *order == current));
+        (self.queue_order, self.queue) = entries.into_iter().unzip();
+    }
+
+    fn insert_queue_song(&mut self, song: Song) {
+        let index = self.queue_cursor.map_or(0, |cursor| cursor + 1);
+        let order = self
+            .queue_cursor
+            .map_or(0, |cursor| self.queue_order[cursor] + 1);
+        for existing in &mut self.queue_order {
+            if *existing >= order {
+                *existing += 1;
+            }
+        }
+        self.queue.insert(index, song);
+        self.queue_order.insert(index, order);
     }
 
     /// 下一首插入：插到当前歌曲之后。「播完这首就听它」和心动模式穿插推荐都走这里。
     pub fn insert_next(&mut self, song: Song, cx: &mut Context<Self>) {
         self.cancel_preload();
-        match self.queue_cursor {
-            Some(cursor) => self.queue.insert(cursor + 1, song),
-            None => self.queue.insert(0, song),
-        }
+        self.insert_queue_song(song);
         self.save_cache();
         self.publish(cx, PlaybackEvent::SnapshotChanged);
     }
@@ -503,6 +521,7 @@ impl PlaybackController {
         }
         self.stop();
         self.queue.clear();
+        self.queue_order.clear();
         self.queue_cursor = None;
         self.queue_source = None;
         self.state.current_song = None;
@@ -516,6 +535,7 @@ impl PlaybackController {
         self.persistence.request_playback(PlaybackState {
             playlist_id: 0,
             queue: Vec::new(),
+            queue_order: Vec::new(),
             song_id: 0,
             queue_cursor: None,
             position: Duration::ZERO,
@@ -752,7 +772,7 @@ impl PlaybackController {
         }
         self.state.mode = mode;
         self.cancel_preload();
-        // 只在进入随机模式的那一刻洗牌；离开随机不再还原，洗好的顺序就是列表顺序。
+        // 进入随机时洗牌，其他模式恢复未洗牌顺序。
         self.apply_mode_to_list(mode);
         self.save_cache();
         self.publish(cx, PlaybackEvent::SnapshotChanged);
@@ -846,6 +866,7 @@ impl PlaybackController {
         self.persistence.request_playback(PlaybackState {
             playlist_id,
             queue: self.queue.clone(),
+            queue_order: self.queue_order.clone(),
             song_id: song.id,
             queue_cursor: self.queue_cursor,
             position: self.state.position,
@@ -1028,6 +1049,53 @@ mod tests {
                     .map(|index| format!("版本 {index}"))
                     .collect::<Vec<_>>()
             );
+        }
+    }
+
+    #[test]
+    fn leaving_shuffle_restores_order_and_exact_current_entry_after_restart() {
+        for mode in [
+            PlayMode::Sequential,
+            PlayMode::RepeatAll,
+            PlayMode::RepeatOne,
+        ] {
+            let mut controller = controller_with(&[1, 2, 1, 3], 1, PlayMode::Sequential);
+            controller.queue[2].name = "第二个版本".into();
+            controller.queue_cursor = Some(2);
+            controller.apply_mode_to_list(PlayMode::Shuffle);
+            controller.state.mode = PlayMode::Shuffle;
+            controller.state.position = Duration::from_secs(9);
+            controller.insert_queue_song(Song {
+                id: 4,
+                ..Default::default()
+            });
+            controller.save_cache();
+            controller.persistence.flush();
+            let cache = controller.persistence.load_playback().unwrap();
+            let mut restored = PlaybackController::for_test();
+            restored.restore_list(cache);
+            restored.apply_mode_to_list(mode);
+            assert_eq!(ids(&restored), vec![1, 2, 1, 4, 3]);
+            assert_eq!(restored.queue_cursor, Some(2));
+            assert_eq!(restored.current_list_song().unwrap().name, "第二个版本");
+            assert_eq!(restored.step_list(1).unwrap().id, 4);
+            assert_eq!(controller.state.position, Duration::from_secs(9));
+        }
+    }
+
+    #[test]
+    fn invalid_saved_order_falls_back_to_saved_queue_order() {
+        let mut controller = controller_with(&[1, 2, 3], 2, PlayMode::Shuffle);
+        controller.save_cache();
+        controller.persistence.flush();
+        for order in [vec![], vec![0, 0, 2], vec![0, 1, 9]] {
+            let mut cache = controller.persistence.load_playback().unwrap();
+            cache.queue_order = order;
+            let mut restored = PlaybackController::for_test();
+            restored.restore_list(cache);
+            restored.apply_mode_to_list(PlayMode::Sequential);
+            assert_eq!(ids(&restored), vec![1, 2, 3]);
+            assert_eq!(restored.queue_cursor, Some(1));
         }
     }
 

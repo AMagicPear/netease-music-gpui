@@ -3,7 +3,7 @@
 use std::{ops::Range, rc::Rc};
 
 use gpui::*;
-use gpui_kit::base::Theme;
+use gpui_kit::base::{InteractiveElementExt, Theme};
 
 const OVERSCAN_ROWS: usize = 4;
 
@@ -115,11 +115,13 @@ pub fn virtual_table<V: Render>(
     render_header: impl 'static + Fn(&TableColumn, usize) -> AnyElement,
     on_header_layout: impl 'static + Fn(Vec<Bounds<Pixels>>),
     on_row_hover: impl 'static + Fn(&mut V, u64, bool, &mut Context<V>),
+    on_row_double_click: impl 'static + Fn(&mut V, u64, &mut Context<V>),
     on_row_aux_click: impl 'static + Fn(&mut V, u64, Point<Pixels>, &mut Window, &mut Context<V>),
     cx: &App,
 ) -> impl IntoElement {
     let colors = Theme::global(cx).tokens.colors;
     let on_row_hover = Rc::new(on_row_hover);
+    let on_row_double_click = Rc::new(on_row_double_click);
     let on_row_aux_click = Rc::new(on_row_aux_click);
     let header = table_row(
         &columns,
@@ -160,6 +162,10 @@ pub fn virtual_table<V: Render>(
                         cx.listener(move |view, hovered: &bool, _, cx| {
                             on_row_hover(view, key, *hovered, cx);
                         })
+                    })
+                    .on_double_click({
+                        let on_row_double_click = on_row_double_click.clone();
+                        cx.listener(move |view, _, _, cx| on_row_double_click(view, key, cx))
                     })
                     .on_aux_click({
                         let on_row_aux_click = on_row_aux_click.clone();

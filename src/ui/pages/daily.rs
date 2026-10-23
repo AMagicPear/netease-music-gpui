@@ -283,6 +283,7 @@ impl DailySongsPage {
             },
             |_| {},
             |this, id, hovered, cx| this.set_hovered_row(id, hovered, cx),
+            |this, key, cx| this.play_from(key, cx),
             |this, key, position, window, cx| {
                 let Some(song) = this
                     .store
