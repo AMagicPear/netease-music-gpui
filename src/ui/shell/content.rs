@@ -65,6 +65,7 @@ pub struct MainContent {
     _library_subscription: Subscription,
     _search_subscription: Subscription,
     _playlist_subscription: Subscription,
+    _recommend_subscription: Subscription,
 }
 
 impl EventEmitter<ContentLayoutChanged> for MainContent {}
@@ -110,7 +111,20 @@ impl MainContent {
         let song_comments_page = cx.new(|cx| SongCommentsPage::new(window, cx));
         let recommended = cx.new(|cx| RecommendStore::new(user_profile.clone(), cx));
         let daily_store = cx.new(|cx| DailySongsStore::new(user_profile.clone(), cx));
-        let recommend_page = cx.new(|_| RecommendPage::new(recommended, daily_store.clone()));
+        let recommend_page = cx.new(|cx| {
+            RecommendPage::new(
+                recommended,
+                daily_store.clone(),
+                library.clone(),
+                playback.clone(),
+                cx,
+            )
+        });
+        let recommend_subscription = cx.observe(&recommend_page, |this, _, cx| {
+            if this.active_page == ContentPage::Recommend {
+                cx.notify();
+            }
+        });
         let daily_page = cx.new(|cx| {
             DailySongsPage::new(
                 daily_store,
@@ -154,7 +168,17 @@ impl MainContent {
             .collect();
         let mut history = History::new();
         history.push(ContentPage::Recommend);
-        let user_profile_subscription = cx.observe(&user_profile, |this, account, cx| {
+        if !user_profile.read(cx).loading {
+            playback.update(cx, |playback, cx| {
+                playback.validate_heart_account(user_profile.read(cx).profile.user_id, cx)
+            });
+        }
+        let user_profile_subscription = cx.observe(&user_profile, move |this, account, cx| {
+            if !account.read(cx).loading {
+                playback.update(cx, |playback, cx| {
+                    playback.validate_heart_account(account.read(cx).profile.user_id, cx)
+                });
+            }
             let user_id = account.read(cx).profile.user_id;
             if this.account_id != user_id {
                 this.account_id = user_id;
@@ -195,6 +219,7 @@ impl MainContent {
             _library_subscription: library_subscription,
             _search_subscription: search_subscription,
             _playlist_subscription: playlist_subscription,
+            _recommend_subscription: recommend_subscription,
         }
     }
 

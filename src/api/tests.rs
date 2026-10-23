@@ -6,6 +6,31 @@ use futures::AsyncReadExt;
 use gpui::http_client::HttpClient;
 
 #[test]
+#[ignore = "需要登录会话和网络连接，且红心歌单非空"]
+fn heart_mode_can_load_real_recommendations() {
+    let api = MusicApi::from_env().expect("无法获取登录会话");
+    api.runtime.block_on(async {
+        let user = MusicApi::user_profile(api.client.clone()).await.unwrap();
+        let playlist_id = MusicApi::heart_playlist(&api.client, user.user_id)
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            let songs = MusicApi::heart_songs(api.client.clone(), playlist_id)
+                .await
+                .unwrap();
+            assert!(!songs.is_empty());
+            assert!(
+                songs
+                    .iter()
+                    .all(|song| song.id > 0 && !song.name.is_empty())
+            );
+            let ids: std::collections::HashSet<_> = songs.iter().map(|song| song.id).collect();
+            assert_eq!(ids.len(), songs.len());
+        }
+    });
+}
+
+#[test]
 #[ignore = "需要登录会话（或 COOKIE 环境变量）和网络连接"]
 fn messages_can_load_from_real_api() {
     let api = MusicApi::from_env().expect("无法获取登录会话");

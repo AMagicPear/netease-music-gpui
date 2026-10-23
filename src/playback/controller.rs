@@ -1,3 +1,6 @@
+mod heart;
+pub(crate) use heart::HeartSession;
+
 use super::{
     PlaybackEvent, PlaybackSnapshot,
     audio_cache::{AudioCacheStore, DEFAULT_CAPACITY, DEFAULT_MAX_FILE_BYTES},
@@ -35,6 +38,10 @@ struct Preload {
 /// 共享 GPUI Entity：统一接收 UI 命令，管理播放列表、异步请求和状态通知。
 pub struct PlaybackController {
     state: PlaybackSnapshot,
+    heart: Option<HeartSession>,
+    heart_generation: u64,
+    heart_request: Option<tokio::task::AbortHandle>,
+    heart_waiting: bool,
     engine: PlayerEngine,
     /// 当前播放列表。它是一份自己的顺序，和任何页面上的歌单互不影响：
     /// 换来源、洗牌、插入歌曲都只改这里，页面歌单的排序或过滤不会带走播放。
@@ -75,6 +82,10 @@ impl PlaybackController {
     pub(crate) fn with_persistence(persistence: Persistence) -> Self {
         Self {
             state: PlaybackSnapshot::default(),
+            heart: None,
+            heart_generation: 0,
+            heart_request: None,
+            heart_waiting: false,
             engine: PlayerEngine::default(),
             queue: Vec::new(),
             queue_order: Vec::new(),
@@ -200,6 +211,7 @@ impl PlaybackController {
     }
 
     fn stop(&mut self) {
+        self.cancel_heart();
         self.cancel_preload();
         // 使停止之前的加载结果失效，防止异步完成后重新开始播放。
         self.state.revision = self.state.revision.wrapping_add(1);
@@ -243,6 +255,9 @@ impl PlaybackController {
     /// 播放列表面板双击某一项：游标移到这一项并立即播放。
     /// 队列项是按位置引用的，不按歌曲 id 反查，列表里有重复歌曲也不会选错。
     pub fn play_queue_index(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.state.heart_loading && !self.state.heart_mode {
+            self.cancel_heart();
+        }
         let Some(song) = self.queue.get(index).cloned() else {
             return;
         };
@@ -297,6 +312,7 @@ impl PlaybackController {
         songs: Vec<Song>,
         song_id: Option<u64>,
     ) -> Option<Song> {
+        self.cancel_heart();
         self.cancel_preload();
         self.queue_source = source;
         self.queue_order = (0..songs.len()).collect();
@@ -326,6 +342,16 @@ impl PlaybackController {
         }
         self.state.mode = cache.mode;
         self.state.quality = cache.quality;
+        if let Some(session) = cache.heart
+            && session.user_id != 0
+            && session.playlist_id == cache.playlist_id
+            && !self.queue.is_empty()
+        {
+            self.state.heart_mode = true;
+            self.state.mode = PlayMode::Sequential;
+            self.heart = Some(session);
+            self.queue_order = (0..self.queue.len()).collect();
+        }
     }
 
     /// 游标所指的那首歌。
@@ -506,7 +532,7 @@ impl PlaybackController {
         self.queue_order.insert(index, order);
     }
 
-    /// 下一首插入：插到当前歌曲之后。「播完这首就听它」和心动模式穿插推荐都走这里。
+    /// 下一首插入：插到当前歌曲之后，心动模式也优先播放用户指定的歌曲。
     pub fn insert_next(&mut self, song: Song, cx: &mut Context<Self>) {
         self.cancel_preload();
         self.insert_queue_song(song);
@@ -516,7 +542,9 @@ impl PlaybackController {
 
     /// 清空播放队列：停止播放并移除全部队列项。
     pub fn clear_queue(&mut self, cx: &mut Context<Self>) {
+        self.cancel_heart();
         if self.queue.is_empty() {
+            self.publish(cx, PlaybackEvent::SnapshotChanged);
             return;
         }
         self.stop();
@@ -534,6 +562,7 @@ impl PlaybackController {
         // 否则下次启动会把刚清掉的队列又恢复回来。
         self.persistence.request_playback(PlaybackState {
             playlist_id: 0,
+            heart: None,
             queue: Vec::new(),
             queue_order: Vec::new(),
             song_id: 0,
@@ -546,7 +575,9 @@ impl PlaybackController {
     }
 
     fn select_song(&mut self, song: Song, cx: &mut Context<Self>) {
+        self.heart_waiting = false;
         self.load_song(song, Duration::ZERO, true, cx);
+        self.maybe_refill_heart(cx);
     }
 
     fn load_song(&mut self, song: Song, position: Duration, play: bool, cx: &mut Context<Self>) {
@@ -630,7 +661,9 @@ impl PlaybackController {
     }
 
     pub fn is_play_requested(&self) -> bool {
-        if self.state.loading {
+        if self.state.heart_loading && self.heart_waiting {
+            true
+        } else if self.state.loading {
             self.play_when_ready
         } else {
             self.state.is_playing
@@ -638,6 +671,7 @@ impl PlaybackController {
     }
 
     pub fn pause(&mut self, cx: &mut Context<Self>) {
+        self.heart_waiting = false;
         self.play_when_ready = false;
         self.engine.pause();
         if self.engine.has_source() {
@@ -650,6 +684,17 @@ impl PlaybackController {
     }
 
     pub fn resume(&mut self, cx: &mut Context<Self>) {
+        if self.state.heart_loading && !self.state.heart_mode {
+            self.heart_waiting = true;
+        }
+        if self.state.heart_mode
+            && !self.state.loading
+            && !self.state.duration.is_zero()
+            && self.state.position >= self.state.duration
+        {
+            self.change_song(1, cx);
+            return;
+        }
         self.play_when_ready = true;
         if !self.state.loading {
             // 休眠或断网之后，下载任务可能已经停摆或地址已经过期。
@@ -725,8 +770,13 @@ impl PlaybackController {
     }
 
     fn change_song(&mut self, direction: isize, cx: &mut Context<Self>) {
+        if self.state.heart_loading && !self.state.heart_mode {
+            self.cancel_heart();
+        }
         if let Some(song) = self.step_list(direction) {
             self.select_song(song, cx);
+        } else if direction > 0 {
+            self.wait_for_heart(cx);
         }
     }
 
@@ -737,6 +787,11 @@ impl PlaybackController {
             return;
         }
         let Some(song) = self.step_list(1) else {
+            if self.wait_for_heart(cx) {
+                self.save_cache();
+                self.publish(cx, PlaybackEvent::SnapshotChanged);
+                return;
+            }
             // 顺序播放到队尾：停在末尾不动，位置保留，再按播放会重播当前歌曲。
             self.engine.stop();
             self.save_cache();
@@ -763,11 +818,17 @@ impl PlaybackController {
 
     /// 播放栏按钮切换到下一种播放方式。
     pub fn cycle_mode(&mut self, cx: &mut Context<Self>) {
+        if self.state.heart_mode || self.state.heart_loading {
+            self.exit_heart_mode(cx);
+            return;
+        }
         self.set_mode(self.state.mode.next(), cx);
     }
 
     pub fn set_mode(&mut self, mode: PlayMode, cx: &mut Context<Self>) {
-        if self.state.mode == mode {
+        let was_heart = self.heart.is_some() || self.state.heart_error.is_some();
+        self.cancel_heart();
+        if self.state.mode == mode && !was_heart {
             return;
         }
         self.state.mode = mode;
@@ -785,11 +846,20 @@ impl PlaybackController {
     pub fn seek_to(&mut self, position: Duration, cx: &mut Context<Self>) {
         let position = position.min(self.state.duration);
         if self.can_seek() && self.engine.seek_to(position) {
+            let was_waiting = self.heart_waiting;
+            self.heart_waiting = false;
             self.state.position = position;
             self.state.error = None;
             self.state.buffering = self.state.is_playing;
             self.save_cache();
-            self.publish(cx, PlaybackEvent::PositionChanged);
+            self.publish(
+                cx,
+                if was_waiting {
+                    PlaybackEvent::SnapshotChanged
+                } else {
+                    PlaybackEvent::PositionChanged
+                },
+            );
         }
     }
 
@@ -839,6 +909,7 @@ impl PlaybackController {
         } else {
             // 从真实 PCM 消费量取进度，等待数据的静音不计入歌曲时间。
             self.state.position = self.engine.position().min(self.state.duration);
+            self.maybe_refill_heart(cx);
             self.maybe_preload(cx);
         }
         self.ticks_since_save += 1;
@@ -865,6 +936,7 @@ impl PlaybackController {
         };
         self.persistence.request_playback(PlaybackState {
             playlist_id,
+            heart: self.heart.clone().filter(|_| self.state.heart_mode),
             queue: self.queue.clone(),
             queue_order: self.queue_order.clone(),
             song_id: song.id,
@@ -891,6 +963,9 @@ impl PlaybackController {
 
 impl Drop for PlaybackController {
     fn drop(&mut self) {
+        if let Some(request) = self.heart_request.take() {
+            request.abort();
+        }
         self.cancel_preload();
         // 退出时等最后一次缓存真正落盘，确保下次启动能恢复到最后的位置。
         self.save_cache();

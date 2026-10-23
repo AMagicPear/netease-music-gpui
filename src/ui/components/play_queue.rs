@@ -9,7 +9,9 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_kit::base::{ColorTokens, IndexPath, InteractiveElementExt as _, Selectable, Theme};
+use gpui_kit::base::{
+    Button, ColorTokens, IndexPath, InteractiveElementExt as _, Selectable, Theme,
+};
 use gpui_kit::component::list::{List, ListDelegate, ListState};
 
 use super::{
@@ -78,6 +80,7 @@ pub(in crate::ui) fn header_text_button(
 }
 
 pub struct PlayQueue {
+    library: Entity<MusicLibrary>,
     playback: Entity<PlaybackController>,
     list: Entity<ListState<QueueDelegate>>,
     /// 面板当前是否展示本内容（由 [`super::side_panel::SidePanel`] 维护）。
@@ -123,6 +126,7 @@ impl PlayQueue {
         });
 
         Self {
+            library,
             playback,
             list,
             visible: false,
@@ -154,6 +158,10 @@ impl Render for PlayQueue {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = Theme::global(cx).tokens.colors;
         let count = self.playback.read(cx).queue().len();
+        let state = self.playback.read(cx).snapshot();
+        let heart = state.heart_mode || state.heart_loading;
+        let heart_loading = state.heart_loading;
+        let heart_error = state.heart_error.clone();
         if self.scroll_to_current {
             self.scroll_to_current = false;
             let index = self.playback.read(cx).queue_cursor().unwrap_or(0);
@@ -227,6 +235,59 @@ impl Render for PlayQueue {
                             )),
                     ),
             )
+            .when(heart || heart_error.is_some(), |panel| {
+                panel.child(
+                    div()
+                        .px(ROW_PADDING)
+                        .pb(px(12.))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .text_size(px(12.))
+                                .text_color(colors.muted_foreground)
+                                .child(heart_error.clone().unwrap_or_else(|| {
+                                    if heart_loading {
+                                        "正在获取心动推荐…".into()
+                                    } else {
+                                        "心动模式 · 红心歌曲与相似推荐".into()
+                                    }
+                                })),
+                        )
+                        .when(heart_error.is_some(), |row| {
+                            row.child(
+                                Button::new("heart-retry")
+                                    .aria_label("重试心动推荐")
+                                    .child("重试")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let user_id = this.library.read(cx).user_id;
+                                        this.playback.update(cx, |playback, cx| {
+                                            if playback.snapshot().heart_mode {
+                                                playback.retry_heart_mode(cx);
+                                            } else {
+                                                playback.start_heart_mode(user_id, cx);
+                                            }
+                                        });
+                                    })),
+                            )
+                        })
+                        .when(heart, |row| {
+                            row.child(
+                                Button::new("heart-exit")
+                                    .aria_label("退出心动模式")
+                                    .child("退出")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.playback.update(cx, |playback, cx| {
+                                            playback.exit_heart_mode(cx)
+                                        });
+                                    })),
+                            )
+                        }),
+                )
+            })
             .child(
                 div()
                     .flex_1()

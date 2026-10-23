@@ -5,6 +5,7 @@ mod engine;
 mod stream;
 mod system_media;
 
+pub(crate) use controller::HeartSession;
 pub use controller::PlaybackController;
 
 use crate::models::{AudioQualityLevel, PlayMode, Song};
@@ -39,6 +40,9 @@ pub struct PlaybackSnapshot {
     pub buffering: bool,
     /// 当前播放方式；决定播完后的去向和随机/循环时的手动切歌。
     pub mode: PlayMode,
+    pub heart_mode: bool,
+    pub heart_loading: bool,
+    pub heart_error: Option<String>,
     pub quality: AudioQualityLevel,
     pub actual_quality: Option<AudioQualityLevel>,
     /// 下载、解码或设备错误；失败后停止，可从保留的位置重试。
@@ -58,6 +62,9 @@ impl Default for PlaybackSnapshot {
             loading: false,
             buffering: false,
             mode: PlayMode::default(),
+            heart_mode: false,
+            heart_loading: false,
+            heart_error: None,
             quality: AudioQualityLevel::default(),
             actual_quality: None,
             error: None,

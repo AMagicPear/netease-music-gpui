@@ -4,7 +4,9 @@ use gpui::*;
 use gpui_kit::base::{Button, ColorTokens, Theme};
 
 use crate::models::{FeaturedActivity, Playlist, RecommendedPlaylist};
+use crate::playback::{PlaybackController, PlaybackEvent};
 use crate::state::daily::DailySongsStore;
+use crate::state::library::MusicLibrary;
 use crate::state::recommend::{QuickEntry, QuickEntryKind, RecommendStore};
 use crate::ui::assets::{track_cover_image, track_cover_url};
 use crate::ui::components::{centered_empty, play_count_label, spinner};
@@ -24,15 +26,32 @@ const PLACEHOLDER_COVER: &str = "images/trackBlank.png";
 pub struct RecommendPage {
     store: Entity<RecommendStore>,
     daily: Entity<DailySongsStore>,
+    library: Entity<MusicLibrary>,
+    playback: Entity<PlaybackController>,
+    _playback_subscription: Subscription,
     /// 与 entries 按下标对齐，新封面加载中保留上一张的颜色。
     entry_colors: Vec<CoverColor>,
 }
 
 impl RecommendPage {
-    pub fn new(store: Entity<RecommendStore>, daily: Entity<DailySongsStore>) -> Self {
+    pub fn new(
+        store: Entity<RecommendStore>,
+        daily: Entity<DailySongsStore>,
+        library: Entity<MusicLibrary>,
+        playback: Entity<PlaybackController>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let subscription = cx.subscribe(&playback, |_, _, event, cx| {
+            if matches!(event, PlaybackEvent::SnapshotChanged) {
+                cx.notify();
+            }
+        });
         Self {
             store,
             daily,
+            library,
+            playback,
+            _playback_subscription: subscription,
             entry_colors: Vec::new(),
         }
     }
@@ -92,7 +111,23 @@ impl RecommendPage {
             .day();
         let store = self.store.read(cx);
         let mut entries = store.entries.clone();
+        let playback = self.playback.read(cx).snapshot();
         for entry in &mut entries {
+            if entry.kind == QuickEntryKind::HeartMode {
+                entry.caption = if playback.heart_loading {
+                    "正在获取心动推荐…点击可取消".into()
+                } else if let Some(error) = &playback.heart_error {
+                    format!("{error} · 点击重试").into()
+                } else if playback.heart_mode {
+                    if self.playback.read(cx).is_play_requested() {
+                        "心动模式播放中 · 点击退出".into()
+                    } else {
+                        "心动模式已暂停 · 点击退出".into()
+                    }
+                } else {
+                    entry.caption.clone()
+                };
+            }
             if entry.kind == QuickEntryKind::DailySongs {
                 entry.caption = self.daily.read(cx).songs.first().map_or_else(
                     || "每日推荐".into(),
@@ -165,6 +200,7 @@ fn section_title(text: &'static str, colors: ColorTokens) -> impl IntoElement {
 /// 两个区块的卡片指向同一份数据，不在页面里另存一份。
 enum QuickTarget {
     DailySongs,
+    HeartMode,
     /// 摘要用于先画歌单页头；`Playlist` 很大，这里只影响展示，装箱避免拉大整个枚举。
     Playlist {
         id: u64,
@@ -200,6 +236,7 @@ fn quick_entries(
                         .unwrap_or_else(|| PLACEHOLDER_COVER.into());
                     let target = match entry.kind {
                         QuickEntryKind::DailySongs => Some(QuickTarget::DailySongs),
+                        QuickEntryKind::HeartMode => Some(QuickTarget::HeartMode),
                         QuickEntryKind::Radar => radar.map(|playlist| QuickTarget::Playlist {
                             id: playlist.id,
                             summary: Box::new(playlist.to_summary()),
@@ -299,19 +336,35 @@ fn quick_entry(
                 ),
         );
     match target {
-        Some(target) => {
-            card.cursor_pointer()
-                .on_click(cx.listener(move |_, _, _, cx| match &target {
-                    QuickTarget::DailySongs => NavigationBus::emit(cx, Navigate::DailySongs),
-                    QuickTarget::Playlist { id, summary } => NavigationBus::emit(
-                        cx,
-                        Navigate::Playlist {
-                            id: *id,
-                            summary: Some(summary.as_ref().clone()),
-                        },
-                    ),
-                }))
-        }
+        Some(target) => card
+            .role(Role::Button)
+            .aria_label(entry.title.clone())
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| match &target {
+                QuickTarget::DailySongs => NavigationBus::emit(cx, Navigate::DailySongs),
+                QuickTarget::HeartMode => {
+                    let user_id = this.library.read(cx).user_id;
+                    this.playback.update(cx, |playback, cx| {
+                        let state = playback.snapshot();
+                        if state.heart_loading {
+                            playback.exit_heart_mode(cx);
+                        } else if state.heart_mode && state.heart_error.is_some() {
+                            playback.retry_heart_mode(cx);
+                        } else if state.heart_mode {
+                            playback.exit_heart_mode(cx);
+                        } else {
+                            playback.start_heart_mode(user_id, cx);
+                        }
+                    });
+                }
+                QuickTarget::Playlist { id, summary } => NavigationBus::emit(
+                    cx,
+                    Navigate::Playlist {
+                        id: *id,
+                        summary: Some(summary.as_ref().clone()),
+                    },
+                ),
+            })),
         None => card,
     }
 }
@@ -623,12 +676,11 @@ fn featured_activities(
 
 fn activity_label(title: &str, font_family: &str) -> AnyElement {
     let escape_xml = |text: &str| {
-        text
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
+        text.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&apos;")
     };
     let title = escape_xml(title);
     let font_family = escape_xml(font_family);

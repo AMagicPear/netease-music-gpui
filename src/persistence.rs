@@ -45,6 +45,8 @@ struct WriterState {
 
 #[derive(Deserialize, Serialize)]
 pub struct PlaybackState {
+    #[serde(default)]
+    pub heart: Option<crate::playback::HeartSession>,
     pub playlist_id: u64,
     pub queue: Vec<Song>,
     /// 与 queue 平行的原始位置；旧缓存缺失时沿用已保存顺序。
@@ -321,6 +323,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let store = Persistence::at(directory.path().to_owned());
         let state = PlaybackState {
+            heart: None,
             playlist_id: 42,
             queue: vec![Song {
                 id: 7,
@@ -369,6 +372,7 @@ mod tests {
         assert_eq!(loaded.queue_cursor, None);
         assert_eq!(loaded.mode, PlayMode::default());
         assert_eq!(loaded.quality, AudioQualityLevel::default());
+        assert!(loaded.heart.is_none());
     }
 
     #[test]
@@ -380,6 +384,7 @@ mod tests {
         drop(store);
         assert!(!worker.state.lock().unwrap().stopping);
         remaining.request_playback(PlaybackState {
+            heart: None,
             playlist_id: 1,
             queue: Vec::new(),
             song_id: 2,

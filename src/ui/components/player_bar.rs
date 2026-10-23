@@ -331,6 +331,7 @@ impl Render for PlayerBar {
         let counts = self.song_counts.read(cx).counts();
         let snapshot = self.playback.read(cx).snapshot();
         let mode = snapshot.mode;
+        let heart = snapshot.heart_mode || snapshot.heart_loading;
         let selected_quality = snapshot.quality;
         // 优先显示实际拿到的音质，降级时不会谎报。
         let quality_label = snapshot
@@ -485,9 +486,18 @@ impl Render for PlayerBar {
                             .child(
                                 hover_icon(
                                     "player-order-button",
-                                    mode.label(),
-                                    mode.icon_path(),
+                                    if heart {
+                                        "退出心动模式"
+                                    } else {
+                                        mode.label()
+                                    },
+                                    if heart {
+                                        "icons/播放顺序/心动模式.svg"
+                                    } else {
+                                        mode.icon_path()
+                                    },
                                     IconSize::Large.pixels(),
+                                    // 心动模式与普通播放模式用同一种灰色，靠图标形状区分即可。
                                     colors.muted_foreground,
                                     colors,
                                 )
