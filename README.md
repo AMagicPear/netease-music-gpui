@@ -67,13 +67,15 @@ cargo test --locked heart_mode_can_load_real_recommendations -- --ignored
 
 ## 打包
 
-在 macOS 或 Windows 上安装 Python 3.9+，运行以下命令构建当前平台的 release 并复制资源（Windows 也可以使用 `py -3`）：
+在 macOS、Windows 或 Linux 上安装 Python 3.9+，运行以下命令构建当前平台的 release 并复制资源（Windows 也可以使用 `py -3`）：
 
 ```bash
 python3 scripts/package.py
 ```
 
-macOS 生成 `target/bundle/NetEase Music.app`，可执行文件位于 `Contents/MacOS`，图标、图片和字体位于 `Contents/Resources/assets`；Windows 生成 `target/bundle/netease-music-gpui/`，里面包含 `.exe` 和 `assets/`。如果配置了自定义 Cargo target 目录，产物位于该目录的 `bundle/`。请分发完整应用包或目录，不要只复制可执行文件。脚本只构建本机平台，不负责交叉编译、制作安装程序或收集额外的 Windows 运行库。
+macOS 生成 `target/bundle/NetEase Music.app`，可执行文件位于 `Contents/MacOS`，图标、图片和字体位于 `Contents/Resources/assets`；Windows 与 Linux 生成 `target/bundle/netease-music-gpui/`，里面包含可执行文件和 `assets/`。如果配置了自定义 Cargo target 目录，产物位于该目录的 `bundle/`。请分发完整应用包或目录，不要只复制可执行文件。脚本只构建本机平台（macOS 可用 `--target x86_64-apple-darwin` 交叉编译 Intel 版），不制作安装程序或收集额外的运行库。
+
+GitHub Actions（`.github/workflows/package.yml`）在推送 `v*` 标签时打包 macOS arm64/x64、Windows x64 与 Linux x64 并自动发布 Release，也支持在 Actions 页面手动触发；Linux 运行还需要系统提供 ALSA 和 Vulkan 运行库。
 
 所有项目资源都从外部目录读取。单独执行 `cargo build --release` 不会复制资源，应使用上述脚本生成可分发目录。
 

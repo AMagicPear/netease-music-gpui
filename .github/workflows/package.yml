@@ -1,0 +1,137 @@
+name: Package
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos-arm64:
+    name: macOS arm64
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # 补丁变更后换缓存键，避免复用未打补丁的依赖产物
+          key: ${{ hashFiles('scripts/prepare_gpui.py', 'vendor/patches/*.patch') }}
+          cache-on-failure: true
+      - name: Build and bundle
+        run: python3 scripts/package.py
+      - name: Zip app bundle
+        run: |
+          cd target/bundle
+          ditto -c -k --sequesterRDir --keepParent "NetEase Music.app" "netease-music-macos-arm64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: netease-music-macos-arm64
+          path: target/bundle/netease-music-macos-arm64.zip
+
+  # Intel 芯片的 Mac 已经没有托管 runner，从 arm64 交叉编译，脚本内完成
+  macos-x64:
+    name: macOS x86_64
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ hashFiles('scripts/prepare_gpui.py', 'vendor/patches/*.patch') }}
+          cache-on-failure: true
+      - name: Build and bundle
+        run: python3 scripts/package.py --target x86_64-apple-darwin
+      - name: Zip app bundle
+        run: |
+          cd target/bundle
+          ditto -c -k --sequesterRDir --keepParent "NetEase Music.app" "netease-music-macos-x64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: netease-music-macos-x64
+          path: target/bundle/netease-music-macos-x64.zip
+
+  windows-x64:
+    name: Windows x86_64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ hashFiles('scripts/prepare_gpui.py', 'vendor/patches/*.patch') }}
+          cache-on-failure: true
+      - name: Build and bundle
+        run: python scripts/package.py
+      - name: Zip bundle
+        shell: pwsh
+        run: Compress-Archive -Path target/bundle/netease-music-gpui/* -DestinationPath netease-music-gpui-windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: netease-music-gpui-windows-x64
+          path: netease-music-gpui-windows-x64.zip
+
+  # 22.04 的 glibc 更老，产物能在更多发行版上运行；apt 包名也与 24.04 的 t64 过渡无关
+  linux-x64:
+    name: Linux x86_64
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev libfontconfig1-dev libfreetype6-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libudev-dev libvulkan-dev \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ hashFiles('scripts/prepare_gpui.py', 'vendor/patches/*.patch') }}
+          cache-on-failure: true
+      - name: Build and bundle
+        run: python3 scripts/package.py
+      # tar 而不是 zip：保留可执行位
+      - name: Tar bundle
+        run: tar -czf netease-music-gpui-linux-x64.tar.gz -C target/bundle netease-music-gpui
+      - uses: actions/upload-artifact@v4
+        with:
+          name: netease-music-gpui-linux-x64
+          path: netease-music-gpui-linux-x64.tar.gz
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos-arm64, macos-x64, windows-x64, linux-x64]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+      - name: Create release
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "NetEase Music $GITHUB_REF_NAME" \
+            --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
