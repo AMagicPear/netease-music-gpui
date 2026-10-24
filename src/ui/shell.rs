@@ -18,8 +18,8 @@ use crate::models::{Playlist, Song};
 use crate::playback::{PlaybackController, PlaybackEvent};
 use crate::state::library::MusicLibrary;
 
-/// macOS 顶部给系统红绿灯留白，其余平台的窗口按钮与工具栏同行。
-pub(super) const HEADER_TOP_INSET: f32 = if cfg!(target_os = "macos") { 30. } else { 0. };
+/// macOS 顶部给系统红绿灯留白；其余平台窗口按钮与工具栏同行，只留少量顶部空隙。
+pub(super) const HEADER_TOP_INSET: f32 = if cfg!(target_os = "macos") { 30. } else { 8. };
 pub(super) const HEADER_HEIGHT: f32 = HEADER_TOP_INSET + 42.;
 
 pub struct MainWindow {

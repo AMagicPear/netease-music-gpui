@@ -5,7 +5,6 @@ use gpui::*;
 use gpui_kit::base::input::{Input, InputEditorStyle, InputEvent, InputState};
 use gpui_kit::base::{ColorTokens, Root, Scrollbar, ScrollbarMode, Theme};
 
-use super::hide_traffic_lights;
 use crate::desktop;
 use crate::models::Song;
 use crate::state::library::{MusicLibrary, SongsCollected};
@@ -70,7 +69,7 @@ pub fn open_collect_window(parent: &Window, songs: Vec<Song>, cx: &mut App) {
     };
     match gpui_kit::open_window(options, cx, move |window, cx| {
         #[cfg(target_os = "macos")]
-        hide_traffic_lights(window, true);
+        super::hide_traffic_lights(window, true);
         window.on_window_should_close(cx, |_, cx| {
             desktop::set_collect_window(None, cx);
             true
