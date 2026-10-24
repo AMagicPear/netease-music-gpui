@@ -1,5 +1,6 @@
 """Build a native release and copy it with its assets into target/bundle."""
 
+import argparse
 import json
 from pathlib import Path
 import plistlib
@@ -44,19 +45,23 @@ def assemble(root, executable, output, platform, version):
             localized.mkdir()
             with (localized / "InfoPlist.strings").open("wb") as file:
                 plistlib.dump({"CFBundleName": name, "CFBundleDisplayName": name}, file)
-    elif platform == "win32":
+    elif platform in ("win32", "linux"):
         binary = output / executable.name
         resources = output / "assets"
     else:
-        raise ValueError("Packaging is supported on macOS and Windows only")
+        raise ValueError("Packaging is supported on macOS, Windows and Linux only")
     binary.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(executable, binary)
     shutil.copytree(root / "assets", resources)
 
 
 def main():
-    if sys.platform not in ("darwin", "win32"):
-        raise SystemExit("Run this script on macOS or Windows to build for that platform")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--target", metavar="TRIPLE",
+                        help="override the cargo target triple, e.g. x86_64-apple-darwin on macOS")
+    args = parser.parse_args()
+    if sys.platform not in ("darwin", "win32", "linux"):
+        raise SystemExit("Run this script on macOS, Windows or Linux to build for that platform")
     root = Path(__file__).resolve().parents[1]
     subprocess.run([sys.executable, str(root / "scripts/prepare_gpui.py")], cwd=root, check=True)
     metadata = json.loads(subprocess.check_output(
@@ -66,10 +71,13 @@ def main():
     host = next(line.removeprefix("host: ") for line in subprocess.check_output(
         ["rustc", "-vV"], text=True
     ).splitlines() if line.startswith("host: "))
+    build_target = args.target or host
+    if sys.platform != "darwin" and build_target != host:
+        raise SystemExit("Cross compilation is only supported on macOS")
     subprocess.run(["cargo", "build", "--locked", "--release", "--bin", package["name"],
-                    "--target", host], cwd=root, check=True)
+                    "--target", build_target], cwd=root, check=True)
     target = Path(metadata["target_directory"])
-    executable = target / host / "release" / (package["name"] + (".exe" if sys.platform == "win32" else ""))
+    executable = target / build_target / "release" / (package["name"] + (".exe" if sys.platform == "win32" else ""))
     destination = target / "bundle" / ("NetEase Music.app" if sys.platform == "darwin" else package["name"])
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=destination.parent) as temporary:
