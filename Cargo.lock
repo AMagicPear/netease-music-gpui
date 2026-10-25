@@ -4616,6 +4616,7 @@ dependencies = [
  "gpui-kit",
  "gpui-pre",
  "gpui-pre-reqwest-client",
+ "log",
  "ncm-api-rs",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
@@ -4633,6 +4634,7 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
+ "tracing-subscriber",
  "tray-icon",
  "windows-sys 0.61.2",
 ]

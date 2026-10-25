@@ -209,7 +209,7 @@ fn write_loop(directory: PathBuf, writer: Arc<Writer>) {
             slot.pending.take().unwrap()
         };
         if let Err(error) = write_playback(&directory, &state) {
-            eprintln!("保存播放缓存失败：{error}");
+            log::warn!("保存播放缓存失败：{error}");
         }
         let mut slot = writer.state.lock().unwrap();
         slot.writing = false;

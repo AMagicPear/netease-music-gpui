@@ -73,7 +73,7 @@ pub(in crate::ui) fn open_comment_window(
         cx.new(|cx| CommentWindow::new(comments, window, cx))
     }) {
         Ok((window, _)) => desktop::set_comment_window(Some(window), cx),
-        Err(error) => eprintln!("打开发布评论窗口失败：{error}"),
+        Err(error) => log::warn!("打开发布评论窗口失败：{error}"),
     }
 }
 
@@ -106,10 +106,13 @@ impl CommentWindow {
             },
         );
         // 发布成功：评论已经进了列表，这个窗口的任务完成，关掉。
-        let publish_subscription =
-            cx.subscribe_in(&comments, window, |_, _, _: &CommentPublished, window, cx| {
+        let publish_subscription = cx.subscribe_in(
+            &comments,
+            window,
+            |_, _, _: &CommentPublished, window, cx| {
                 close(window, cx);
-            });
+            },
+        );
         // 发布中 / 失败原因都在评论实体上，它变了窗口要跟着重绘。
         let comments_subscription = cx.observe(&comments, |_, _, cx| cx.notify());
         Self {
@@ -164,8 +167,8 @@ impl Render for CommentWindow {
         let colors = Theme::global(cx).tokens.colors;
         let draft = self.input.read(cx).value();
         let remaining = COMMENT_LIMIT.saturating_sub(self.input.read(cx).text().len_chars());
-        let publishing = self.comments.read(cx).publishing();
-        let error = self.comments.read(cx).publish_error().map(str::to_owned);
+        let publishing = self.comments.read(cx).publishing(cx);
+        let error = self.comments.read(cx).publish_error(cx);
         let can_publish = !publishing && !draft.trim().is_empty();
         let input = self.input.clone();
         let comments = self.comments.clone();
@@ -247,29 +250,25 @@ impl Render for CommentWindow {
                     )
                     // 底部：居中的红色胶囊发布按钮。
                     .child(
-                        div()
-                            .flex_none()
-                            .flex()
-                            .justify_center()
-                            .child(
-                                Button::new("comment-window-publish")
-                                    .h(PUBLISH_HEIGHT)
-                                    .px(px(34.))
-                                    .rounded_full()
-                                    .bg(if can_publish {
-                                        colors.primary
-                                    } else {
-                                        colors.primary.alpha(0.35)
-                                    })
-                                    .text_color(colors.primary_foreground)
-                                    .text_size(px(14.))
-                                    .disabled(!can_publish)
-                                    .on_click(move |_, _, cx| {
-                                        let content = input.read(cx).value().to_string();
-                                        comments.update(cx, |view, cx| view.publish(content, cx));
-                                    })
-                                    .child(if publishing { "发布中" } else { "发布" }),
-                            ),
+                        div().flex_none().flex().justify_center().child(
+                            Button::new("comment-window-publish")
+                                .h(PUBLISH_HEIGHT)
+                                .px(px(34.))
+                                .rounded_full()
+                                .bg(if can_publish {
+                                    colors.primary
+                                } else {
+                                    colors.primary.alpha(0.35)
+                                })
+                                .text_color(colors.primary_foreground)
+                                .text_size(px(14.))
+                                .disabled(!can_publish)
+                                .on_click(move |_, _, cx| {
+                                    let content = input.read(cx).value().to_string();
+                                    comments.update(cx, |view, cx| view.publish(content, cx));
+                                })
+                                .child(if publishing { "发布中" } else { "发布" }),
+                        ),
                     ),
             )
     }

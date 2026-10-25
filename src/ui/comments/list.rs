@@ -1,48 +1,27 @@
-//! 歌曲 / 歌单共用的变高虚拟评论列表：分页、重试与滚动位置由同一个实体管理。
-//!
-//! 评论行高随正文换行变化，`gpui::list` 在布局时实测行高、只构建视口附近的
-//! 条目（gpui-kit 的 `VirtualList` 需要预先给出每行精确高度，`component::list`
-//! 要求等高行，都不适合这种「正文任意换行」的列表）。
-//!
-//! 在播放页中嵌入第二屏，两层都要吃滚轮。规矩只有一条：
-//! **外层翻到评论区（整屏到位）之前，一个像素都不给评论列表**。判定由外层算好
-//! 传进来（[`ListMode`]），这里只认它，不反推。
-//!
-//! 条目布局：可选页面头部、「精选评论」小节（有热评才出现）、「最新评论」小节、评论、
-//! 脚标（加载 / 重试 / 空态 / 留白）。页面头部参与同一个滚动范围；脚标恒占一个条目，
-//! 状态切换不改变条目数。
+//! 变高虚拟评论列表；数据由 CommentsStore 管理，滚动和选区留在 View。
 
 use gpui::prelude::*;
 use gpui::*;
 use gpui_kit::base::{Button, ColorTokens, Scrollbar, ScrollbarMode, TextSelectionHandle, Theme};
-use std::{
-    collections::{HashMap, HashSet},
-    rc::Rc,
-};
+use std::{collections::HashMap, rc::Rc};
 
-use crate::api::MusicApi;
-use crate::models::{CommentResource, SongComment, SongComments};
+use crate::models::CommentResource;
+use crate::state::comments::{CommentPublished as Published, CommentsStore};
 use crate::ui::components::{empty_state, spinner};
 use crate::ui::cover_color::{Backdrop, dark_colors, dark_gradient};
-use crate::ui::events::CommentPublished;
+use crate::ui::events::{CommentCountChanged, CommentPublished};
 use crate::ui::theme::DOLPHIN_FAMILY;
 
 use super::comment_row;
 
-/// 底部留白：原来的 `pb(100.)`，现在由脚标条目的高度承担，
-/// 这样 `max_offset_for_scrollbar` 测出来的滚动范围和原来一致。
+/// 留白参与列表测量，确保滚动条范围包含底部间距。
 const FOOTER_SPACING: Pixels = px(100.);
 /// 「精选评论」小节最多展示的热评条数。
 const HOT_SECTION_MAX: usize = 5;
 
 type ListHeader = Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>;
 
-/// 一条评论的选中身份：`handle` 按评论 id 稳定持有（见 [`comment_row`] 的
-/// [`CommentSelection`]），`refresh` 订阅它的选区变化并强制窗口重绘。
-///
-/// 为什么需要订阅：`gpui::list` 的条目是有缓存视图的，鼠标拖动本身不会让它们
-/// 重绘，而 `SelectableText` 的高亮只在 paint 时投影。不主动刷新的话，拖选时
-/// 高亮要等下一次别的原因触发重绘才出现 —— 表现就是「选完了过一会儿才显示」。
+/// 按评论 ID 保留选区，并订阅变化以重绘虚拟列表的缓存条目。
 struct SelectionEntry {
     handle: TextSelectionHandle,
     refresh: Option<Subscription>,
@@ -71,32 +50,12 @@ pub struct CommentsView {
     /// 虚拟化列表状态：条目数由数据驱动（`splice`/`reset`），行高布局时实测。
     list: ListState,
     header: Option<ListHeader>,
-    resource: Option<CommentResource>,
-    generation: u64,
-    comments: Vec<SongComment>,
-    /// 评论 id → 选中身份。随评论一起生长，切资源时整体丢弃。
+    data: Entity<CommentsStore>,
+    revision: u64,
+    rows: usize,
     selection: HashMap<u64, SelectionEntry>,
-    /// 开头多少条热评进「精选评论」小节：实际入列的条数，最多
-    /// [`HOT_SECTION_MAX`]；为 0 时整节（含标题）不出现。
-    hot_rows: usize,
-    /// 接口给的热评总数，只用于小节标题上的数字（小节最多只显 5 行）。
-    hot_total: u64,
-    seen: HashSet<u64>,
-    total: u64,
-    offset: usize,
-    more: bool,
-    /// 加载中：已有请求在途。
-    loading: bool,
-    /// 排队中的刷新：当前页回来后接着刷第一页。
-    reload_pending: bool,
-    error: Option<String>,
-    request: Option<tokio::task::AbortHandle>,
-    /// 发布评论的进行中状态：一次只允许一条在途，连点不会重复发。
-    publishing: bool,
-    /// 发布失败的原因，直接显示在编辑框旁边。
-    publish_error: Option<String>,
-    /// 在途的发布请求：换资源或实体销毁时取消。
-    publish_request: Option<tokio::task::AbortHandle>,
+    _data_subscription: Subscription,
+    _publish_subscription: Subscription,
     /// 这一帧滚轮归谁、位置归谁，见 [`ListMode`]。
     mode: ListMode,
     /// 上一次轮到列表接管滚轮时它停在哪。不接管期间钉回这里，而不是无条件钉到顶
@@ -107,9 +66,48 @@ pub struct CommentsView {
 
 /// 发布成功只发一个信号：编辑框要不要清草稿、怎么清，是消费者的事。
 impl EventEmitter<CommentPublished> for CommentsView {}
+impl EventEmitter<CommentCountChanged> for CommentsView {}
 
 impl CommentsView {
-    pub(in crate::ui) fn new(backdrop: Option<Backdrop>) -> Self {
+    pub(in crate::ui) fn new(backdrop: Option<Backdrop>, cx: &mut Context<Self>) -> Self {
+        let data = cx.new(|_| CommentsStore::default());
+        let data_subscription = cx.observe(&data, |this, data, cx| {
+            let data = data.read(cx);
+            let len = data.comments().len();
+            if this.revision != data.revision {
+                this.revision = data.revision;
+                this.selection.clear();
+                this.list.reset(
+                    usize::from(this.header.is_some())
+                        + usize::from(data.hot_count() > 0)
+                        + len
+                        + 2,
+                );
+                this.parked_at = ListOffset::default();
+            } else if len > this.rows {
+                let footer = this.rows
+                    + usize::from(data.hot_count() > 0)
+                    + usize::from(this.header.is_some())
+                    + 1;
+                this.list.splice(footer..footer, len - this.rows);
+            }
+            let count = data
+                .data
+                .value()
+                .and(data.resource)
+                .map(|resource| CommentCountChanged {
+                    resource,
+                    total: data.total(),
+                });
+            if let Some(count) = count {
+                cx.emit(count);
+            }
+            this.rows = len;
+            this.layout_pending = true;
+            cx.notify();
+        });
+        let publish_subscription =
+            cx.subscribe(&data, |_, _, _: &Published, cx| cx.emit(CommentPublished));
         let mode = if backdrop.is_some() {
             ListMode::Parked
         } else {
@@ -122,108 +120,41 @@ impl CommentsView {
             list: ListState::new(2, ListAlignment::Top, px(300.))
                 .with_uniform_item_height(px(110.)),
             header: None,
-            resource: None,
-            generation: 0,
-            comments: Vec::new(),
+            data,
+            revision: 0,
+            rows: 0,
             selection: HashMap::new(),
-            hot_rows: 0,
-            hot_total: 0,
-            seen: HashSet::new(),
-            total: 0,
-            offset: 0,
-            more: false,
-            loading: false,
-            reload_pending: false,
-            error: None,
-            request: None,
-            publishing: false,
-            publish_error: None,
-            publish_request: None,
+            _data_subscription: data_subscription,
+            _publish_subscription: publish_subscription,
             mode,
             parked_at: ListOffset::default(),
             layout_pending: false,
         }
     }
 
-    /// 打开一个资源的评论。
-    ///
-    /// 资源变了就重新加载；没变（切回评论页签）也刷一次：用户每次切到评论页
-    /// 都该看到服务端最新的那份，而不是上次留在内存里的。
-    ///
-    /// `total` 是调用方手上已有的评论数，先用它渲染标题，别让标题空等到第一页回来。
     pub fn open_resource(
         &mut self,
         resource: CommentResource,
         total: Option<u64>,
         cx: &mut Context<Self>,
     ) {
-        if self.resource == Some(resource) {
-            self.set_estimated_total(total, cx);
-            self.reload(cx);
-            return;
-        }
-        self.set_resource(Some(resource), cx);
-        self.set_estimated_total(total, cx);
-    }
-
-    /// 丢掉当前这份评论内容：评论、去重集合、选中句柄、精选小节。
-    fn clear_comments(&mut self) {
-        self.comments.clear();
-        self.seen.clear();
-        self.selection.clear();
-        self.hot_rows = 0;
-        self.hot_total = 0;
+        self.data.update(cx, |data, cx| {
+            if data.resource == Some(resource) {
+                data.refresh(cx);
+            } else {
+                data.set_resource(Some(resource), cx);
+            }
+            data.estimate_total(total, cx);
+        });
     }
 
     pub fn set_resource(&mut self, resource: Option<CommentResource>, cx: &mut Context<Self>) {
-        if self.resource == resource {
-            return;
-        }
-        if let Some(request) = self.request.take() {
-            request.abort();
-        }
-        if let Some(request) = self.publish_request.take() {
-            request.abort();
-        }
-        self.resource = resource;
-        self.generation = self.generation.wrapping_add(1);
-        self.clear_comments();
-        self.total = 0;
-        self.offset = 0;
-        self.more = false;
-        self.loading = false;
-        self.reload_pending = false;
-        self.error = None;
-        self.publishing = false;
-        self.publish_error = None;
-        self.list.reset(2 + usize::from(self.header.is_some()));
-        self.parked_at = ListOffset::default();
-        self.layout_pending = true;
-        if resource.is_some() {
-            self.load(cx);
-        }
-        cx.notify();
+        self.data
+            .update(cx, |data, cx| data.set_resource(resource, cx));
     }
 
-    /// 调用方手上已经有的评论数：先用它渲染标题，接口返回后再覆盖成准确值。
-    pub fn set_estimated_total(&mut self, total: Option<u64>, cx: &mut Context<Self>) {
-        if self.apply_estimated_total(total) {
-            cx.notify();
-        }
-    }
-
-    /// 只在还不知道总数时用（0 表示未知）。已经有准确值时不能用旧快照盖回去：
-    /// 那会让标题上的数字在刷新回来之前先退回旧值。
-    ///
-    /// 返回总数有没有被改，用来决定要不要重绘。
-    fn apply_estimated_total(&mut self, total: Option<u64>) -> bool {
-        match total {
-            Some(total) if self.total == 0 => {
-                self.total = total;
-                true
-            }
-            _ => false,
-        }
+    pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.data.update(cx, |data, cx| data.refresh(cx));
     }
 
     /// 页面头部也是列表条目，和评论共用滚动范围及滚动条。
@@ -246,9 +177,11 @@ impl CommentsView {
 
     /// 条目下标 → 角色。只在「最新评论」标题那里把行下标让一位：它插在热评行
     /// 与其余行之间；没有精选时它直接占 0，不需要让。
-    fn item_at(&self, ix: usize) -> Item {
-        let featured = self.hot_rows > 0;
-        if ix == if featured { self.hot_rows + 1 } else { 0 } {
+    fn item_at(&self, ix: usize, cx: &App) -> Item {
+        let data = self.data.read(cx);
+        let hot_rows = data.hot_count().min(HOT_SECTION_MAX);
+        let featured = hot_rows > 0;
+        if ix == if featured { hot_rows + 1 } else { 0 } {
             return Item::LatestHeading;
         }
         if ix == 0 && featured {
@@ -258,12 +191,12 @@ impl CommentsView {
         let Some(row) = ix.checked_sub(1) else {
             return Item::Footer;
         };
-        let row = if featured && row >= self.hot_rows {
+        let row = if featured && row >= hot_rows {
             row - 1
         } else {
             row
         };
-        if row < self.comments.len() {
+        if row < data.comments().len() {
             Item::Comment(row)
         } else {
             Item::Footer
@@ -278,211 +211,39 @@ impl CommentsView {
         if self.mode == ListMode::Owned {
             self.parked_at = self.list.logical_scroll_top();
         }
+        if mode == ListMode::Owned {
+            self.refresh(cx);
+        }
         self.mode = mode;
         self.layout_pending = true;
         cx.notify();
         true
     }
 
-    fn load(&mut self, cx: &mut Context<Self>) {
-        self.load_page(self.offset, cx);
-    }
-
-    /// 拉一页评论。
-    ///
-    /// 请求始终串行——同一时刻只有一个在途，`reload_pending` 负责把刷新排到队尾。
-    fn load_page(&mut self, offset: usize, cx: &mut Context<Self>) {
-        if self.loading {
-            return;
-        }
-        let Some(resource) = self.resource else {
-            return;
-        };
-        let generation = self.generation;
-        self.loading = true;
-        self.error = None;
-        let api = MusicApi::global(cx);
-        let client = api.client.clone();
-        let request = api.runtime.spawn(async move {
-            match resource {
-                CommentResource::Song(id) => MusicApi::song_comments(client, id, offset).await,
-                CommentResource::Playlist(id) => {
-                    MusicApi::playlist_comments(client, id, offset).await
-                }
-            }
-        });
-        self.request = Some(request.abort_handle());
-        cx.spawn(async move |this, cx| {
-            let result = request.await.unwrap_or_else(|_| Err("评论加载失败".into()));
-            let _ = this.update(cx, |this, cx| {
-                if this.finish(resource, generation, offset, result) {
-                    cx.notify();
-                }
-                // 排队中的刷新：这一页回来了，接着刷第一页。
-                if this.reload_pending {
-                    this.reload_pending = false;
-                    this.reload(cx);
-                }
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    /// 重新拉第一页。
-    ///
-    /// 请求在途期间不清空列表：旧内容继续显示，新的到了才换上去。
-    /// 换的时候整份换成新的第一页，后面几页作废——用户滚到底会重新加载。
-    fn reload(&mut self, cx: &mut Context<Self>) {
-        if self.loading {
-            // 正在加载别的页：等它回来再刷。
-            self.reload_pending = true;
-            return;
-        }
-        self.load_page(0, cx);
-    }
-
-    fn finish(
-        &mut self,
-        resource: CommentResource,
-        generation: u64,
-        offset: usize,
-        result: Result<SongComments, String>,
-    ) -> bool {
-        // abort 不能撤回已送达主线程的结果，资源类型、id 与代次都必须匹配。
-        if self.resource != Some(resource) || self.generation != generation {
-            return false;
-        }
-        self.loading = false;
-        self.request = None;
-        match result {
-            Ok(page) => {
-                self.error = None;
-                self.total = page.total;
-                self.more = page.more;
-                if offset == 0 {
-                    // 第一页是最新的：整份换掉旧的第一页，旧的分页作废。
-                    self.clear_comments();
-                }
-                let before = self.comments.len();
-                for comment in page.comments {
-                    if self.seen.insert(comment.id) {
-                        self.comments.push(comment);
-                    }
-                }
-                let added = self.comments.len() - before;
-                // 热评只合并在第一页；行数以真正入列的为准（去重可能吃掉几条），
-                // 标题上的数字用总数——超出 5 条的热评只是不进精选小节，
-                // 它们留在列表里跟着进「最新评论」。
-                if offset == 0 {
-                    self.hot_rows = page.hot_count.min(HOT_SECTION_MAX).min(self.comments.len());
-                    self.hot_total = page.hot_count as u64;
-                    // 整份换掉了：条目重排，滚动位置从头开始。
-                    // 条目 = 页头 + （精选标题）+ 评论行 + 「最新评论」标题 + 脚标。
-                    let count = usize::from(self.header.is_some())
-                        + usize::from(self.hot_rows > 0)
-                        + self.comments.len()
-                        + 2;
-                    self.list.reset(count);
-                } else {
-                    if added == 0 {
-                        // 这一页全是重复的：没有更多了。
-                        self.more = false;
-                    }
-                    // 脚标恒在末尾，插在它之前，保留已有行的测量与滚动锚点。
-                    let footer = before + 1 + usize::from(self.header.is_some());
-                    self.list.splice(footer..footer, added);
-                }
-                self.offset = offset + 20;
-                self.layout_pending = true;
-            }
-            Err(error) => self.error = Some(error),
-        }
-        true
-    }
-
-    /// 发布一条评论。内容为空、没有资源或已有在途请求时直接返回。
-    ///
-    /// 评论数据归列表所有，所以发布也由它发起。成功后不往列表里塞一条本地
-    /// 拼的评论，而是重新拉第一页：新增的评论、总数都以服务端那份为准。
     pub fn publish(&mut self, content: String, cx: &mut Context<Self>) {
-        let Some(resource) = self.resource else {
-            // 没有评论对象就没有可发的地方，窗口里要能看见这句话。
-            self.publish_error = Some("没有可评论的内容".into());
-            cx.notify();
-            return;
-        };
-        let content = content.trim().to_string();
-        if content.is_empty() || self.publishing {
-            return;
-        }
-        self.publishing = true;
-        self.publish_error = None;
-        let generation = self.generation;
-        let api = MusicApi::global(cx);
-        let client = api.client.clone();
-        let cookie = api.cookie.clone();
-        let request = api.runtime.spawn(async move {
-            MusicApi::publish_comment(client, cookie, resource, &content).await
-        });
-        self.publish_request = Some(request.abort_handle());
-        cx.spawn(async move |this, cx| {
-            let result = request.await.unwrap_or_else(|_| Err("评论发布失败".into()));
-            let _ = this.update(cx, |this, cx| {
-                this.finish_publish(resource, generation, result, cx);
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
+        self.data.update(cx, |data, cx| data.publish(content, cx));
     }
 
-    /// 发布结果回来。资源类型、id 或代次变了就丢掉，别把旧评论插进新列表。
-    fn finish_publish(
-        &mut self,
-        resource: CommentResource,
-        generation: u64,
-        result: Result<(), String>,
-        cx: &mut Context<Self>,
-    ) {
-        if self.resource != Some(resource) || self.generation != generation {
-            return;
-        }
-        self.publishing = false;
-        self.publish_request = None;
-        match result {
-            Ok(()) => {
-                self.publish_error = None;
-                // 列表跟着服务端走：重新拉第一页，新评论和总数一起更新。
-                self.reload(cx);
-                // 编辑框据此清空草稿：谁在编辑由谁处理，这里只负责说「发出去了」。
-                cx.emit(CommentPublished);
-            }
-            Err(error) => self.publish_error = Some(error),
-        }
+    pub fn publishing(&self, cx: &App) -> bool {
+        self.data.read(cx).publish.is_loading()
     }
-
-    /// 发布进行中：编辑框据此禁用按钮。
-    pub fn publishing(&self) -> bool {
-        self.publishing
+    pub fn publish_error(&self, cx: &App) -> Option<String> {
+        self.data.read(cx).publish.error().map(str::to_owned)
     }
-
-    /// 上一次发布失败的原因；用户重新编辑后由编辑框清掉。
-    pub fn publish_error(&self) -> Option<&str> {
-        self.publish_error.as_deref()
-    }
-
-    /// 用户又开始改了，旧的失败提示不再相关。
     pub fn clear_publish_error(&mut self, cx: &mut Context<Self>) {
-        if self.publish_error.take().is_some() {
-            cx.notify();
-        }
+        self.data
+            .update(cx, |data, cx| data.clear_publish_error(cx));
     }
 
     /// 滚到接近底部就续拉下一页。外层的活（拍板何时接管、翻页补位）不在这里，
     /// 这里只管列表自己还差几页数据。
     fn load_near_bottom(&mut self, cx: &mut Context<Self>) {
-        if self.mode != ListMode::Owned || !self.more || self.loading || self.error.is_some() {
+        let data = self.data.read(cx);
+        if self.mode != ListMode::Owned
+            || !data.more()
+            || data.data.is_loading()
+            || data.load_failed()
+        {
             return;
         }
         // 行高要等 prepaint 实测，视口高度为 0 时两者都还没有意义。
@@ -492,7 +253,7 @@ impl CommentsView {
         let remaining =
             self.list.max_offset_for_scrollbar().y + self.list.scroll_px_offset_for_scrollbar().y;
         if remaining < px(120.) {
-            self.load(cx);
+            self.data.update(cx, |data, cx| data.load_more(cx));
         }
     }
 }
@@ -518,21 +279,30 @@ impl Render for CommentsView {
 
         // 每条评论一个稳定的选中身份。handle 必须跨帧复用：`SelectableText`
         // 把拖拽锚点、runs 的几何存在 handle 里，每帧新建等于每帧丢锚点。
-        for index in 0..self.comments.len() {
-            let id = self.comments[index].id;
-            if !self.selection.contains_key(&id) {
-                // 与 `comment_row::body` 渲染的文本保持一致：handle 存的是展开后的
-                // 文本，表情已变成 Unicode 字符，复制出来也是 emoji 而不是 `[大笑]`。
-                let text = crate::ui::emoji::expand(&self.comments[index].content).into_owned();
-                let handle = TextSelectionHandle::new(text, cx);
-                self.selection.insert(
-                    id,
-                    SelectionEntry {
-                        handle,
-                        refresh: None,
-                    },
-                );
-            }
+        let missing: Vec<_> = self
+            .data
+            .read(cx)
+            .comments()
+            .iter()
+            .filter(|comment| !self.selection.contains_key(&comment.id))
+            .map(|comment| {
+                (
+                    comment.id,
+                    crate::ui::emoji::expand(&comment.content).into_owned(),
+                )
+            })
+            .collect();
+        for (id, text) in missing {
+            // 与 `comment_row::body` 渲染的文本保持一致：handle 存的是展开后的
+            // 文本，表情已变成 Unicode 字符，复制出来也是 emoji 而不是 `[大笑]`。
+            let handle = TextSelectionHandle::new(text, cx);
+            self.selection.insert(
+                id,
+                SelectionEntry {
+                    handle,
+                    refresh: None,
+                },
+            );
         }
         // 只订阅一次：选区每变一次就让窗口重绘一帧，高亮跟着指针走。
         for entry in self.selection.values_mut() {
@@ -552,18 +322,19 @@ impl Render for CommentsView {
             }
             let ix = ix - usize::from(header.is_some());
             let view = entity.read(cx);
+            let data = view.data.read(cx);
             // 行组件颜色全部走 tokens：深色封面上的取值由 colors_for 统一改写。
             let colors = colors_for(view.backdrop.as_ref(), cx);
-            let item = match view.item_at(ix) {
-                Item::LatestHeading => heading(view.total, colors, view.hot_rows > 0),
-                Item::FeaturedHeading => featured_heading(view.hot_total, colors),
+            let item = match view.item_at(ix, cx) {
+                Item::LatestHeading => heading(data.total(), colors, data.hot_count() > 0),
+                Item::FeaturedHeading => featured_heading(data.hot_count() as u64, colors),
                 Item::Comment(row) => {
-                    let comment = &view.comments[row];
+                    let comment = &data.comments()[row];
                     // 顺序用评论在列表里的下标：热评在前、其余在后，与视觉顺序一致。
                     let selection = (view.selection[&comment.id].handle.clone(), row as u64);
                     comment_row(comment, colors, selection).into_any_element()
                 }
-                Item::Footer => footer(&entity, view, colors),
+                Item::Footer => footer(&entity, data, colors),
             };
             // 列表视口撑满整个区域（滚动条贴边），左右留白由每个条目自带。
             // w_full：条目以独立布局根测量，flex 根的 auto 宽会收缩，必须显式拉满。
@@ -682,8 +453,8 @@ fn section(text: &'static str, count: Option<u64>, colors: ColorTokens) -> Div {
 }
 
 /// 脚标条目：加载指示、重试按钮、空态；无事可示时退化为底部留白。
-fn footer(entity: &Entity<CommentsView>, view: &CommentsView, colors: ColorTokens) -> AnyElement {
-    if view.loading {
+fn footer(entity: &Entity<CommentsView>, data: &CommentsStore, colors: ColorTokens) -> AnyElement {
+    if data.data.is_loading() && data.data.value().is_none() {
         div()
             .w_full()
             .pt(px(20.))
@@ -696,15 +467,17 @@ fn footer(entity: &Entity<CommentsView>, view: &CommentsView, colors: ColorToken
             ))
             .h(FOOTER_SPACING)
             .into_any_element()
-    } else if view.error.is_some() {
+    } else if data.load_failed() {
         let entity = entity.clone();
         Button::new("retry-song-comments")
             .child("评论加载失败，重试")
             .on_click(move |_, _, cx| {
-                entity.update(cx, |view, cx| view.load(cx));
+                entity.update(cx, |view, cx| {
+                    view.data.update(cx, |data, cx| data.retry(cx));
+                });
             })
             .into_any_element()
-    } else if view.comments.is_empty() {
+    } else if data.comments().is_empty() {
         empty_state("images/empty/cm_empty_wupinglun.png", "还没有评论", colors).into_any_element()
     } else {
         div()
@@ -714,292 +487,7 @@ fn footer(entity: &Entity<CommentsView>, view: &CommentsView, colors: ColorToken
             .text_color(colors.muted_foreground)
             .flex()
             .justify_center()
-            .when(!view.more, |footer| footer.child("没有更多评论了"))
+            .when(!data.more(), |footer| footer.child("没有更多评论了"))
             .into_any_element()
-    }
-}
-
-impl Drop for CommentsView {
-    fn drop(&mut self) {
-        if let Some(request) = self.request.take() {
-            request.abort();
-        }
-        if let Some(request) = self.publish_request.take() {
-            request.abort();
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{CommentResource, CommentsView, Item, SongComment, SongComments};
-    use gpui::{IntoElement, div};
-    use std::rc::Rc;
-
-    fn page(ids: &[u64]) -> Result<SongComments, String> {
-        Ok(SongComments {
-            total: 100,
-            hot_count: 0,
-            more: true,
-            comments: ids
-                .iter()
-                .map(|&id| SongComment {
-                    id,
-                    nickname: String::new(),
-                    avatar_url: String::new(),
-                    content: String::new(),
-                    time: 0,
-                    liked_count: 0,
-                })
-                .collect(),
-        })
-    }
-
-    #[test]
-    fn hot_comments_get_their_own_section_header() {
-        let resource = CommentResource::Song(1);
-        let mut view = CommentsView::new(None);
-        view.resource = Some(resource);
-        let mut first = page(&[1, 2, 3]).unwrap();
-        first.hot_count = 2;
-        assert!(view.finish(resource, 0, 0, Ok(first)));
-        assert_eq!(view.hot_rows, 2);
-        // 精选标题 + 2 行热评 + 最新标题 + 1 行 + 脚标。
-        assert_eq!(view.list.item_count(), 6);
-        // 翻页不再带小节；重复的热评（id 2）被去重，只进一行新的。
-        assert!(view.finish(resource, 0, 20, page(&[2, 4])));
-        assert_eq!(view.list.item_count(), 7);
-        assert_eq!(
-            view.comments
-                .iter()
-                .map(|comment| comment.id)
-                .collect::<Vec<_>>(),
-            [1, 2, 3, 4]
-        );
-    }
-
-    #[test]
-    fn hot_section_keeps_at_most_five_rows() {
-        let resource = CommentResource::Song(1);
-        let mut view = CommentsView::new(None);
-        view.resource = Some(resource);
-        let mut first = page(&[1, 2, 3, 4, 5, 6, 7]).unwrap();
-        first.hot_count = 7;
-        assert!(view.finish(resource, 0, 0, Ok(first)));
-        // 小节里只列 5 行，标题上的数字是总数。
-        assert_eq!(view.hot_rows, 5);
-        assert_eq!(view.hot_total, 7);
-        // 精选标题 + 5 行热评 + 最新标题 + 剩下 2 行 + 脚标。
-        assert_eq!(view.list.item_count(), 10);
-    }
-
-    fn items(view: &CommentsView, len: usize) -> Vec<Item> {
-        (0..len).map(|ix| view.item_at(ix)).collect()
-    }
-
-    #[test]
-    fn a_refreshed_first_page_replaces_the_whole_list() {
-        let resource = CommentResource::Song(1);
-        let mut view = CommentsView::new(None);
-        view.resource = Some(resource);
-        assert!(view.finish(resource, 0, 0, page(&[1, 2])));
-        // 最新评论标题 + 2 行 + 脚标。
-        assert_eq!(view.list.item_count(), 4);
-        // 刷新第一页：服务端多了一条评论，整份换成新的。
-        assert!(view.finish(resource, 0, 0, page(&[99, 1, 2])));
-        assert_eq!(view.list.item_count(), 5);
-        assert_eq!(view.comments[0].id, 99);
-        assert_eq!(
-            items(&view, 5),
-            [
-                Item::LatestHeading,
-                Item::Comment(0),
-                Item::Comment(1),
-                Item::Comment(2),
-                Item::Footer,
-            ]
-        );
-    }
-
-    #[test]
-    fn a_refreshed_first_page_keeps_the_featured_section_above_the_new_comments() {
-        let resource = CommentResource::Song(1);
-        let mut view = CommentsView::new(None);
-        view.resource = Some(resource);
-        let mut first = page(&[1, 2, 3]).unwrap();
-        first.hot_count = 2;
-        assert!(view.finish(resource, 0, 0, Ok(first)));
-        // 精选标题 + 2 行热评 + 最新标题 + 1 行 + 脚标。
-        assert_eq!(view.list.item_count(), 6);
-        // 服务端的第一页：两条精选 + 新评论 + 原来那条。
-        let mut refreshed = page(&[1, 2, 99, 3]).unwrap();
-        refreshed.hot_count = 2;
-        assert!(view.finish(resource, 0, 0, Ok(refreshed)));
-        assert_eq!(view.list.item_count(), 7);
-        assert_eq!(
-            items(&view, 7),
-            [
-                Item::FeaturedHeading,
-                Item::Comment(0),
-                Item::Comment(1),
-                Item::LatestHeading,
-                Item::Comment(2),
-                Item::Comment(3),
-                Item::Footer,
-            ]
-        );
-        // 新评论在热评之后：id 99 排在第三条，前两条仍是精选。
-        assert_eq!(
-            view.comments.iter().map(|item| item.id).collect::<Vec<_>>(),
-            [1, 2, 99, 3]
-        );
-        assert_eq!(view.hot_rows, 2);
-        assert_eq!(view.hot_total, 2);
-    }
-
-    #[test]
-    fn a_stale_estimate_never_overwrites_an_accurate_total() {
-        let mut view = CommentsView::new(None);
-        // 还没有总数：调用方手上的数先用上，标题不用空等。
-        assert!(view.apply_estimated_total(Some(100)));
-        assert_eq!(view.total, 100);
-        // 已经有准确值：旧快照盖不回去，否则刷新回来之前标题会先退回旧数。
-        assert!(!view.apply_estimated_total(Some(99)));
-        assert_eq!(view.total, 100);
-        // 没有快照可用时也不动。
-        assert!(!view.apply_estimated_total(None));
-        assert_eq!(view.total, 100);
-    }
-
-    #[test]
-    fn a_refreshed_first_page_drops_the_older_pages() {
-        let resource = CommentResource::Playlist(1);
-        let mut view = CommentsView::new(None);
-        view.resource = Some(resource);
-        assert!(view.finish(resource, 0, 0, page(&[1, 2])));
-        // 已经翻到第二页。
-        assert!(view.finish(resource, 0, 20, page(&[3, 4])));
-        assert_eq!(view.comments.len(), 4);
-        // 刷新第一页：整份换成新的，旧的分页作废（滚到底会重新加载）。
-        assert!(view.finish(resource, 0, 0, page(&[9, 1, 2])));
-        assert_eq!(
-            view.comments.iter().map(|item| item.id).collect::<Vec<_>>(),
-            [9, 1, 2]
-        );
-        // 总数跟服务端走。
-        assert_eq!(view.total, 100);
-        // 翻页进度也回到第一页之后。
-        assert_eq!(view.offset, 20);
-        // 已经在列表里的评论不会重复插一遍。
-        assert!(view.finish(resource, 0, 0, page(&[9, 1, 2])));
-        assert_eq!(view.comments.len(), 3);
-        assert_eq!(view.list.item_count(), 5);
-    }
-
-    #[test]
-    fn a_refreshed_first_page_respects_the_page_header() {
-        let resource = CommentResource::Playlist(1);
-        let mut view = CommentsView::new(None);
-        view.resource = Some(resource);
-        view.header = Some(Rc::new(|_, _| div().into_any_element()));
-        view.list.reset(3);
-        assert!(view.finish(resource, 0, 0, page(&[1])));
-        // 条目 = 页头 + 评论 + 「最新评论」标题 + 脚标。
-        assert_eq!(view.list.item_count(), 4);
-        assert!(view.finish(resource, 0, 0, page(&[2, 1])));
-        assert_eq!(view.list.item_count(), 5);
-        assert_eq!(view.comments.len(), 2);
-    }
-
-    #[test]
-    fn items_are_two_sections_then_footer() {
-        let resource = CommentResource::Song(1);
-        let mut view = CommentsView::new(None);
-        view.resource = Some(resource);
-        let mut first = page(&[1, 2, 3, 4, 5]).unwrap();
-        first.hot_count = 2;
-        assert!(view.finish(resource, 0, 0, Ok(first)));
-        // 精选标题 → 2 行热评 → 最新标题 → 其余 3 行 → 脚标。
-        assert_eq!(
-            items(&view, 8),
-            [
-                Item::FeaturedHeading,
-                Item::Comment(0),
-                Item::Comment(1),
-                Item::LatestHeading,
-                Item::Comment(2),
-                Item::Comment(3),
-                Item::Comment(4),
-                Item::Footer,
-            ]
-        );
-    }
-
-    #[test]
-    fn no_hot_comments_means_a_single_latest_section() {
-        let resource = CommentResource::Playlist(1);
-        let mut view = CommentsView::new(None);
-        view.resource = Some(resource);
-        assert!(view.finish(resource, 0, 0, page(&[1, 2, 3])));
-        assert_eq!(
-            items(&view, 5),
-            [
-                Item::LatestHeading,
-                Item::Comment(0),
-                Item::Comment(1),
-                Item::Comment(2),
-                Item::Footer,
-            ]
-        );
-    }
-
-    #[test]
-    fn paging_deduplicates_and_retry_preserves_existing_comments() {
-        let resource = CommentResource::Playlist(1);
-        let mut view = CommentsView::new(None);
-        view.resource = Some(resource);
-        assert!(view.finish(resource, 0, 0, page(&[1, 2, 2])));
-        assert_eq!(view.list.item_count(), 4);
-        assert!(view.finish(resource, 0, 20, Err("断网".into())));
-        assert_eq!(view.offset, 20);
-        assert_eq!(view.comments.len(), 2);
-        assert!(view.finish(resource, 0, 20, page(&[2, 3])));
-        assert!(view.error.is_none());
-        assert_eq!(view.offset, 40);
-        assert_eq!(view.list.item_count(), 5);
-        assert!(view.finish(resource, 0, 40, page(&[3])));
-        assert!(!view.more);
-    }
-
-    #[test]
-    fn old_resource_and_generation_cannot_finish_current_request() {
-        let mut view = CommentsView::new(None);
-        view.resource = Some(CommentResource::Playlist(1));
-        view.generation = 2;
-        view.loading = true;
-        assert!(!view.finish(CommentResource::Song(1), 2, 0, page(&[1])));
-        assert!(!view.finish(CommentResource::Playlist(1), 1, 0, page(&[1])));
-        assert!(view.loading);
-        assert!(view.comments.is_empty());
-    }
-
-    #[test]
-    fn paging_keeps_the_page_header_and_footer_in_the_list() {
-        let resource = CommentResource::Playlist(1);
-        let mut view = CommentsView::new(None);
-        view.resource = Some(resource);
-        view.header = Some(Rc::new(|_, _| div().into_any_element()));
-        view.list.reset(3);
-        assert!(view.finish(resource, 0, 0, page(&[1, 2])));
-        assert_eq!(view.list.item_count(), 5);
-        assert!(view.finish(resource, 0, 20, page(&[2, 3])));
-        assert_eq!(view.list.item_count(), 6);
-        assert_eq!(
-            view.comments
-                .iter()
-                .map(|comment| comment.id)
-                .collect::<Vec<_>>(),
-            [1, 2, 3]
-        );
     }
 }

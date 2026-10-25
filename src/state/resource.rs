@@ -1,28 +1,15 @@
-//! 一份远端数据的统一形态。
-//!
-//! 显示层只管读数据，不关心它存不存在、在不在加载中；数据层的规则只有两条：
-//! 「拉取，然后更新数据」。请求发出时旧数据留着（先显示旧的，新的到了再换），
-//! 只有成功才替换值——失败时旧内容还在，只是多了一条错误。
-//!
-//! 各 store 各手搓过一遍「代次 + 在途句柄 + apply/finish」，形状高度一致，
-//! 这里收成一处。
+//! 远端快照与请求生命周期。刷新保留旧值，换 key 时由 store 调用 reset。
 
+use crate::api::MusicApi;
+use gpui::{Context, ReadGlobal};
+use std::{future::Future, time::Instant};
 use tokio::task::AbortHandle;
 
-/// 一份远端数据。
-///
-/// - `value` 有值就显示它，哪怕正在刷新；
-/// - `value` 没有时看 `loading` / `error`；
-/// - 每次加载递增代次，迟到的旧结果被丢掉——abort 撤不走在途的结果，
-///   已经排进主线程的结果只能靠代次认出来。
 pub struct Resource<T> {
-    /// 最近一次拿到的数据。`None` = 还没拿到过。
     value: Option<T>,
     loading: bool,
     error: Option<String>,
-    /// 请求代次：一次加载一个，迟到的结果靠它认出来。
     generation: u64,
-    /// 在途请求的句柄：换资源或销毁时取消。
     request: Option<AbortHandle>,
 }
 
@@ -37,46 +24,49 @@ impl<T> Resource<T> {
         }
     }
 
-    /// 带初值建一份资源：占位内容先摆上，数据到了再替换。
     pub fn with_value(value: T) -> Self {
-        Self {
-            value: Some(value),
-            ..Self::new()
-        }
+        let mut resource = Self::new();
+        resource.value = Some(value);
+        resource
     }
 
-    /// 开始一次加载。旧数据留着：先显示旧的，新的到了再换。
-    ///
-    /// 返回这次加载的代次，结果回来时用它核对。
+    /// 替换在途请求；同 key 的重复进入应先用 is_loading 合并。
     pub fn begin(&mut self) -> u64 {
+        self.cancel();
         self.loading = true;
         self.error = None;
-        self.generation = self.generation.wrapping_add(1);
         self.generation
     }
 
-    /// 记下在途请求：下一次 `begin`（换资源、重新加载）或 `abort` 会取消它。
     pub fn track(&mut self, request: AbortHandle) {
-        self.request = Some(request);
+        if let Some(old) = self.request.replace(request) {
+            old.abort();
+        }
     }
 
-    /// 结果是不是这次加载的。过期的一律丢掉。
     pub fn is_current(&self, generation: u64) -> bool {
-        self.generation == generation
+        self.generation == generation && self.loading
     }
 
-    /// 落地结果。成功替换值，失败只记错误（旧值留着）。
-    ///
-    /// 返回结果有没有被采纳——过期结果返回 false，调用方据此决定要不要重绘。
     pub fn apply(&mut self, generation: u64, result: Result<T, String>) -> bool {
+        self.update(generation, result, |value, next| *value = Some(next))
+    }
+
+    /// 分页等增量更新也使用同一套过期校验与错误状态。
+    pub fn update<U>(
+        &mut self,
+        generation: u64,
+        result: Result<U, String>,
+        merge: impl FnOnce(&mut Option<T>, U),
+    ) -> bool {
         if !self.is_current(generation) {
             return false;
         }
         self.request = None;
         self.loading = false;
         match result {
-            Ok(value) => {
-                self.value = Some(value);
+            Ok(next) => {
+                merge(&mut self.value, next);
                 self.error = None;
             }
             Err(error) => self.error = Some(error),
@@ -84,65 +74,71 @@ impl<T> Resource<T> {
         true
     }
 
-    /// 直接给一份数据，不走请求：游客这种「确定没有」的场合用。
-    ///
-    /// 代次照样递增，在途的结果回来时认不出来，不会覆盖它。
     pub fn set(&mut self, value: T) {
-        self.generation = self.generation.wrapping_add(1);
+        self.cancel();
         self.value = Some(value);
         self.error = None;
-        self.loading = false;
     }
 
-    /// 换资源：旧值和错误都丢掉。在途结果也一并作废。
     pub fn reset(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
+        self.cancel();
         self.value = None;
         self.error = None;
-        self.loading = false;
-        self.abort();
     }
 
-    /// 取消在途请求。已经送达主线程的结果撤不走，靠代次挡住。
-    pub fn abort(&mut self) {
+    /// 取消也使已排入主线程的回调失效。
+    pub fn cancel(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.loading = false;
         if let Some(request) = self.request.take() {
             request.abort();
         }
     }
 
-    /// 显示状态。
     pub fn state(&self) -> DataState<'_, T> {
         match &self.value {
             Some(value) => DataState::Ready(value),
             None => match &self.error {
-                Some(error) => DataState::Failed(error),
-                None => DataState::Loading,
+                Some(_) => DataState::Failed,
+                None if self.loading => DataState::Loading,
+                None => DataState::Idle,
             },
         }
     }
 
-    /// 拿数据。没拿到过就是 `None`。
     pub fn value(&self) -> Option<&T> {
         self.value.as_ref()
     }
-
-    /// 可变地拿数据（「一键已读」这类纯本地修改用）。
     pub fn value_mut(&mut self) -> Option<&mut T> {
         self.value.as_mut()
     }
-
-    /// 正在拉（包括「刷新中」：旧值还在，但新的在路上）。
     pub fn is_loading(&self) -> bool {
         self.loading
     }
-
-    /// 手上有旧数据、同时正在刷新。显示层可以用它画一个「刷新中」的角标。
-    pub fn is_refreshing(&self) -> bool {
-        self.loading && self.value.is_some()
-    }
-
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
+    }
+
+    /// 普通快照请求的统一入口；分页和分阶段请求共用下面的 request 桥接。
+    pub fn fetch<V: 'static>(
+        &mut self,
+        name: &'static str,
+        cx: &mut Context<V>,
+        select: fn(&mut V) -> &mut Self,
+        future: impl Future<Output = Result<T, String>> + Send + 'static,
+    ) where
+        T: Send + 'static,
+    {
+        if self.is_loading() {
+            return;
+        }
+        let generation = self.begin();
+        self.track(request(cx, name, future, move |view, result, cx| {
+            if select(view).apply(generation, result) {
+                cx.notify();
+            }
+        }));
+        cx.notify();
     }
 }
 
@@ -152,14 +148,60 @@ impl<T> Default for Resource<T> {
     }
 }
 
-/// 一份数据的显示状态。
+impl<T> Drop for Resource<T> {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+/// 无数据时才显示加载或重试；后台刷新失败不覆盖已有内容。
 pub enum DataState<'a, T> {
-    /// 正在拉，还没有拿到过。
+    Idle,
     Loading,
-    /// 拉失败了。
-    Failed(&'a str),
-    /// 拿到了。内容空不空由数据自己说。
+    Failed,
     Ready(&'a T),
+}
+
+/// Tokio 网络任务 → GPUI 主线程。日志不记录 cookie、正文或响应体。
+pub fn request<V: 'static, T: Send + 'static>(
+    cx: &mut Context<V>,
+    name: &'static str,
+    future: impl Future<Output = Result<T, String>> + Send + 'static,
+    apply: impl FnOnce(&mut V, Result<T, String>, &mut Context<V>) + 'static,
+) -> AbortHandle {
+    let started = Instant::now();
+    log::debug!("{name}: started");
+    let session = MusicApi::global(cx).session_generation;
+    let task = MusicApi::global(cx).runtime.spawn(future);
+    let abort = task.abort_handle();
+    cx.spawn(async move |this, cx| {
+        let result = match task.await {
+            Ok(result) => result,
+            Err(error) if error.is_cancelled() => {
+                log::debug!("{name}: cancelled");
+                return;
+            }
+            Err(error) => {
+                log::error!("{name}: task failed: {error}");
+                Err("请求任务失败，请重试".into())
+            }
+        };
+        match &result {
+            Ok(_) => log::debug!("{name}: completed in {}ms", started.elapsed().as_millis()),
+            Err(error) => log::warn!("{name}: {error} ({}ms)", started.elapsed().as_millis()),
+        }
+        let _ = this.update(cx, |view, cx| {
+            let result = if MusicApi::global(cx).session_generation == session {
+                result
+            } else {
+                log::debug!("{name}: result invalidated by session change");
+                Err("登录状态已改变，请重试".into())
+            };
+            apply(view, result, cx);
+        });
+    })
+    .detach();
+    abort
 }
 
 #[cfg(test)]
@@ -173,7 +215,7 @@ mod tests {
     #[test]
     fn a_loading_resource_has_no_value_yet() {
         let mut res = resource();
-        assert!(matches!(res.state(), DataState::Loading));
+        assert!(matches!(res.state(), DataState::Idle));
         res.begin();
         assert!(res.is_loading());
         assert!(res.value().is_none());
@@ -187,7 +229,7 @@ mod tests {
         // 刷新：旧值不清空，新值到了才换。
         res.begin();
         assert!(res.value().is_some());
-        assert!(res.is_refreshing());
+        assert!(res.is_loading());
         assert!(matches!(res.state(), DataState::Ready(_)));
         assert_eq!(res.value().unwrap(), &[1, 2]);
         let generation = res.generation;
@@ -240,5 +282,44 @@ mod tests {
         // 在途的结果认不出来，不会覆盖它。
         assert!(!res.apply(generation, Ok(vec![1])));
         assert_eq!(res.value().unwrap().len(), 0);
+    }
+    #[tokio::test]
+    async fn replacing_setting_resetting_and_dropping_abort_real_tasks() {
+        let mut res = resource();
+        let task = tokio::spawn(std::future::pending::<()>());
+        let stale = res.begin();
+        res.track(task.abort_handle());
+        res.begin();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(!res.apply(stale, Ok(vec![9])));
+
+        let task = tokio::spawn(std::future::pending::<()>());
+        res.track(task.abort_handle());
+        res.set(vec![1]);
+        assert!(task.await.unwrap_err().is_cancelled());
+
+        let task = tokio::spawn(std::future::pending::<()>());
+        res.begin();
+        res.track(task.abort_handle());
+        res.reset();
+        assert!(task.await.unwrap_err().is_cancelled());
+
+        let task = tokio::spawn(std::future::pending::<()>());
+        res.begin();
+        res.track(task.abort_handle());
+        drop(res);
+        assert!(task.await.unwrap_err().is_cancelled());
+    }
+
+    #[test]
+    fn empty_success_and_initial_failure_are_different_states() {
+        let mut res = resource();
+        let generation = res.begin();
+        res.apply(generation, Err("offline".into()));
+        assert!(matches!(res.state(), DataState::Failed));
+        let generation = res.begin();
+        res.apply(generation, Ok(vec![]));
+        assert!(matches!(res.state(), DataState::Ready(value) if value.is_empty()));
+        assert!(!res.apply(generation, Err("duplicate completion".into())));
     }
 }

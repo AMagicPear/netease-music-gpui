@@ -4,9 +4,9 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_kit::base::{Button, Theme, Transition, transition};
 
-use crate::api::MusicApi;
 use crate::models::LyricLine;
 use crate::playback::{PlaybackController, PlaybackEvent};
+use crate::state::lyrics::LyricsStore;
 use crate::ui::cover_color::{Backdrop, CoverGradient, dark_colors, dark_gradient};
 
 const LYRIC_FADE_HEIGHT: f32 = 96.;
@@ -86,13 +86,11 @@ pub(super) struct LyricsView {
     backdrop: Backdrop,
     song_id: Option<u64>,
     generation: u64,
-    lyrics: Vec<LyricLine>,
+    store: Entity<LyricsStore>,
+    _data_subscription: Subscription,
     visible: Vec<usize>,
     active_line: Option<usize>,
     active: bool,
-    loading: bool,
-    error: Option<String>,
-    request: Option<tokio::task::AbortHandle>,
     scroll: ScrollHandle,
     tween: ScrollTween,
     follow: LyricFollow,
@@ -117,7 +115,7 @@ impl LyricsView {
             ) {
                 return;
             }
-            let active = this.line_at(playback.read(cx).snapshot().position);
+            let active = this.line_at(playback.read(cx).snapshot().position, cx);
             if this.active_line != active {
                 this.active_line = active;
                 if this.active {
@@ -125,19 +123,24 @@ impl LyricsView {
                 }
             }
         });
+        let store = cx.new(|_| LyricsStore::default());
+        let data_subscription = cx.observe(&store, |this, store, cx| {
+            this.visible = visible_lyrics(store.read(cx).lyrics());
+            this.active_line = this.line_at(this.playback.read(cx).snapshot().position, cx);
+            this.layout_pending = true;
+            cx.notify();
+        });
         Self {
             playback,
             _playback_subscription: subscription,
             backdrop,
             song_id: None,
             generation: 0,
-            lyrics: Vec::new(),
+            store,
+            _data_subscription: data_subscription,
             visible: Vec::new(),
             active_line: None,
             active: false,
-            loading: false,
-            error: None,
-            request: None,
             scroll: ScrollHandle::default(),
             tween: ScrollTween::default(),
             follow: LyricFollow::Auto,
@@ -152,24 +155,16 @@ impl LyricsView {
         if self.song_id == id {
             return;
         }
-        if let Some(request) = self.request.take() {
-            request.abort();
-        }
         self.song_id = id;
         self.generation = self.generation.wrapping_add(1);
         self.manual_task = None;
         self.follow = LyricFollow::Auto;
         self.tween = ScrollTween::default();
         self.scroll.set_offset(point(px(0.), px(0.)));
-        self.lyrics.clear();
+        self.store.update(cx, |store, cx| store.set_song(id, cx));
         self.visible.clear();
         self.active_line = None;
-        self.loading = false;
-        self.error = None;
         self.layout_pending = true;
-        if id.is_some() {
-            self.load(cx);
-        }
         cx.notify();
     }
 
@@ -178,6 +173,9 @@ impl LyricsView {
             return;
         }
         self.active = active;
+        if active {
+            self.load(cx);
+        }
         self.manual_task = None;
         self.follow = LyricFollow::Auto;
         self.tween
@@ -197,48 +195,16 @@ impl LyricsView {
         }
     }
 
-    fn line_at(&self, position: Duration) -> Option<usize> {
-        self.lyrics
+    fn line_at(&self, position: Duration, cx: &App) -> Option<usize> {
+        self.store
+            .read(cx)
+            .lyrics()
             .partition_point(|line| line.time <= position)
             .checked_sub(1)
     }
 
     fn load(&mut self, cx: &mut Context<Self>) {
-        if self.loading {
-            return;
-        }
-        let Some(id) = self.song_id else { return };
-        self.loading = true;
-        self.error = None;
-        let generation = self.generation;
-        let api = MusicApi::global(cx);
-        let request = api
-            .runtime
-            .spawn(MusicApi::song_lyrics(api.client.clone(), id));
-        self.request = Some(request.abort_handle());
-        cx.spawn(async move |this, cx| {
-            let result = request.await.unwrap_or_else(|_| Err("歌词加载失败".into()));
-            let _ = this.update(cx, |this, cx| {
-                // abort 与完成可能相撞；代次检查拒绝已经排入主线程的旧结果。
-                if this.song_id != Some(id) || this.generation != generation {
-                    return;
-                }
-                this.loading = false;
-                this.request = None;
-                match result {
-                    Ok(lyrics) => {
-                        this.visible = visible_lyrics(&lyrics);
-                        this.lyrics = lyrics;
-                        this.active_line = this.line_at(this.playback.read(cx).snapshot().position);
-                        this.layout_pending = true;
-                    }
-                    Err(error) => this.error = Some(error),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
+        self.store.update(cx, |store, cx| store.refresh(cx));
     }
 
     fn manual_scroll(&mut self, cx: &mut Context<Self>) {
@@ -306,14 +272,14 @@ impl Render for LyricsView {
                 .size_full()
                 .pt(px(80.))
                 .text_color(colors.muted_foreground)
-                .child(if self.loading {
+                .child(if self.store.read(cx).data.is_loading() {
                     "歌词加载中"
-                } else if self.error.is_some() {
+                } else if self.store.read(cx).data.error().is_some() {
                     "歌词加载失败"
                 } else {
                     "暂无歌词"
                 })
-                .when(self.error.is_some(), |content| {
+                .when(self.store.read(cx).data.error().is_some(), |content| {
                     content.child(
                         Button::new("retry-song-lyrics")
                             .ml_2()
@@ -355,7 +321,7 @@ impl Render for LyricsView {
                     .pb(px(160.))
                     // children 在构建时立即收集，可直接在迭代器内采样 transition。
                     .children(self.visible.iter().enumerate().map(|(row, &index)| {
-                        let line = &self.lyrics[index];
+                        let line = self.store.read(cx).lyrics()[index].clone();
                         let time = line.time;
                         let weight = transition(
                             ElementId::Name(

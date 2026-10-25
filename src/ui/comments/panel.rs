@@ -1,9 +1,4 @@
-//! 评论页的组合件：虚拟列表 + 吸顶编辑框 + 输入限长。
-//!
-//! 歌曲评论页与歌单评论页都只有「列表 + 编辑框」这一件事，差别是列表首个条目
-//! （各自的页头）。宿主页面把页头渲染出来交给这里，剩下的 wiring —— 列表实体的
-//! 创建、输入框的限长订阅、翻页时要重新定位吸顶框的通知、整棵树怎么叠 —— 两个页面
-//! 完全一致，收在一处不必各写一遍。
+//! 评论列表、吸顶编辑框与草稿的页面组合。
 
 use gpui::prelude::{ParentElement, Styled};
 use gpui::{
@@ -38,7 +33,7 @@ impl CommentsPanel {
         V: 'static,
     {
         // 独立评论页统一使用主题颜色和 40px 留白；渐变只供吸顶编辑框补画背景。
-        let list = cx.new(|_| CommentsView::new(None));
+        let list = cx.new(|cx| CommentsView::new(None, cx));
         list.update(cx, |view, cx| view.set_header(header, cx));
         let input = new_input(window, cx);
         let composer = CommentComposer::new(input.clone(), list.clone(), backdrop);
@@ -58,13 +53,16 @@ impl CommentsPanel {
         let list_subscription = cx.observe(&list, |_, _, cx| cx.notify());
         // 发布成功由列表广播，编辑框据此清空草稿：谁在编辑由谁决定怎么清。
         let publish_input = input.clone();
-        let publish_subscription =
-            cx.subscribe_in(&list, window, move |_, _, _: &CommentPublished, window, cx| {
+        let publish_subscription = cx.subscribe_in(
+            &list,
+            window,
+            move |_, _, _: &CommentPublished, window, cx| {
                 // `set_value` 不发 InputEvent::Change，宿主得自己重绘，
                 // 否则剩余字数还停在旧值上。
                 publish_input.update(cx, |input, cx| input.set_value("", window, cx));
                 cx.notify();
-            });
+            },
+        );
         Self {
             list,
             input,
@@ -80,8 +78,7 @@ impl CommentsPanel {
 
     /// 打开一个资源的评论。
     ///
-    /// 每次切到评论页都会拉一次：资源变了就重新加载，没变也刷新第一页，
-    /// 让列表回到服务端的最新那份。滚动位置和已加载的分页都留着。
+    /// 进入时刷新第一页；新结果返回后替换旧分页。
     ///
     /// `total` 是宿主手上已有的评论数：先用它渲染标题，别让标题空等到第一页回来。
     pub(in crate::ui) fn open_resource(
@@ -94,6 +91,10 @@ impl CommentsPanel {
             view.open_resource(resource, total, cx);
             view.configure(ListMode::Owned, cx);
         });
+    }
+
+    pub fn refresh(&self, cx: &mut App) {
+        self.list.update(cx, |view, cx| view.refresh(cx));
     }
 
     /// 资源没了（换歌单、页面不再展示评论）：取消在途请求并清空列表。

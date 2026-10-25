@@ -70,7 +70,7 @@ pub(super) fn open(
     }) {
         Ok((handle, _)) => Some(handle),
         Err(error) => {
-            eprintln!("打开登录窗口失败：{error}");
+            log::warn!("打开登录窗口失败：{error}");
             None
         }
     }

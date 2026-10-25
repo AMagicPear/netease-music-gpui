@@ -7,10 +7,7 @@ use gpui::{App, Entity, EventEmitter};
 #[derive(Clone)]
 pub(crate) enum Navigate {
     /// 摘要用于先画页头，详情仍按 ID 加载。
-    Playlist {
-        id: u64,
-        summary: Option<Playlist>,
-    },
+    Playlist { id: u64, summary: Option<Playlist> },
     /// 看这首歌的评论：唱片页展开时只翻到评论屏，否则打开歌曲评论页。
     SongComments(Song),
     /// 每日推荐不是歌单，单独一条路由；页面的数据由 DailySongsStore 自己加载。
@@ -39,11 +36,14 @@ impl NavigationBus {
 #[derive(Clone, Copy)]
 pub(in crate::ui) struct PlaylistCommentsTab;
 
-/// 评论发布成功：列表已经插入了新评论，编辑框据此清空草稿。
-///
-/// 生产者只管说「发出去了」，谁在编辑、怎么清理由消费者决定。
+/// 评论发布成功，列表正在刷新；编辑框据此清空草稿。
 #[derive(Clone, Copy)]
 pub(in crate::ui) struct CommentPublished;
+
+pub(in crate::ui) struct CommentCountChanged {
+    pub resource: crate::models::CommentResource,
+    pub total: u64,
+}
 
 /// 歌单元数据更新，窗口需要重新读取封面颜色；行 hover 和列表滚动不影响窗口背景。
 pub(in crate::ui) struct PlaylistMetadataChanged;

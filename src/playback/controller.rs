@@ -156,13 +156,13 @@ impl PlaybackController {
                     if let Some(media) = &mut this.system_media
                         && let Err(error) = media.sync(&this.state, this.engine.has_source())
                     {
-                        eprintln!("同步系统媒体控件失败：{error}");
+                        log::warn!("同步系统媒体控件失败：{error}");
                     }
                     this.sync_media_cover(cx);
                 })
                 .detach();
             }
-            Err(error) => eprintln!("系统媒体控件初始化失败：{error}"),
+            Err(error) => log::warn!("系统媒体控件初始化失败：{error}"),
         }
         cx.spawn(async move |this, cx| {
             loop {
@@ -1012,7 +1012,7 @@ impl PlaybackController {
         if self.engine.has_source() {
             self.state.position = self.engine.position().min(self.state.duration);
         }
-        eprintln!("{error}");
+        log::warn!("{error}");
         self.state.error = Some(error);
         self.state.loading = false;
         self.state.is_playing = false;

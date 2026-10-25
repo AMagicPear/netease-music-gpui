@@ -12,11 +12,7 @@ use gpui_kit::component::native_menu::NativeMenu;
 
 use crate::models::Song;
 use crate::playback::{PlaybackController, PlaybackEvent};
-use crate::state::{
-    daily::DailySongsStore,
-    library::MusicLibrary,
-    resource::DataState,
-};
+use crate::state::{daily::DailySongsStore, library::MusicLibrary, resource::DataState};
 use crate::ui::assets::track_cover_image;
 use crate::ui::components::{
     ACTION_BUTTON_HEIGHT, ACTION_BUTTON_PADDING, CELL_PADDING, DURATION_COLUMN_WIDTH, KeepRowHover,
@@ -229,7 +225,7 @@ impl DailySongsPage {
         // 还没有过数据：按状态给提示。有数据就直接往下走——旧内容继续显示，
         // 新的到了自然替换。
         match store.state() {
-            DataState::Loading => {
+            DataState::Idle | DataState::Loading => {
                 return div()
                     .w_full()
                     .py(px(36.))
@@ -238,7 +234,7 @@ impl DailySongsPage {
                     .child(spinner("daily-loading", 20., colors.muted_foreground))
                     .into_any_element();
             }
-            DataState::Failed(error) => {
+            DataState::Failed => {
                 return div()
                     .w_full()
                     .py(px(36.))
@@ -248,19 +244,15 @@ impl DailySongsPage {
                     .gap(px(8.))
                     .text_size(px(14.))
                     .text_color(colors.muted_foreground)
-                    .child(error.to_string())
-                    .child(
-                        Button::new("daily-retry")
-                            .child("重试")
-                            .on_click({
-                                let entity = cx.entity();
-                                move |_, _, cx| {
-                                    entity.update(cx, |this, cx| {
-                                        this.store.update(cx, |store, cx| store.reload(cx));
-                                    });
-                                }
-                            }),
-                    )
+                    .child("每日推荐加载失败，请重试")
+                    .child(Button::new("daily-retry").child("重试").on_click({
+                        let entity = cx.entity();
+                        move |_, _, cx| {
+                            entity.update(cx, |this, cx| {
+                                this.store.update(cx, |store, cx| store.reload(cx));
+                            });
+                        }
+                    }))
                     .into_any_element();
             }
             DataState::Ready(songs) => {
@@ -318,7 +310,7 @@ impl DailySongsPage {
         let song = self.store.read(cx).songs()[index].clone();
         let display = SongDisplay::new(&song);
         let song_id = song.id;
-        let liked = self.library.read(cx).liked_song_ids.contains(&song_id);
+        let liked = self.library.read(cx).is_liked(song_id);
         // 播放指示现读快照：变化由 PlaybackEvent::SnapshotChanged 触发重绘。
         let playback = self.playback.read(cx);
         let snapshot = playback.snapshot();

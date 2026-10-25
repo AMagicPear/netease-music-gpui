@@ -1,4 +1,4 @@
-use std::{cell::Cell, collections::HashMap, collections::HashSet, rc::Rc};
+use std::{cell::Cell, collections::HashMap, rc::Rc};
 
 use gpui::prelude::{FluentBuilder, StatefulInteractiveElement};
 use gpui::*;
@@ -48,7 +48,6 @@ pub struct MainContent {
     /// 占位页面长期持有；业务页面在下面单独注入依赖。
     pages: HashMap<ContentPage, AnyView>,
     recommend_page: Entity<RecommendPage>,
-    /// 日推页长期持有：切走再回来不重复请求，日期数据由 store 按账号刷新。
     daily_page: Entity<DailySongsPage>,
     pub(super) playlist_page: Entity<PlaylistPage>,
     song_comments_page: Entity<SongCommentsPage>,
@@ -59,9 +58,6 @@ pub struct MainContent {
     page_scroll: HashMap<ContentPage, ScrollHandle>,
     pub(super) playlist_backdrop: Backdrop,
     playing_indicator: PlayingIndicator,
-    /// 已经去过的页面。切回一个去过的页面时静默刷新一次——
-    /// 用户离开期间内容可能变了（推荐歌单每天换、日推按天更新）。
-    visited: HashSet<ContentPage>,
     _sidebar_subscription: Subscription,
     _sidebar_login_subscription: Subscription,
     _user_profile_subscription: Subscription,
@@ -207,6 +203,10 @@ impl MainContent {
             let user_id = account.read(cx).profile.user_id;
             if this.account_id != user_id {
                 this.account_id = user_id;
+                this.history = History::new();
+                this.history.push(ContentPage::Recommend);
+                this.song_comments_page
+                    .update(cx, |page, cx| page.reset(cx));
                 this.playlist_page
                     .update(cx, |page, cx| page.open(None, None, cx));
                 this.navigate(ContentPage::Recommend, cx);
@@ -235,7 +235,6 @@ impl MainContent {
             side_panel,
             playlist_backdrop,
             playing_indicator,
-            visited: HashSet::new(),
             page_scroll: ContentPage::all()
                 .map(|page| (page, ScrollHandle::default()))
                 .collect(),
@@ -289,9 +288,8 @@ impl MainContent {
         if page != ContentPage::Search {
             self.search_page.update(cx, |page, _| page.reset_scroll());
         }
-        // 切回一个去过的页面时静默刷新：用户离开期间内容可能变了。
-        // 首次进入不刷新——页面自己建好时已经拉过一轮了。
-        if changed && !self.visited.insert(page) {
+        if changed {
+            log::debug!("navigate: {}", page.id());
             self.revalidate(page, cx);
         }
         if changed {
@@ -300,18 +298,26 @@ impl MainContent {
         cx.notify();
     }
 
-    /// 页面重新可见时要不要重新拉一次数据。
-    ///
-    /// 只给「内容会随时间变」的页面开：推荐歌单每天换，日推按天更新。
-    /// 歌单详情、搜索结果是用户主动选出来的，重新打开就该按 id 重新加载，
-    /// 不走这条路。
     fn revalidate(&mut self, page: ContentPage, cx: &mut Context<Self>) {
         match page {
             ContentPage::Recommend => {
-                self.recommend_page.update(cx, |page, cx| page.revalidate(cx));
+                self.recommend_page
+                    .update(cx, |page, cx| page.revalidate(cx));
             }
             ContentPage::DailySongs => {
                 self.daily_page.update(cx, |page, cx| page.revalidate(cx));
+            }
+            ContentPage::FavoriteMusic | ContentPage::Playlist(_) => {
+                self.library.update(cx, |library, cx| library.retry(cx));
+                self.playlist_page
+                    .update(cx, |page, cx| page.revalidate(cx));
+            }
+            ContentPage::SongComments(id) => {
+                self.song_comments_page
+                    .update(cx, |page, cx| page.revalidate(id, cx));
+            }
+            ContentPage::Search => {
+                self.search_page.update(cx, |page, cx| page.revalidate(cx));
             }
             _ => {}
         }

@@ -225,7 +225,7 @@ impl Cache {
         .await;
         if let Err(error) = result.unwrap_or_else(|error| Err(error.to_string())) {
             // 数据已经可播放；索引写入失败只影响下一次复用。
-            eprintln!("提交音频缓存失败：{error}");
+            log::warn!("提交音频缓存失败：{error}");
         }
         self.data.lock().unwrap().complete = true;
         self.changed.notify_all();

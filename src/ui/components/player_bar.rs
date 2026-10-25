@@ -327,8 +327,7 @@ impl Render for PlayerBar {
                     )
                 })
         };
-        let liked =
-            song_id.is_some_and(|song_id| self.library.read(cx).liked_song_ids.contains(&song_id));
+        let liked = song_id.is_some_and(|song_id| self.library.read(cx).is_liked(song_id));
         let counts = self.song_counts.read(cx).counts();
         let snapshot = self.playback.read(cx).snapshot();
         let mode = snapshot.mode;

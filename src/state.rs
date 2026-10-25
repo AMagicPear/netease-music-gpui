@@ -1,6 +1,9 @@
 pub mod account;
+pub mod comments;
 pub mod daily;
 pub mod library;
+pub mod lyrics;
+pub mod messages;
 pub mod playlist_detail;
 pub mod recommend;
 pub mod resource;

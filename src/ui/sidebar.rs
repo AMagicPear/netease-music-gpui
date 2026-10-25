@@ -314,7 +314,7 @@ impl Render for SidebarPage {
         let colors = Theme::global(cx).tokens.colors;
         let library = self.library.read(cx);
         let (created, subscribed): (Vec<_>, Vec<_>) = library
-            .playlists
+            .playlists()
             .iter()
             .filter(|playlist| playlist.special_type != 5)
             .cloned()

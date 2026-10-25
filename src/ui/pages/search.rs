@@ -56,8 +56,6 @@ const SEARCH_TABS: [(SearchTab, &str); 10] = [
 
 /// 单曲 tab 的下标：只有它带「播放全部」。
 const SONG_TAB: usize = 1;
-/// 歌单 tab 的下标：切到它时才发歌单搜索请求。
-const PLAYLIST_TAB: usize = 2;
 
 /// 搜索结果页。和歌单详情页一样只是「一个用 `virtual_table` 的列表页」，两者互不依赖：
 /// 共用的表格长相和行内零件都在 `components::virtual_table` 里。
@@ -142,8 +140,8 @@ impl SearchPage {
             }
             // 序号列宽跟着行数走，结果换了要重新算一遍列定义。
             let results = results.read(cx);
-            this.columns = table_columns(results.songs.len());
-            this.playlist_columns = playlist_table_columns(results.playlists.len());
+            this.columns = table_columns(results.songs().len());
+            this.playlist_columns = playlist_table_columns(results.playlists().len());
             cx.notify();
         });
         // 行首的播放指示只跟「哪首在播、是否在播」走，都是 SnapshotChanged 的份内事；
@@ -172,7 +170,7 @@ impl SearchPage {
 
     /// 用当前结果整表作为播放队列，从 `song_id` 开始播放。
     fn play_from(&mut self, song_id: u64, cx: &mut Context<Self>) {
-        let songs = self.results.read(cx).songs.clone();
+        let songs = self.results.read(cx).songs().to_vec();
         self.playback.update(cx, |playback, cx| {
             playback.play_list(0, songs, song_id, cx);
         });
@@ -181,9 +179,14 @@ impl SearchPage {
     /// 切分类时才去取这一栏的结果。歌单是懒加载的：搜索时顺手多发一次请求，
     /// 对只看单曲的人是纯浪费往返。
     fn load_tab_results(&mut self, cx: &mut Context<Self>) {
-        if self.tabs.read(cx).selected_index() == PLAYLIST_TAB {
-            self.results
-                .update(cx, |results, cx| results.search_playlists(cx));
+        match SEARCH_TABS[self.tabs.read(cx).selected_index()].0 {
+            SearchTab::Songs => self
+                .results
+                .update(cx, |results, cx| results.refresh_songs(cx)),
+            SearchTab::Playlists => self
+                .results
+                .update(cx, |results, cx| results.search_playlists(cx)),
+            SearchTab::Unsupported => {}
         }
         cx.notify();
     }
@@ -225,7 +228,7 @@ impl SearchPage {
                     .when(kind == SearchTab::Songs && tab == SONG_TAB, |row| {
                         row.child(play_all_button(colors, false).on_click(cx.listener(
                             |this, _, _, cx| {
-                                let songs = this.results.read(cx).songs.clone();
+                                let songs = this.results.read(cx).songs().to_vec();
                                 this.playback.update(cx, |playback, cx| {
                                     playback.play_list_from_start(0, songs, cx);
                                 });
@@ -257,14 +260,26 @@ impl SearchPage {
             let results = self.results.read(cx);
             match kind {
                 SearchTab::Songs => (
-                    results.loading,
-                    results.error.clone(),
-                    results.songs.is_empty(),
+                    results.songs.is_loading() && results.songs.value().is_none(),
+                    results
+                        .songs
+                        .value()
+                        .is_none()
+                        .then(|| results.songs.error())
+                        .flatten()
+                        .map(|_| "搜索加载失败，请重试".to_string()),
+                    results.songs().is_empty(),
                 ),
                 _ => (
-                    results.playlists_loading,
-                    results.playlists_error.clone(),
-                    results.playlists.is_empty(),
+                    results.playlists.is_loading() && results.playlists.value().is_none(),
+                    results
+                        .playlists
+                        .value()
+                        .is_none()
+                        .then(|| results.playlists.error())
+                        .flatten()
+                        .map(|_| "搜索加载失败，请重试".to_string()),
+                    results.playlists().is_empty(),
                 ),
             }
         };
@@ -338,6 +353,10 @@ impl SearchPage {
 
     /// 出错后的重试。关键词没变，所以只重取当前这一栏，
     /// 不该把已经拿到手的另一种结果也一起清掉。
+    pub fn revalidate(&mut self, cx: &mut Context<Self>) {
+        self.load_tab_results(cx);
+    }
+
     fn retry(&mut self, kind: SearchTab, cx: &mut Context<Self>) {
         match kind {
             SearchTab::Songs => {
@@ -358,9 +377,9 @@ impl SearchPage {
             cx.entity(),
             "search-songs",
             self.columns.clone(),
-            self.results.read(cx).songs.len(),
+            self.results.read(cx).songs().len(),
             |this, index, _, cx| this.song_cells(index, cx),
-            |this, index, cx| this.results.read(cx).songs[index].id,
+            |this, index, cx| this.results.read(cx).songs()[index].id,
             |column, _| {
                 div()
                     .px(CELL_PADDING)
@@ -375,7 +394,7 @@ impl SearchPage {
                 let Some(song) = this
                     .results
                     .read(cx)
-                    .songs
+                    .songs()
                     .iter()
                     .find(|song| song.id == key)
                     .cloned()
@@ -394,9 +413,9 @@ impl SearchPage {
             cx.entity(),
             "search-playlists",
             self.playlist_columns.clone(),
-            self.results.read(cx).playlists.len(),
+            self.results.read(cx).playlists().len(),
             |this, index, _, cx| this.playlist_cells(index, cx),
-            |this, index, cx| this.results.read(cx).playlists[index].id,
+            |this, index, cx| this.results.read(cx).playlists()[index].id,
             |column, _| {
                 div()
                     .px(CELL_PADDING)
@@ -430,7 +449,7 @@ impl SearchPage {
 
     fn playlist_cells(&mut self, index: usize, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let colors = Theme::global(cx).tokens.colors;
-        let playlist = self.results.read(cx).playlists[index].clone();
+        let playlist = self.results.read(cx).playlists()[index].clone();
         vec![
             div()
                 .w_full()
@@ -522,7 +541,7 @@ impl SearchPage {
         let Some(summary) = self
             .results
             .read(cx)
-            .playlists
+            .playlists()
             .iter()
             .find(|playlist| playlist.id == playlist_id)
             .cloned()
@@ -541,10 +560,10 @@ impl SearchPage {
     fn song_cells(&mut self, index: usize, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let colors = Theme::global(cx).tokens.colors;
         let library = self.library.read(cx);
-        let song = self.results.read(cx).songs[index].clone();
+        let song = self.results.read(cx).songs()[index].clone();
         let display = SongDisplay::new(&song);
         let song_id = song.id;
-        let liked = library.liked_song_ids.contains(&song_id);
+        let liked = library.is_liked(song_id);
         // 播放指示渲染时现读快照：变化由 PlaybackEvent::SnapshotChanged 触发重绘，
         // 不再本地存一份元组镜像。
         let playback = self.playback.read(cx);

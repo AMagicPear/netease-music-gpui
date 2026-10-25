@@ -1,150 +1,159 @@
+use super::{
+    account::AccountState,
+    resource::{Resource, request},
+};
+use crate::{
+    api::MusicApi,
+    models::{Playlist, Song},
+};
+use gpui::{Context, Entity, ReadGlobal, Subscription};
 use std::collections::{HashMap, HashSet};
 
-use gpui::{Context, Entity, ReadGlobal, Subscription};
-
-use super::account::AccountState;
-use crate::api::MusicApi;
-use crate::models::{Playlist, Song};
-
 mod collection;
-
 pub use collection::SongsCollected;
 
 #[derive(Default)]
 pub struct MusicLibrary {
-    pub playlists: Vec<Playlist>,
-    pub liked_song_ids: HashSet<u64>,
-    /// 本次会话点亮的歌曲，供喜欢列表即时插入，不必重新拉取。
+    pub playlists: Resource<Vec<Playlist>>,
+    pub likes: Resource<HashSet<u64>>,
     pub liked_song_cache: HashMap<u64, Song>,
     pub user_id: u64,
-    pub loading: bool,
-    pub error: Option<String>,
-    pub likes_error: Option<String>,
     generation: u64,
-    _user_subscription: Option<Subscription>,
+    pending_likes: HashSet<u64>,
+    _account: Option<Subscription>,
 }
 
 impl MusicLibrary {
-    pub fn new(user: Entity<AccountState>, cx: &mut Context<Self>) -> Self {
-        let subscription = cx.observe(&user, |this, user, cx| {
-            this.load(user.read(cx).profile.user_id, cx);
+    pub fn new(account: Entity<AccountState>, cx: &mut Context<Self>) -> Self {
+        let subscription = cx.observe(&account, |this, account, cx| {
+            let account = account.read(cx);
+            if !account.loading && this.user_id != account.profile.user_id {
+                this.set_account(account.profile.user_id, cx);
+            }
         });
         let mut this = Self {
-            loading: user.read(cx).loading,
-            _user_subscription: Some(subscription),
+            _account: Some(subscription),
             ..Default::default()
         };
-        let user_id = user.read(cx).profile.user_id;
-        if user_id != 0 || !user.read(cx).loading {
-            this.load(user_id, cx);
+        let account = account.read(cx);
+        if !account.loading {
+            this.set_account(account.profile.user_id, cx);
         }
         this
     }
 
-    fn load(&mut self, user_id: u64, cx: &mut Context<Self>) {
-        if user_id != 0
-            && self.user_id == user_id
-            && (self.loading || (self.error.is_none() && self.likes_error.is_none()))
-        {
-            return;
-        }
-        if self.user_id != user_id {
-            self.playlists.clear();
-            self.liked_song_ids.clear();
-            self.liked_song_cache.clear();
-        }
-        self.user_id = user_id;
+    fn set_account(&mut self, user_id: u64, cx: &mut Context<Self>) {
         self.generation = self.generation.wrapping_add(1);
-        let generation = self.generation;
-        self.error = None;
-        self.likes_error = None;
-        self.loading = user_id != 0;
-        if user_id == 0 {
-            self.error = Some("请点击顶部头像扫码登录".into());
-            cx.notify();
-            return;
-        }
-        let api = MusicApi::global(cx);
-        let client = api.client.clone();
-        let request = api.runtime.spawn(async move {
-            tokio::join!(
-                MusicApi::user_playlists(&client, user_id),
-                MusicApi::liked_song_ids(&client, user_id)
-            )
-        });
-        cx.spawn(async move |this, cx| {
-            let (playlists, likes) = request.await.unwrap_or_else(|_| {
-                (
-                    Err("歌单列表请求任务失败".into()),
-                    Err("喜欢状态请求任务失败".into()),
-                )
-            });
-            let _ = this.update(cx, |library, cx| {
-                if library.user_id != user_id || library.generation != generation {
-                    return;
-                }
-                library.loading = false;
-                match playlists {
-                    Ok(playlists) => library.playlists = playlists,
-                    Err(message) => library.error = Some(message),
-                }
-                match likes {
-                    Ok(ids) => library.liked_song_ids = ids.into_iter().collect(),
-                    Err(message) => library.likes_error = Some(message),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
+        self.user_id = user_id;
+        self.playlists.reset();
+        self.likes.reset();
+        self.pending_likes.clear();
+        self.liked_song_cache.clear();
+        self.retry(cx);
     }
 
+    pub fn playlists(&self) -> &[Playlist] {
+        self.playlists.value().map(Vec::as_slice).unwrap_or(&[])
+    }
+    pub fn is_liked(&self, id: u64) -> bool {
+        self.likes.value().is_some_and(|ids| ids.contains(&id))
+    }
     pub fn favorite_playlist(&self) -> Option<&Playlist> {
-        self.playlists
+        self.playlists()
             .iter()
             .find(|playlist| playlist.special_type == 5)
     }
 
-    pub fn toggle_like(&mut self, song: Song, cx: &mut Context<Self>) {
-        let song_id = song.id;
-        if song_id == 0 || self.user_id == 0 {
+    pub fn retry(&mut self, cx: &mut Context<Self>) {
+        let id = self.user_id;
+        if id == 0 {
+            self.playlists.set(Vec::new());
+            self.likes.set(HashSet::new());
+            cx.notify();
             return;
         }
-        let liked = !self.liked_song_ids.contains(&song_id);
-        self.set_liked_locally(&song, liked);
-        let api = MusicApi::global(cx);
-        let generation = self.generation;
-        let client = api.client.clone();
-        let request = api
-            .runtime
-            .spawn(MusicApi::set_song_liked(client, song_id, liked));
-        cx.spawn(async move |this, cx| {
-            if let Ok(Err(message)) = request.await {
-                eprintln!("{message}");
-                let _ = this.update(cx, |library, cx| {
-                    if library.generation != generation {
-                        return;
-                    }
-                    library.set_liked_locally(&song, !liked);
-                    cx.notify();
+        let client = MusicApi::global(cx).client.clone();
+        let playlists_client = client.clone();
+        self.playlists.fetch(
+            "library playlists",
+            cx,
+            |this| &mut this.playlists,
+            async move { MusicApi::user_playlists(&playlists_client, id).await },
+        );
+        if self.pending_likes.is_empty() {
+            self.likes
+                .fetch("liked songs", cx, |this| &mut this.likes, async move {
+                    MusicApi::liked_song_ids(&client, id)
+                        .await
+                        .map(|ids| ids.into_iter().collect())
                 });
-            }
-        })
-        .detach();
+        }
+    }
+
+    pub fn toggle_like(&mut self, song: Song, cx: &mut Context<Self>) {
+        let id = song.id;
+        if id == 0
+            || self.user_id == 0
+            || self.likes.value().is_none()
+            || !self.pending_likes.insert(id)
+        {
+            return;
+        }
+        let liked = !self.is_liked(id);
+        self.set_liked_locally(&song, liked);
+        let client = MusicApi::global(cx).client.clone();
+        let generation = self.generation;
+        // 写操作由音乐库持有，切换页面不会取消它。
+        request(
+            cx,
+            "toggle like",
+            MusicApi::set_song_liked(client, id, liked),
+            move |this, result, cx| {
+                if this.generation != generation {
+                    return;
+                }
+                this.pending_likes.remove(&id);
+                if result.is_err() {
+                    this.set_liked_locally(&song, !liked);
+                }
+                cx.notify();
+            },
+        );
         cx.notify();
     }
 
     fn set_liked_locally(&mut self, song: &Song, liked: bool) {
-        if liked {
-            self.liked_song_ids.insert(song.id);
-            self.liked_song_cache.insert(song.id, song.clone());
-        } else {
-            self.liked_song_ids.remove(&song.id);
-            self.liked_song_cache.remove(&song.id);
+        self.likes.cancel();
+        if let Some(ids) = self.likes.value_mut() {
+            if liked {
+                ids.insert(song.id);
+                self.liked_song_cache.insert(song.id, song.clone());
+            } else {
+                ids.remove(&song.id);
+                self.liked_song_cache.remove(&song.id);
+            }
         }
     }
+}
 
-    pub fn retry(&mut self, cx: &mut Context<Self>) {
-        self.load(self.user_id, cx);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn optimistic_like_invalidates_an_older_read_and_can_roll_back() {
+        let mut library = MusicLibrary::default();
+        library.likes.set(HashSet::from([1]));
+        let read = library.likes.begin();
+        let song = Song {
+            id: 2,
+            ..Default::default()
+        };
+        library.set_liked_locally(&song, true);
+        assert!(!library.likes.apply(read, Ok(HashSet::from([1]))));
+        assert!(library.is_liked(1) && library.is_liked(2));
+        library.set_liked_locally(&song, false);
+        assert!(library.is_liked(1) && !library.is_liked(2));
+        assert!(!library.liked_song_cache.contains_key(&2));
     }
 }

@@ -154,8 +154,8 @@ fn input_box(
     let draft = input.read(cx).value();
     let remaining = COMMENT_LIMIT.saturating_sub(input.read(cx).text().len_chars());
     // 发布状态归列表所有：它才是评论数据的主人，编辑框只负责把内容递过去。
-    let publishing = comments.read(cx).publishing();
-    let publish_error = comments.read(cx).publish_error().map(str::to_owned);
+    let publishing = comments.read(cx).publishing(cx);
+    let publish_error = comments.read(cx).publish_error(cx);
     // 空内容没有可发布的，也就没必要让按钮亮着。
     let can_publish = !publishing && !draft.trim().is_empty();
     // 滚轮和发布按钮都要用这两个实体，各拿一份。

@@ -4,6 +4,7 @@
 
 use gpui::{Context, Entity, ReadGlobal, Subscription};
 
+use super::resource::Resource;
 use crate::api::MusicApi;
 use crate::playback::{PlaybackController, PlaybackEvent};
 
@@ -12,8 +13,7 @@ pub struct SongCounts {
     playback: Entity<PlaybackController>,
     /// 计数对应的歌曲；请求身份另外校验，避免 A → B → A 时旧结果覆盖新结果。
     song_id: Option<u64>,
-    counts: [Option<u64>; 2],
-    request: Option<tokio::task::AbortHandle>,
+    data: Resource<[Option<u64>; 2]>,
     _playback_subscription: Subscription,
 }
 
@@ -28,8 +28,7 @@ impl SongCounts {
         let mut this = Self {
             playback,
             song_id: None,
-            counts: [None; 2],
-            request: None,
+            data: Resource::new(),
             _playback_subscription: subscription,
         };
         this.reload(cx);
@@ -38,7 +37,7 @@ impl SongCounts {
 
     /// 互动区计数快照。渲染时现读，不在别处存镜像。
     pub fn counts(&self) -> [Option<u64>; 2] {
-        self.counts
+        self.data.value().copied().unwrap_or([None; 2])
     }
 
     /// 同一首歌不重复请求；换歌取消旧请求、清空计数。
@@ -53,54 +52,21 @@ impl SongCounts {
         if self.song_id == song_id {
             return;
         }
-        if let Some(request) = self.request.take() {
-            request.abort();
-        }
         self.song_id = song_id;
-        self.counts = [None; 2];
+        self.data.reset();
         cx.notify();
-        let Some(song_id) = song_id else {
+        let Some(id) = song_id else {
             return;
         };
-        let api = MusicApi::global(cx);
-        let request = api
-            .runtime
-            .spawn(MusicApi::song_counts(api.client.clone(), song_id));
-        let request_id = request.id();
-        self.request = Some(request.abort_handle());
-        cx.spawn(async move |this, cx| {
-            let result = request.await;
-            let _ = this.update(cx, |this, cx| {
-                if !this
-                    .request
-                    .as_ref()
-                    .is_some_and(|request| request.id() == request_id)
-                {
-                    return;
-                }
-                this.request = None;
-                match result {
-                    Ok(counts) => {
-                        for (index, count) in counts.into_iter().enumerate() {
-                            match count {
-                                Ok(count) => this.counts[index] = Some(count),
-                                Err(message) => eprintln!("{message}"),
-                            }
-                        }
-                        cx.notify();
-                    }
-                    Err(_) => eprintln!("歌曲互动计数任务失败"),
-                }
+        let client = MusicApi::global(cx).client.clone();
+        self.data
+            .fetch("song counts", cx, |this| &mut this.data, async move {
+                let counts = MusicApi::song_counts(client, id).await;
+                Ok(counts.map(|count| {
+                    count
+                        .map_err(|error| log::warn!("song count: {error}"))
+                        .ok()
+                }))
             });
-        })
-        .detach();
-    }
-}
-
-impl Drop for SongCounts {
-    fn drop(&mut self) {
-        if let Some(request) = self.request.take() {
-            request.abort();
-        }
     }
 }

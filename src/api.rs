@@ -24,6 +24,7 @@ pub struct MusicApi {
     /// 当前登录会话的 Cookie 串。SDK 的客户端不暴露原始 Cookie，写评论要从中
     /// 取 csrf，只能在这里留一份；登录 / 登出时同步更新。
     pub cookie: Option<String>,
+    pub session_generation: u64,
     http: Arc<reqwest_client::ReqwestClient>,
     audio_http: reqwest::Client,
 }
@@ -31,6 +32,12 @@ pub struct MusicApi {
 impl Global for MusicApi {}
 
 impl MusicApi {
+    pub fn set_session(&mut self, cookie: Option<String>) {
+        self.session_generation = self.session_generation.wrapping_add(1);
+        self.client = create_client(cookie.clone());
+        self.cookie = cookie;
+    }
+
     pub fn http_client(&self) -> Arc<reqwest_client::ReqwestClient> {
         self.http.clone()
     }
@@ -77,6 +84,7 @@ impl MusicApi {
         Ok(Self {
             client: create_client(cookie.clone()),
             cookie,
+            session_generation: 0,
             runtime,
             http,
             audio_http,

@@ -3,7 +3,7 @@
 use gpui::{Context, Entity, ReadGlobal, SharedString, Subscription};
 
 use super::account::AccountState;
-use super::resource::Resource;
+use super::resource::{Resource, request};
 use crate::api::MusicApi;
 use crate::models::{
     FeaturedActivity, HeartRecommendation, PLAYLIST_BLOCK_CODE, RecommendEntry,
@@ -121,7 +121,7 @@ pub struct RecommendStore {
     /// 心动模式的推荐流：预取，不触碰正在播放的队列。
     pub heart: Resource<HeartRecommendation>,
     /// 雷达歌单第一首的封面。
-    pub radar_first_song_cover: Option<SharedString>,
+    pub radar_first_song_cover: Resource<Option<SharedString>>,
     /// 已加载过的身份：`Some(0)` 表示游客，`None` 表示还没取过。
     user_id: Option<u64>,
     _user_subscription: Option<Subscription>,
@@ -130,7 +130,10 @@ pub struct RecommendStore {
 impl RecommendStore {
     pub fn new(user: Entity<AccountState>, cx: &mut Context<Self>) -> Self {
         let subscription = cx.observe(&user, |this, user, cx| {
-            this.load(user.read(cx).profile.user_id, false, cx);
+            let account = user.read(cx);
+            if !account.loading {
+                this.load(account.profile.user_id, false, cx);
+            }
         });
         let mut this = Self {
             // 占位入口先摆上，数据到了再替换。
@@ -139,7 +142,7 @@ impl RecommendStore {
             playlists: Resource::new(),
             featured: Resource::new(),
             heart: Resource::new(),
-            radar_first_song_cover: None,
+            radar_first_song_cover: Resource::new(),
             user_id: None,
             _user_subscription: Some(subscription),
         };
@@ -154,9 +157,9 @@ impl RecommendStore {
         this
     }
 
-    /// 强制刷新；取消旧请求，并用 generation 丢弃已返回的旧结果。
+    /// 进入页面时刷新，各区块合并已有的在途请求。
     pub fn reload(&mut self, cx: &mut Context<Self>) {
-        self.load(self.user_id.unwrap_or_default(), true, cx);
+        self.revalidate(cx);
     }
 
     /// 切回页面时的静默刷新。
@@ -164,10 +167,9 @@ impl RecommendStore {
     /// 用户离开期间推荐内容可能变了，回来时该看到最新的。旧内容不清空，
     /// 新数据到了再替换——和评论列表一个路子。已经在拉就算了，不打断。
     pub fn revalidate(&mut self, cx: &mut Context<Self>) {
-        if self.playlists.is_loading() {
-            return;
+        if let Some(user_id) = self.user_id {
+            self.load(user_id, true, cx);
         }
-        self.load(self.user_id.unwrap_or_default(), true, cx);
     }
 
     fn load(&mut self, user_id: u64, force: bool, cx: &mut Context<Self>) {
@@ -176,12 +178,12 @@ impl RecommendStore {
         }
         // 换账号后立即清除上一位用户的内容。
         if self.user_id != Some(user_id) {
-            self.entries.reset();
+            self.entries.set(default_entries());
             self.radar.reset();
             self.playlists.reset();
             self.featured.reset();
             self.heart.reset();
-            self.radar_first_song_cover = None;
+            self.radar_first_song_cover.reset();
         }
         self.user_id = Some(user_id);
         // 四块内容各拉各的，互不等待：每块一个数据源，自己的代次。
@@ -194,131 +196,97 @@ impl RecommendStore {
     }
 
     fn load_entries(&mut self, cx: &mut Context<Self>) {
+        if self.entries.is_loading() {
+            return;
+        }
         let generation = self.entries.begin();
-        let api = MusicApi::global(cx);
-        let request = api
-            .runtime
-            .spawn(MusicApi::recommend_entries(api.client.clone()));
-        self.entries.track(request.abort_handle());
-        cx.spawn(async move |this, cx| {
-            let result = request
-                .await
-                .unwrap_or_else(|_| Err("推荐入口请求任务失败".into()));
-            let _ = this.update(cx, |this, cx| {
+        let client = MusicApi::global(cx).client.clone();
+        self.entries.track(request(
+            cx,
+            "recommend entries",
+            MusicApi::recommend_entries(client),
+            move |this, result, cx| {
                 if this.apply_entries(generation, result) {
                     cx.notify();
                 }
-            });
-        })
-        .detach();
+            },
+        ));
     }
 
-    /// 雷达歌单只对登录用户开放。
     fn load_radar(&mut self, user_id: u64, cx: &mut Context<Self>) {
-        if user_id == 0 {
+        if user_id == 0 || self.radar.is_loading() {
             return;
         }
         let generation = self.radar.begin();
-        let api = MusicApi::global(cx);
-        let request = api.runtime.spawn(MusicApi::radar_playlists(api.client.clone()));
-        self.radar.track(request.abort_handle());
-        cx.spawn(async move |this, cx| {
-            let result = request
-                .await
-                .unwrap_or_else(|_| Err("雷达歌单请求任务失败".into()));
-            let _ = this.update(cx, |this, cx| {
+        let client = MusicApi::global(cx).client.clone();
+        self.radar.track(request(
+            cx,
+            "radar playlists",
+            MusicApi::radar_playlists(client),
+            move |this, result, cx| {
+                let success = result.is_ok();
                 if this.apply_radar(generation, result) {
-                    this.load_radar_first_song(cx);
+                    if success {
+                        this.load_radar_first_song(cx);
+                    }
                     cx.notify();
                 }
-            });
-        })
-        .detach();
+            },
+        ));
     }
 
-    /// 推荐歌单：登录后走官方新接口；游客回落到首页区块里的「推荐歌单」。
     fn load_playlists(&mut self, user_id: u64, cx: &mut Context<Self>) {
-        let generation = self.playlists.begin();
-        let api = MusicApi::global(cx);
-        let request = if user_id != 0 {
-            api.runtime
-                .spawn(MusicApi::recommended_playlists(api.client.clone()))
-        } else {
-            let client = api.client.clone();
-            api.runtime.spawn(async move {
-                MusicApi::homepage_blocks(client).await.map(|blocks| {
-                    blocks
-                        .into_iter()
-                        .find(|block| block.code == PLAYLIST_BLOCK_CODE)
-                        .map(|block| playlists_from_creatives(&block.creatives))
-                        .unwrap_or_default()
-                })
-            })
-        };
-        self.playlists.track(request.abort_handle());
-        cx.spawn(async move |this, cx| {
-            let result = request
-                .await
-                .unwrap_or_else(|_| Err("推荐歌单请求任务失败".into()));
-            let _ = this.update(cx, |this, cx| {
-                if this.apply_playlists(generation, result) {
-                    cx.notify();
+        let client = MusicApi::global(cx).client.clone();
+        self.playlists.fetch(
+            "recommended playlists",
+            cx,
+            |this| &mut this.playlists,
+            async move {
+                if user_id != 0 {
+                    MusicApi::recommended_playlists(client).await
+                } else {
+                    MusicApi::homepage_blocks(client).await.map(|blocks| {
+                        blocks
+                            .into_iter()
+                            .find(|block| block.code == PLAYLIST_BLOCK_CODE)
+                            .map(|block| playlists_from_creatives(&block.creatives))
+                            .unwrap_or_default()
+                    })
                 }
-            });
-        })
-        .detach();
+            },
+        );
     }
 
     fn load_featured(&mut self, cx: &mut Context<Self>) {
-        let generation = self.featured.begin();
-        let api = MusicApi::global(cx);
-        let request = api.runtime.spawn(MusicApi::featured_activities(api.client.clone()));
-        self.featured.track(request.abort_handle());
-        cx.spawn(async move |this, cx| {
-            let result = request
-                .await
-                .unwrap_or_else(|_| Err("精选活动请求任务失败".into()));
-            let _ = this.update(cx, |this, cx| {
-                if this.apply_featured(generation, result) {
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
+        let client = MusicApi::global(cx).client.clone();
+        self.featured.fetch(
+            "featured activities",
+            cx,
+            |this| &mut this.featured,
+            MusicApi::featured_activities(client),
+        );
     }
 
-    /// 预取只更新推荐页，不触碰正在播放的队列。
     pub fn load_heart(&mut self, cx: &mut Context<Self>) {
-        let user_id = self.user_id.unwrap_or_default();
-        if user_id == 0 || self.heart.is_loading() {
+        let Some(user_id) = self.user_id.filter(|id| *id != 0) else {
             return;
-        }
-        let generation = self.heart.begin();
-        let api = MusicApi::global(cx);
-        let client = api.client.clone();
-        let request = api.runtime.spawn(async move {
-            let playlist_id = MusicApi::heart_playlist(&client, user_id).await?;
-            let songs = MusicApi::heart_songs(client, playlist_id).await?;
-            Ok(HeartRecommendation { playlist_id, songs })
-        });
-        self.heart.track(request.abort_handle());
-        cx.spawn(async move |this, cx| {
-            let result = request
-                .await
-                .unwrap_or_else(|_| Err("心动推荐请求失败，请重试".into()));
-            let _ = this.update(cx, |this, cx| {
-                if this.heart.apply(generation, result) {
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-        cx.notify();
+        };
+        let client = MusicApi::global(cx).client.clone();
+        self.heart.fetch(
+            "heart recommendation",
+            cx,
+            |this| &mut this.heart,
+            async move {
+                let playlist_id = MusicApi::heart_playlist(&client, user_id).await?;
+                let songs = MusicApi::heart_songs(client, playlist_id).await?;
+                Ok(HeartRecommendation { playlist_id, songs })
+            },
+        );
     }
 
-    /// 同一身份只取一次；失败或主动刷新时允许重试。
+    /// 账号通知只响应身份变化，进入页面时另走主动刷新。
     fn should_load(&self, user_id: u64, force: bool) -> bool {
-        force || self.user_id != Some(user_id) || self.playlists.error().is_some()
+        force || self.user_id != Some(user_id)
     }
 
     fn apply_entries(
@@ -328,7 +296,9 @@ impl RecommendStore {
     ) -> bool {
         // 失败时保留上一批入口，不要把已经拿到的风格日推打回占位。
         let Ok(api_entries) = result else {
-            return self.entries.apply(generation, Err("推荐入口加载失败".into()));
+            return self
+                .entries
+                .apply(generation, Err("推荐入口加载失败".into()));
         };
         // daily 补固定首卡；动态入口替换风格占位，常听歌手保持在最后。
         let mut entries = default_entries();
@@ -375,7 +345,7 @@ impl RecommendStore {
         };
         let applied = self.radar.apply(generation, Ok(playlists));
         if applied {
-            self.radar_first_song_cover = None;
+            self.radar_first_song_cover.reset();
             self.apply_radar_to_entry();
         }
         applied
@@ -401,76 +371,29 @@ impl RecommendStore {
         }
     }
 
-    pub fn load_radar_first_song(&mut self, cx: &mut Context<Self>) {
+    fn load_radar_first_song(&mut self, cx: &mut Context<Self>) {
         let Some(playlist) = self.radar.value().and_then(|radar| radar.first()) else {
             return;
         };
-        let playlist_id = playlist.id;
-        let generation = self.radar.begin();
-        let (runtime, client) = {
-            let api = MusicApi::global(cx);
-            (api.runtime.handle().clone(), api.client.clone())
-        };
-        let request = runtime.spawn(MusicApi::playlist_first_song(client, playlist_id));
-        cx.spawn(async move |this, cx| {
-            let result = request.await.ok().and_then(Result::ok);
-            let _ = this.update(cx, |this, cx| {
-                if this.radar.is_current(generation)
-                    && this
-                        .radar
-                        .value()
-                        .and_then(|radar| radar.first())
-                        .is_some_and(|playlist| playlist.id == playlist_id)
-                {
-                    this.radar_first_song_cover =
-                        result.and_then(|song| song.al.pic_url).map(Into::into);
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-    }
-
-    /// 推荐歌单落地：这是页面唯一的 `loading` / `error` 来源（刷新按钮在它上面）。
-    fn apply_playlists(
-        &mut self,
-        generation: u64,
-        result: Result<Vec<RecommendedPlaylist>, String>,
-    ) -> bool {
-        self.playlists.apply(generation, result)
-    }
-
-    fn apply_featured(
-        &mut self,
-        generation: u64,
-        result: Result<Vec<FeaturedActivity>, String>,
-    ) -> bool {
-        match result {
-            Ok(activities) => self.featured.apply(generation, Ok(activities)),
-            // 精选活动挂了不影响别的区块，留着上一批横幅就行。
-            Err(_) => self.featured.apply(generation, Err("精选活动加载失败".into())),
-        }
-    }
-
-    fn abort_requests(&mut self) {
-        self.entries.abort();
-        self.radar.abort();
-        self.playlists.abort();
-        self.featured.abort();
-        self.heart.abort();
-    }
-}
-
-impl Drop for RecommendStore {
-    fn drop(&mut self) {
-        self.abort_requests();
+        let id = playlist.id;
+        let client = MusicApi::global(cx).client.clone();
+        self.radar_first_song_cover.fetch(
+            "radar first song cover",
+            cx,
+            |this| &mut this.radar_first_song_cover,
+            async move {
+                MusicApi::playlist_first_song(client, id)
+                    .await
+                    .map(|song| song.al.pic_url.map(Into::into))
+            },
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{QuickEntryKind, RecommendStore, default_entries};
-    use crate::models::{FeaturedActivity, RecommendEntry, RecommendedPlaylist};
+    use crate::models::{RecommendEntry, RecommendedPlaylist};
     use crate::state::resource::Resource;
 
     fn store() -> RecommendStore {
@@ -480,7 +403,7 @@ mod tests {
             playlists: Resource::new(),
             featured: Resource::new(),
             heart: Resource::new(),
-            radar_first_song_cover: None,
+            radar_first_song_cover: Resource::new(),
             user_id: None,
             _user_subscription: None,
         }
@@ -504,28 +427,6 @@ mod tests {
             pic_url: Some(format!("cover-{id}")),
             play_count: 1000 + id,
         }
-    }
-
-    fn activity(title: &str) -> FeaturedActivity {
-        FeaturedActivity {
-            title: title.into(),
-            image_url: Some(format!("image-{title}")),
-        }
-    }
-
-    #[test]
-    fn same_identity_loads_once_until_it_fails() {
-        let mut this = store();
-        assert!(this.should_load(42, false));
-        this.user_id = Some(42);
-        assert!(!this.should_load(42, false));
-        // 推荐歌单失败过一次就允许重试。
-        let generation = this.playlists.begin();
-        this.playlists.apply(generation, Err("网络错误".into()));
-        assert!(this.should_load(42, false));
-        assert!(this.should_load(42, true));
-        assert!(this.should_load(7, false));
-        assert!(this.should_load(0, false));
     }
 
     #[test]
@@ -583,31 +484,6 @@ mod tests {
     }
 
     #[test]
-    fn stale_results_do_not_change_any_section() {
-        let mut this = store();
-        // 每个数据源有自己的代次：拿旧代次回来，一个都进不去。
-        let entries = this.entries.begin();
-        let radar = this.radar.begin();
-        let playlists = this.playlists.begin();
-        let featured = this.featured.begin();
-        this.entries.begin();
-        this.radar.begin();
-        this.playlists.begin();
-        this.featured.begin();
-        assert!(!this.apply_entries(entries, Ok(vec![entry("dailySong", "旧的一批", "1")])));
-        assert!(!this.apply_radar(radar, Ok(vec![playlist(1, "旧雷达")])));
-        assert!(!this.apply_playlists(playlists, Err("旧错误".into())));
-        assert!(!this.apply_featured(featured, Ok(vec![activity("旧活动")])));
-        assert!(this.radar.value().is_none());
-        assert!(this.playlists.value().is_none());
-        assert!(this.featured.value().is_none());
-        // 占位入口原封不动。
-        let entries = this.entries.value().unwrap();
-        assert_eq!(entries.len(), 7);
-        assert_eq!(entries[0].caption.as_ref(), "每天更新的个性化推荐");
-    }
-
-    #[test]
     fn radar_and_playlists_land_independently() {
         let mut this = store();
         let radar = this.radar.begin();
@@ -623,7 +499,10 @@ mod tests {
         assert_eq!(radar_entry.caption.as_ref(), "今天从《歌》听起");
         assert_eq!(radar_entry.cover.as_deref(), Some("cover-3"));
         let playlists = this.playlists.begin();
-        assert!(this.apply_playlists(playlists, Ok(vec![playlist(7, "歌单")])));
+        assert!(
+            this.playlists
+                .apply(playlists, Ok(vec![playlist(7, "歌单")]))
+        );
         assert_eq!(this.playlists.value().unwrap().len(), 1);
         assert_eq!(this.radar.value().unwrap().len(), 1);
     }
@@ -644,34 +523,5 @@ mod tests {
             .find(|entry| entry.kind == QuickEntryKind::Radar)
             .expect("首行应当有私人雷达入口");
         assert_eq!(radar_entry.cover.as_deref(), Some("cover-9"));
-    }
-
-    #[test]
-    fn failed_optional_requests_preserve_previous_content() {
-        let mut this = store();
-        let entries = this.entries.begin();
-        let radar = this.radar.begin();
-        let featured = this.featured.begin();
-        assert!(this.apply_entries(entries, Ok(vec![entry("dailySong", "旧推荐", "1")])));
-        assert!(this.apply_radar(radar, Ok(vec![playlist(9, "旧雷达")])));
-        assert!(this.apply_featured(featured, Ok(vec![activity("活动一")])));
-        assert!(this.apply_entries(entries, Err("失败".into())));
-        assert!(this.apply_radar(radar, Err("失败".into())));
-        assert!(this.apply_featured(featured, Err("失败".into())));
-        assert_eq!(this.entries.value().unwrap()[0].caption.as_ref(), "旧推荐");
-        assert_eq!(this.radar.value().unwrap()[0].id, 9);
-        assert_eq!(this.featured.value().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn failed_playlist_request_records_error_and_keeps_previous_list() {
-        let mut this = store();
-        this.user_id = Some(1);
-        this.playlists.set(vec![playlist(1, "旧的一批")]);
-        let generation = this.playlists.begin();
-        assert!(this.apply_playlists(generation, Err("推荐歌单请求失败".into())));
-        assert!(this.playlists.error().is_some());
-        // 失败不打回空态：已经拿到的歌单还在。
-        assert_eq!(this.playlists.value().unwrap().len(), 1);
     }
 }

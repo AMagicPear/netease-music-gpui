@@ -9,9 +9,7 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_kit::base::{
-    ColorTokens, IndexPath, InteractiveElementExt as _, Selectable, Theme,
-};
+use gpui_kit::base::{ColorTokens, IndexPath, InteractiveElementExt as _, Selectable, Theme};
 use gpui_kit::component::list::{List, ListDelegate, ListState};
 
 use super::{
@@ -269,7 +267,7 @@ impl ListDelegate for QueueDelegate {
         let is_current = self.playback.read(cx).queue_cursor() == Some(index);
         // 当前歌正在播放时按钮变成暂停，其余一律是播放键。
         let show_pause = is_current && self.playback.read(cx).is_play_requested();
-        let liked = self.library.read(cx).liked_song_ids.contains(&song.id);
+        let liked = self.library.read(cx).is_liked(song.id);
         let state = RowState {
             is_current,
             show_pause,

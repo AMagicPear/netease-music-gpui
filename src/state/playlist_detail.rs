@@ -1,91 +1,73 @@
+use super::resource::{Resource, request};
+use crate::{
+    api::MusicApi,
+    models::{Playlist, Song},
+};
+use gpui::{Context, ReadGlobal};
 use std::collections::{HashMap, HashSet};
 
-use gpui::{Context, ReadGlobal};
-
-use crate::api::MusicApi;
-use crate::models::{Playlist, Song};
-
-/// 当前打开的歌单数据；排序、标签和 hover 留在页面 View 中。
 #[derive(Default)]
 pub struct PlaylistDetail {
     pub id: Option<u64>,
     pub playlist: Option<Playlist>,
-    pub songs: Vec<Song>,
-    pub loading: bool,
-    pub error: Option<String>,
-    generation: u64,
-    request: Option<tokio::task::AbortHandle>,
+    pub songs: Resource<Vec<Song>>,
 }
 
 impl PlaylistDetail {
+    pub fn songs(&self) -> &[Song] {
+        self.songs.value().map(Vec::as_slice).unwrap_or(&[])
+    }
+
     pub fn open(&mut self, id: Option<u64>, summary: Option<Playlist>, cx: &mut Context<Self>) {
-        if self.id == id && (self.loading || self.error.is_none()) {
+        if self.id == id {
             return;
         }
-        self.clear();
-        self.id = id;
+        self.songs.reset();
         self.playlist = summary;
-        let Some(id) = id else {
+        self.id = id;
+        self.reload(cx);
+    }
+
+    pub fn reload(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.id else {
             cx.notify();
             return;
         };
-        self.loading = true;
-        let generation = self.generation;
-        let api = MusicApi::global(cx);
-        let client = api.client.clone();
-        let runtime = api.runtime.handle().clone();
-        let request = runtime.spawn(MusicApi::playlist_meta(client.clone(), id));
-        self.request = Some(request.abort_handle());
-        cx.spawn(async move |this, cx| {
-            // 两步：详情一到就先交给界面（封面、标题、评论数），歌曲继续分批下。
-            // 串成一步的话，评论数要等最后一批歌曲才出现。
-            let meta = request
-                .await
-                .unwrap_or_else(|_| Err("歌单请求任务失败".into()));
-            let playlist = match meta {
-                Ok(playlist) => playlist,
-                Err(message) => {
-                    let _ = this.update(cx, |this, cx| {
-                        if this.finish(id, generation, Err(message)) {
-                            cx.notify();
-                        }
-                    });
+        if self.songs.is_loading() {
+            return;
+        }
+        let generation = self.songs.begin();
+        let client = MusicApi::global(cx).client.clone();
+        self.songs.track(request(
+            cx,
+            "playlist metadata",
+            MusicApi::playlist_meta(client.clone(), id),
+            move |this, result, cx| {
+                if !this.songs.is_current(generation) {
                     return;
                 }
-            };
-            let songs_request = runtime.spawn(MusicApi::playlist_songs(client, playlist.clone()));
-            let _ = this.update(cx, |this, cx| {
-                this.request = Some(songs_request.abort_handle());
-                if this.loaded_meta(id, generation, playlist) {
-                    cx.notify();
+                match result {
+                    Ok(playlist) => {
+                        this.playlist = Some(playlist.clone());
+                        this.songs.track(request(
+                            cx,
+                            "playlist songs",
+                            MusicApi::playlist_songs(client, playlist),
+                            move |this, result, cx| {
+                                if this.songs.apply(generation, result) {
+                                    cx.notify();
+                                }
+                            },
+                        ));
+                    }
+                    Err(error) => {
+                        this.songs.apply(generation, Err(error));
+                    }
                 }
-            });
-            let result = songs_request
-                .await
-                .unwrap_or_else(|_| Err("歌单请求任务失败".into()));
-            let _ = this.update(cx, |this, cx| {
-                if this.finish(id, generation, result) {
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
+                cx.notify();
+            },
+        ));
         cx.notify();
-    }
-
-    /// 重新拉取当前歌单：往这个歌单里收藏了歌曲后，列表和计数要跟着变。
-    ///
-    /// 不本地插入新行——排序、去重、页头计数都跟服务端一致才是唯一真值，
-    /// 尤其收藏可能是别人在别的设备上做的，本地拼一份迟早对不上。
-    pub fn reload(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.id else {
-            return;
-        };
-        // `open` 对「同一个 id」是幂等的（认为已经有数据就不重载），所以先清空，
-        // 把摘要留给下一轮，页面不必从空白开始画页头。
-        let summary = self.playlist.take();
-        self.clear();
-        self.open(Some(id), summary, cx);
     }
 
     /// 「喜欢的音乐」（`special_type == 5`）的歌曲集合就是账号的喜欢列表，
@@ -101,99 +83,38 @@ impl PlaylistDetail {
         if !is_liked_playlist {
             return false;
         }
-        let before = self.songs.len();
-        self.songs.retain(|song| liked.contains(&song.id));
-        let mut changed = self.songs.len() != before;
+        let Some(songs) = self.songs.value_mut() else {
+            return false;
+        };
+        let before = songs.len();
+        songs.retain(|song| liked.contains(&song.id));
+        let mut changed = songs.len() != before;
         // 缓存里可能有同时点亮的多首；HashMap 顺序不定，按 id 排一下，
         // 免得画面每次重绘都换一个插入顺序。
         let mut added: Vec<&Song> = cache
             .iter()
             .filter(|(id, _)| liked.contains(id))
             .map(|(_, song)| song)
-            .filter(|song| !self.songs.iter().any(|existing| existing.id == song.id))
+            .filter(|song| !songs.iter().any(|existing| existing.id == song.id))
             .collect();
         added.sort_by_key(|song| song.id);
         for song in added {
-            self.songs.insert(0, song.clone());
+            songs.insert(0, song.clone());
             changed = true;
         }
         if changed {
             // 表头的歌曲数取自 track_count，增删了行要一起更新。
             if let Some(playlist) = self.playlist.as_mut() {
-                playlist.track_count = self.songs.len();
+                playlist.track_count = songs.len();
             }
         }
         changed
-    }
-
-    fn clear(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
-        if let Some(request) = self.request.take() {
-            request.abort();
-        }
-        self.id = None;
-        self.playlist = None;
-        self.songs.clear();
-        self.loading = false;
-        self.error = None;
-    }
-
-    /// 详情已到、歌曲还在下：先把头部换掉，页面继续显示加载态。
-    fn loaded_meta(&mut self, id: u64, generation: u64, playlist: Playlist) -> bool {
-        if self.id != Some(id) || self.generation != generation {
-            return false;
-        }
-        self.playlist = Some(playlist);
-        true
-    }
-
-    fn finish(&mut self, id: u64, generation: u64, result: Result<Vec<Song>, String>) -> bool {
-        // 取消网络任务之外，再拦截已经送回界面的旧结果。
-        if self.id != Some(id) || self.generation != generation {
-            return false;
-        }
-        self.request = None;
-        self.loading = false;
-        match result {
-            Ok(songs) => {
-                self.songs = songs;
-                self.error = None;
-            }
-            Err(message) => self.error = Some(message),
-        }
-        true
-    }
-}
-
-impl Drop for PlaylistDetail {
-    fn drop(&mut self) {
-        if let Some(request) = self.request.take() {
-            request.abort();
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn switching_playlists_discards_old_results_and_clears_rows() {
-        let mut detail = PlaylistDetail::default();
-        detail.id = Some(2);
-        detail.loading = true;
-        detail.songs = vec![Song::default()];
-        detail.generation = 3;
-        assert!(!detail.finish(1, 2, Err("旧歌单失败".into())));
-        assert!(!detail.finish(2, 1, Err("切回同一个歌单的旧结果".into())));
-        assert!(detail.loading && detail.error.is_none());
-        assert!(detail.finish(2, 3, Err("当前歌单失败".into())));
-        assert!(!detail.loading);
-        assert_eq!(detail.error.as_deref(), Some("当前歌单失败"));
-        detail.clear();
-        assert!(detail.id.is_none() && detail.songs.is_empty() && detail.error.is_none());
-        assert_eq!(detail.generation, 4);
-    }
 
     fn playlist_with_special_type(special_type: u32) -> Playlist {
         serde_json::from_value(serde_json::json!({
@@ -214,13 +135,19 @@ mod tests {
 
     #[test]
     fn liked_playlist_drops_unliked_songs_and_updates_count() {
-        let mut detail = PlaylistDetail::default();
-        detail.playlist = Some(playlist_with_special_type(5));
-        detail.songs = vec![song(1), song(2)];
+        let mut detail = PlaylistDetail {
+            playlist: Some(playlist_with_special_type(5)),
+            ..Default::default()
+        };
+        detail.songs.set(vec![song(1), song(2)]);
         let liked: HashSet<u64> = [2].into_iter().collect();
         assert!(detail.reconcile_liked(&liked, &HashMap::new()));
         assert_eq!(
-            detail.songs.iter().map(|song| song.id).collect::<Vec<_>>(),
+            detail
+                .songs()
+                .iter()
+                .map(|song| song.id)
+                .collect::<Vec<_>>(),
             vec![2]
         );
         assert_eq!(detail.playlist.as_ref().unwrap().track_count, 1);
@@ -230,28 +157,36 @@ mod tests {
 
     #[test]
     fn liked_playlist_inserts_newly_liked_song_from_cache() {
-        let mut detail = PlaylistDetail::default();
-        detail.playlist = Some(playlist_with_special_type(5));
-        detail.songs = vec![song(2)];
+        let mut detail = PlaylistDetail {
+            playlist: Some(playlist_with_special_type(5)),
+            ..Default::default()
+        };
+        detail.songs.set(vec![song(2)]);
         let liked: HashSet<u64> = [1, 2].into_iter().collect();
         let cache = HashMap::from([(1, song(1))]);
         assert!(detail.reconcile_liked(&liked, &cache));
         // 新喜欢的是插到队首（服务器歌单也是新喜欢的在前）。
         assert_eq!(
-            detail.songs.iter().map(|song| song.id).collect::<Vec<_>>(),
+            detail
+                .songs()
+                .iter()
+                .map(|song| song.id)
+                .collect::<Vec<_>>(),
             vec![1, 2]
         );
         // 已经在列表里的不会被重复插入。
         assert!(!detail.reconcile_liked(&liked, &cache));
-        assert_eq!(detail.songs.len(), 2);
+        assert_eq!(detail.songs().len(), 2);
     }
 
     #[test]
     fn ordinary_playlists_keep_songs_when_unliked() {
-        let mut detail = PlaylistDetail::default();
-        detail.playlist = Some(playlist_with_special_type(0));
-        detail.songs = vec![song(1)];
+        let mut detail = PlaylistDetail {
+            playlist: Some(playlist_with_special_type(0)),
+            ..Default::default()
+        };
+        detail.songs.set(vec![song(1)]);
         assert!(!detail.reconcile_liked(&HashSet::new(), &HashMap::from([(1, song(1))])));
-        assert_eq!(detail.songs.len(), 1);
+        assert_eq!(detail.songs().len(), 1);
     }
 }

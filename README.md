@@ -92,45 +92,11 @@ macOS 包使用本地 ad-hoc 签名，没有 Developer ID 签名和公证。可�
 
 音频下载直接使用标准 `reqwest`；GPUI 图片请求使用 `reqwest-client` 适配器。适配器内部依赖 `gpui-pre-reqwest` 分支，因此两者各自复用客户端和连接池。
 
-## 目录结构
+## 项目结构
 
-```text
-src/
-├── main.rs                  初始化与应用组装
-├── api.rs                   网络客户端、Tokio 运行时及统一请求校验
-├── api/                     歌曲、歌单、推荐、消息接口与回归测试
-├── auth.rs                  二维码登录请求、扫码状态和凭据解析
-├── models/                  歌曲、歌单、用户及播放资源的数据模型
-├── state/                   账号、音乐库、歌单、推荐与搜索的共享状态
-│   └── library/collection.rs 收藏请求、部分成功记账与结果通知
-├── playback/
-│   ├── controller.rs        统一播放接口、队列和 GPUI 状态通知
-│   ├── engine.rs            音频设备、播放源、暂停和音量
-│   ├── stream.rs            音源组装、跳转和取消生命周期
-│   └── stream/
-│       ├── download.rs      HTTP Range 下载和字节缓存
-│       ├── decode.rs        Symphonia 解析、定位和解码
-│       ├── output.rs        PCM 队列与 f32 帧输出
-│       └── tests.rs         本地 HTTP 与音频回归测试
-└── ui/
-    ├── shell.rs             主窗口、导航事件和播放覆盖层
-    ├── shell/content.rs     页面生命周期、工具栏与侧栏布局
-    ├── login.rs             扫码登录与退出账号窗口
-    ├── sidebar.rs           侧栏
-    ├── pages/               页面
-    ├── components/          播放栏、浮层、通用表格及歌曲行展示
-    ├── comments/            评论加载、分页、输入框及评论页面
-    ├── now_playing/page/    歌词视图与两屏滚动协调
-    ├── assets.rs            资源加载与缩略图地址
-    └── theme.rs             字体与主题
+`api/` 负责接口，`models/` 负责类型和解析，`state/` 持有共享数据，`ui/` 订阅数据并渲染，`playback/` 管理队列、音频和缓存。页面进入时后台刷新，已有内容保留到新数据返回。
 
-assets/                      图标、图片和字体
-docs/architecture.md         模块职责与播放链路说明
-```
-
-共享业务状态由 GPUI Entity 管理，View 观察通知并渲染。界面通过 `PlaybackController` 提交播放命令，通过只读 `snapshot()` 获取状态；底层音频引擎不依赖 GPUI。
-
-详细设计见 [架构文档](docs/architecture.md)。
+架构约定与播放链路见 [docs/architecture.md](docs/architecture.md)。开发时默认向控制台输出请求状态与耗时，可用 `RUST_LOG=warn,netease_music_gpui=debug cargo run --locked` 调整日志级别。
 
 ## 开发验证
 

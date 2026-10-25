@@ -1,6 +1,7 @@
 mod api;
 mod auth;
 mod desktop;
+mod logging;
 mod models;
 mod persistence;
 mod playback;
@@ -21,11 +22,13 @@ use ui::{
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    logging::init();
+    log::info!("starting application");
     let assets = Assets::new()?;
     let persistence = Persistence::new()?;
     // 登录凭据只来自本地保存的会话；没有就进登录窗扫码。
     let cookie = persistence.load_session().unwrap_or_else(|error| {
-        eprintln!("读取登录凭据失败：{error}");
+        log::warn!("读取登录凭据失败：{error}");
         None
     });
     let has_session = cookie.is_some();

@@ -33,6 +33,7 @@ struct PendingHeartPlayback {
 pub struct RecommendPage {
     store: Entity<RecommendStore>,
     _store_subscription: Subscription,
+    _daily_subscription: Subscription,
     _playback_subscription: Subscription,
     pending_heart: Option<PendingHeartPlayback>,
     daily: Entity<DailySongsStore>,
@@ -79,9 +80,11 @@ impl RecommendPage {
                 }
             }
         });
+        let daily_subscription = cx.observe(&daily, |_, _, cx| cx.notify());
         Self {
             store,
             _store_subscription: subscription,
+            _daily_subscription: daily_subscription,
             _playback_subscription: playback_subscription,
             pending_heart: None,
             daily,
@@ -94,6 +97,7 @@ impl RecommendPage {
     /// 切回本页时静默刷新一次：离开期间推荐内容可能变了。
     pub fn revalidate(&mut self, cx: &mut Context<Self>) {
         self.store.update(cx, |store, cx| store.revalidate(cx));
+        self.daily.update(cx, |daily, cx| daily.revalidate(cx));
     }
 
     pub fn content(
@@ -142,8 +146,20 @@ impl RecommendPage {
                         |cover| track_cover_url(Some(cover), 300).into(),
                     )
                 }
-                QuickEntryKind::Radar if store.radar_first_song_cover.is_some() => {
-                    track_cover_url(store.radar_first_song_cover.as_deref(), 300).into()
+                QuickEntryKind::Radar
+                    if store
+                        .radar_first_song_cover
+                        .value()
+                        .is_some_and(Option::is_some) =>
+                {
+                    track_cover_url(
+                        store
+                            .radar_first_song_cover
+                            .value()
+                            .and_then(|cover| cover.as_deref()),
+                        300,
+                    )
+                    .into()
                 }
                 _ => match &entry.cover {
                     Some(cover) => track_cover_url(Some(cover), 300).into(),
@@ -167,19 +183,18 @@ impl RecommendPage {
         let mut entries = store.entries.value().cloned().unwrap_or_default();
         for entry in &mut entries {
             if entry.kind == QuickEntryKind::HeartMode {
-                entry.caption = if let Some(song) =
-                    store.heart.value().and_then(|heart| heart.songs.first())
-                {
-                    format!("心动模式 | 从「{}」听起", song.name).into()
-                } else if store.heart.is_loading() {
-                    "正在准备心动推荐…".into()
-                } else if let Some(error) = store.heart.error() {
-                    format!("{error} · 点击重试").into()
-                } else if self.library.read(cx).user_id == 0 {
-                    "登录后从你喜欢的歌听起".into()
-                } else {
-                    "你的红心歌曲和更多相似推荐".into()
-                };
+                entry.caption =
+                    if let Some(song) = store.heart.value().and_then(|heart| heart.songs.first()) {
+                        format!("心动模式 | 从「{}」听起", song.name).into()
+                    } else if store.heart.is_loading() {
+                        "正在准备心动推荐…".into()
+                    } else if store.heart.error().is_some() {
+                        "暂时无法获取推荐 · 点击重试".to_string().into()
+                    } else if self.library.read(cx).user_id == 0 {
+                        "登录后从你喜欢的歌听起".into()
+                    } else {
+                        "你的红心歌曲和更多相似推荐".into()
+                    };
             }
             if entry.kind == QuickEntryKind::DailySongs {
                 entry.caption = self.daily.read(cx).songs().first().map_or_else(
@@ -207,7 +222,11 @@ impl RecommendPage {
             ));
         }
         page = page.child(self.recommended_section(columns, colors, cx));
-        let radar = store.radar.value().map(|radar| radar.as_slice()).unwrap_or(&[]);
+        let radar = store
+            .radar
+            .value()
+            .map(|radar| radar.as_slice())
+            .unwrap_or(&[]);
         if !radar.is_empty() {
             page = page.child(
                 div()
@@ -215,13 +234,7 @@ impl RecommendPage {
                     .flex_col()
                     .gap(px(16.))
                     .child(section_title("雷达歌单", colors))
-                    .child(playlist_row(
-                        radar,
-                        columns,
-                        colors,
-                        "recommend-radar",
-                        cx,
-                    )),
+                    .child(playlist_row(radar, columns, colors, "recommend-radar", cx)),
             );
         }
         let featured = store
@@ -536,7 +549,11 @@ impl RecommendPage {
         cx: &Context<Self>,
     ) -> AnyElement {
         let store = self.store.read(cx);
-        let playlists = store.playlists.value().map(|list| list.as_slice()).unwrap_or(&[]);
+        let playlists = store
+            .playlists
+            .value()
+            .map(|list| list.as_slice())
+            .unwrap_or(&[]);
         if store.playlists.is_loading() && playlists.is_empty() {
             return div()
                 .w_full()
@@ -548,7 +565,7 @@ impl RecommendPage {
         }
         if playlists.is_empty() && store.playlists.value().is_none() {
             return match store.playlists.error() {
-                Some(error) => div()
+                Some(_) => div()
                     .w_full()
                     .py(px(36.))
                     .flex()
@@ -557,7 +574,7 @@ impl RecommendPage {
                     .gap(px(8.))
                     .text_size(px(14.))
                     .text_color(colors.muted_foreground)
-                    .child(error.to_string())
+                    .child("推荐加载失败，请重试")
                     .child(
                         Button::new("recommend-retry")
                             .child("重试")
@@ -567,7 +584,7 @@ impl RecommendPage {
                     )
                     .into_any_element(),
                 None => {
-                    centered_empty("images/empty/cm_empty_wuzuizen.png", "暂无推荐歌单", colors)
+                    centered_empty("images/empty/cm_empty_wuzuopin.png", "暂无推荐歌单", colors)
                         .into_any_element()
                 }
             };

@@ -54,7 +54,7 @@ use crate::ui::components::{
 };
 use crate::ui::cover_color::{Backdrop, blend_color};
 use crate::ui::events::{
-    CommentPublished, Navigate, NavigationBus, PlaylistCommentsTab, PlaylistMetadataChanged,
+    CommentCountChanged, Navigate, NavigationBus, PlaylistCommentsTab, PlaylistMetadataChanged,
 };
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
 
@@ -93,14 +93,14 @@ pub struct PlaylistPage {
     is_favorite_view: bool,
     tabs: Entity<TabBar>,
     _tabs_subscription: Subscription,
-    /// 发布成功后页签上的评论数要跟着加，订阅的是评论列表。
-    _comment_published_subscription: Subscription,
+    /// 页签计数跟随评论接口返回的总数。
+    _comment_count_subscription: Subscription,
     library: Entity<MusicLibrary>,
     playback: Entity<PlaybackController>,
     _playback_subscription: Subscription,
     _library_subscription: Subscription,
     _collect_subscription: Subscription,
-    /// 原始歌单顺序保存在 detail.songs；这里只保存显示顺序。
+    /// 原始歌单顺序保存在 detail.songs()；这里只保存显示顺序。
     display_order: Vec<usize>,
     /// 按原始歌曲索引缓存；排序只改变 display_order，不复制展示数据。
     song_display: Vec<SongDisplay>,
@@ -248,7 +248,7 @@ impl PlaylistPage {
                 comments_tab = on_comments;
                 cx.emit(PlaylistCommentsTab);
             }
-            // 同一资源重复设置不会重载，切回页签保留评论和滚动位置。
+            // 进入页签就刷新，等待期间保留原评论。
             if on_comments {
                 let detail = this.detail.read(cx);
                 // 详情里已经有评论数了，先用它渲染标题，别让标题空等到第一页回来。
@@ -272,9 +272,9 @@ impl PlaylistPage {
             let (liked, cache, ready) = {
                 let library = library.read(cx);
                 (
-                    library.liked_song_ids.clone(),
+                    library.likes.value().cloned().unwrap_or_default(),
                     library.liked_song_cache.clone(),
-                    !library.loading && library.likes_error.is_none(),
+                    library.likes.value().is_some(),
                 )
             };
             if ready {
@@ -329,7 +329,7 @@ impl PlaylistPage {
                 this.comments.clear_draft(window, cx);
             }
             let detail = detail.read(cx);
-            this.song_display = detail.songs.iter().map(SongDisplay::new).collect();
+            this.song_display = detail.songs().iter().map(SongDisplay::new).collect();
             // 列宽跟着显示行数走（序号列按位数定宽），过滤后也要重算。
             this.rebuild_display_order(cx);
             let playlist = detail.playlist.as_ref();
@@ -379,24 +379,23 @@ impl PlaylistPage {
             this.rebuild_display_order(cx);
             cx.notify();
         });
-        // 发布评论成功后，页签上的评论数要跟着加。它取的是详情里的
-        // `comment_count` —— 那是接口给的快照，不改就跟列表里的总数对不上。
-        // 列表那边会重新拉第一页把总数换成服务端那份，这里先补上这一条。
         let comments_list = comments.list().clone();
-        let comment_published_subscription =
-            cx.subscribe(&comments_list, |this, _, _: &CommentPublished, cx| {
+        let comment_count_subscription = cx.subscribe(
+            &comments_list,
+            |this, _, event: &CommentCountChanged, cx| {
+                if Some(event.resource) != this.detail.read(cx).id.map(CommentResource::Playlist) {
+                    return;
+                }
                 this.detail.update(cx, |detail, cx| {
-                    if let Some(count) = detail
-                        .playlist
-                        .as_mut()
-                        .and_then(|playlist| playlist.comment_count.as_mut())
+                    if let Some(playlist) = detail.playlist.as_mut()
+                        && playlist.comment_count != Some(event.total)
                     {
-                        *count += 1;
+                        playlist.comment_count = Some(event.total);
+                        cx.notify();
                     }
-                    // 详情变了，下面那条订阅会重算页签上的三个数字。
-                    cx.notify();
                 });
-            });
+            },
+        );
         Self {
             detail,
             comments,
@@ -405,7 +404,7 @@ impl PlaylistPage {
             is_favorite_view: false,
             tabs,
             _tabs_subscription: tabs_subscription,
-            _comment_published_subscription: comment_published_subscription,
+            _comment_count_subscription: comment_count_subscription,
             library,
             playback,
             _playback_subscription: playback_subscription,
@@ -443,6 +442,13 @@ impl PlaylistPage {
                 )
                 .into_any_element(),
             _ => view.into_any_element(),
+        }
+    }
+
+    pub fn revalidate(&mut self, cx: &mut Context<Self>) {
+        self.detail.update(cx, |detail, cx| detail.reload(cx));
+        if self.comments_active(cx) {
+            self.comments.refresh(cx);
         }
     }
 
@@ -487,7 +493,7 @@ impl PlaylistPage {
         let summary = summary.or_else(|| {
             self.library
                 .read(cx)
-                .playlists
+                .playlists()
                 .iter()
                 .find(|playlist| Some(playlist.id) == id)
                 .cloned()
@@ -517,7 +523,7 @@ impl PlaylistPage {
                     let songs = this
                         .display_order
                         .iter()
-                        .map(|&index| detail.songs[index].clone())
+                        .map(|&index| detail.songs()[index].clone())
                         .collect();
                     this.playback.update(cx, |playback, cx| {
                         playback.play_list_from_start(playlist_id, songs, cx);
@@ -841,7 +847,7 @@ impl PlaylistPage {
 
     /// 显示顺序 = 命中关键词的行，按当前排序排好。
     ///
-    /// 过滤和排序都只改 `display_order`（`detail.songs` 的下标），歌曲数据本身不动，
+    /// 过滤和排序都只改 `display_order`（`detail.songs()` 的下标），歌曲数据本身不动，
     /// 列宽跟着显示行数重算，序号列因此在过滤后自动收窄。
     ///
     /// 顺带把 trim 后的关键词存进 `search_keyword` 供高亮用。保持原始大小写：
@@ -849,7 +855,7 @@ impl PlaylistPage {
     fn rebuild_display_order(&mut self, cx: &App) {
         let sort = self.sort;
         let keyword: SharedString = self.search_input.read(cx).value().trim().into();
-        let songs = &self.detail.read(cx).songs;
+        let songs = &self.detail.read(cx).songs();
         let matched = (0..songs.len())
             .filter(|&index| keyword.is_empty() || song_matches(&songs[index], &keyword))
             .collect();
@@ -966,7 +972,7 @@ impl PlaylistPage {
         let songs = self
             .display_order
             .iter()
-            .map(|&index| detail.songs[index].clone())
+            .map(|&index| detail.songs()[index].clone())
             .collect();
         self.playback.update(cx, |playback, cx| {
             playback.play_list(playlist_id, songs, song_id, cx);
@@ -1155,7 +1161,7 @@ impl PlaylistPage {
         let colors = Theme::global(cx).tokens.colors;
         let library = self.library.read(cx);
         let detail = self.detail.read(cx);
-        let song = &detail.songs[self.display_order[index]];
+        let song = &detail.songs()[self.display_order[index]];
         let display = &self.song_display[self.display_order[index]];
         let song_id = song.id;
         let like_song = song.clone();
@@ -1179,7 +1185,7 @@ impl PlaylistPage {
             .is_some_and(|current| current.id == song_id);
         let is_playing = playback.snapshot().is_playing;
         let play_requested = playback.is_play_requested();
-        let liked = library.liked_song_ids.contains(&song_id);
+        let liked = library.is_liked(song_id);
         let album_name = song
             .al
             .name
@@ -1394,30 +1400,37 @@ impl Render for PlaylistPage {
         let library = self.library.read(cx);
         let detail = self.detail.read(cx);
         let error = detail
-            .error
-            .as_ref()
+            .songs
+            .error()
+            .filter(|_| detail.songs.value().is_none())
             .or_else(|| {
                 if detail.id.is_none() {
-                    library.error.as_ref()
+                    library.playlists.error()
                 } else {
                     None
                 }
             })
-            .cloned();
+            .map(|_| "内容加载失败，请重试");
         let content = match active_tab {
-            _ if detail.loading || (detail.id.is_none() && library.loading) => div()
-                .id("playlist-loading")
-                .aria_label("加载中")
-                .w_full()
-                .py(px(36.))
-                .flex()
-                .justify_center()
-                .child(spinner(
-                    "playlist-loading-animation",
-                    20.,
-                    colors.muted_foreground,
-                ))
-                .into_any_element(),
+            _ if detail.songs.is_loading() && detail.songs.value().is_none()
+                || (detail.id.is_none()
+                    && library.playlists.is_loading()
+                    && library.playlists.value().is_none()) =>
+            {
+                div()
+                    .id("playlist-loading")
+                    .aria_label("加载中")
+                    .w_full()
+                    .py(px(36.))
+                    .flex()
+                    .justify_center()
+                    .child(spinner(
+                        "playlist-loading-animation",
+                        20.,
+                        colors.muted_foreground,
+                    ))
+                    .into_any_element()
+            }
             // 未登录（库级错误）时与官方一致：不弹登录提示，直接给空状态插画。
             _ if error.is_some() && detail.id.is_none() && library.user_id == 0 => {
                 centered_empty("images/empty/cm_empty_wuzuopin.png", "空空如也", colors)
@@ -1430,7 +1443,7 @@ impl Render for PlaylistPage {
                     message.child(Button::new("playlist-retry").ml_2().child("重试").on_click(
                         cx.listener(|this, _, _, cx| {
                             if this.detail.read(cx).id.is_some() {
-                                this.open(this.playlist_id, None, cx);
+                                this.detail.update(cx, |detail, cx| detail.reload(cx));
                             } else {
                                 this.library.update(cx, |library, cx| library.retry(cx));
                             }
@@ -1465,7 +1478,7 @@ impl Render for PlaylistPage {
                     self.columns.clone(),
                     self.display_order.len(),
                     |this, index, _, cx| this.song_cells(index, cx),
-                    |this, index, cx| this.detail.read(cx).songs[this.display_order[index]].id,
+                    |this, index, cx| this.detail.read(cx).songs()[this.display_order[index]].id,
                     {
                         let view = cx.entity();
                         let sort = self.sort;
@@ -1537,7 +1550,7 @@ impl Render for PlaylistPage {
                         let Some(song) = this
                             .detail
                             .read(cx)
-                            .songs
+                            .songs()
                             .iter()
                             .find(|song| song.id == key)
                             .cloned()
@@ -1583,15 +1596,6 @@ impl Render for PlaylistPage {
                         .then(|| self.search_box(progress, has_value, border, colors, cx)),
                 ),
             )
-            // 具体内容区域
-            .when_some(library.likes_error.as_ref(), |page, message| {
-                page.child(
-                    div()
-                        .text_color(colors.muted_foreground)
-                        .text_size(px(12.))
-                        .child(format!("喜欢状态暂不可用：{message}")),
-                )
-            })
             .child(content)
             .child(
                 canvas(

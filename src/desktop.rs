@@ -85,7 +85,7 @@ pub fn init(
     cx.spawn(async |cx| {
         cx.update(|cx| match create_tray(cx) {
             Ok(tray) => cx.global_mut::<Desktop>()._tray = Some(tray),
-            Err(error) => eprintln!("系统托盘初始化失败：{error}"),
+            Err(error) => log::warn!("系统托盘初始化失败：{error}"),
         });
     })
     .detach();
@@ -248,7 +248,7 @@ fn dock_menu_state(
             .snapshot()
             .current_song
             .as_ref()
-            .is_some_and(|song| library.read(cx).liked_song_ids.contains(&song.id)),
+            .is_some_and(|song| library.read(cx).is_liked(song.id)),
         heart_reachable: player.heart_reachable(),
     }
 }
@@ -332,7 +332,7 @@ pub fn handle_open_urls(urls: Vec<String>, cx: &mut App) {
     for url in urls {
         match parse_orpheus_url(&url) {
             Some(target) => targets.push(target),
-            None => eprintln!("忽略无法识别的唤起链接：{url}"),
+            None => log::warn!("忽略无法识别的唤起链接"),
         }
     }
     if targets.is_empty() {
@@ -378,7 +378,7 @@ fn play_orpheus_target(target: OrpheusTarget, playback: Entity<PlaybackControlle
         let songs = match fetched {
             Ok(songs) => songs,
             Err(error) => {
-                eprintln!("打开网页唤起的内容失败：{error}");
+                log::warn!("打开网页唤起的内容失败：{error}");
                 return;
             }
         };
@@ -425,7 +425,7 @@ pub fn close_window(window: &mut Window, cx: &mut App) {
             handle
                 .update(cx, |_, window, _| {
                     if let Err(error) = hide_native_window(window) {
-                        eprintln!("隐藏窗口失败：{error}");
+                        log::warn!("隐藏窗口失败：{error}");
                     }
                 })
                 .ok();
@@ -444,7 +444,7 @@ pub fn show_window(cx: &mut App) {
         .update(cx, |_, window, cx| {
             #[cfg(target_os = "windows")]
             if let Err(error) = show_native_window(window) {
-                eprintln!("显示窗口失败：{error}");
+                log::warn!("显示窗口失败：{error}");
             }
             cx.activate(true);
             window.activate_window();
@@ -473,7 +473,7 @@ pub fn show_window(cx: &mut App) {
             cx.global_mut::<Desktop>().window = window;
             cx.activate(true);
         }
-        Err(error) => eprintln!("显示窗口失败：{error}"),
+        Err(error) => log::warn!("显示窗口失败：{error}"),
     }
 }
 

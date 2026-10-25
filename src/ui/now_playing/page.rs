@@ -102,7 +102,7 @@ impl NowPlayingPage {
         let scroll = ScrollHandle::default();
         let lyrics = cx.new(|cx| LyricsView::new(playback.clone(), backdrop.clone(), cx));
         // 评论区自己吃不下滚轮位移时让事件冒泡，交给外层平台滚动。
-        let comments = cx.new(|_| CommentsView::new(Some(backdrop.clone())));
+        let comments = cx.new(|cx| CommentsView::new(Some(backdrop.clone()), cx));
         let mut source = source_name(&library, &playback, cx);
         let library_playback = playback.clone();
         let library_subscription = cx.observe(&library, move |this, library, cx| {
@@ -858,7 +858,7 @@ fn source_name(
     let id = playback.read(cx).playlist_id()?;
     library
         .read(cx)
-        .playlists
+        .playlists()
         .iter()
         .find(|playlist| playlist.id == id)
         .map(|playlist| playlist.name.clone())

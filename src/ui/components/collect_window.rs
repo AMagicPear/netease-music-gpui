@@ -65,7 +65,7 @@ pub fn open_collect_window(parent: &Window, songs: Vec<Song>, cx: &mut App) {
         ..Default::default()
     };
     let Some(library) = desktop::library(cx) else {
-        eprintln!("音乐库尚未就绪，无法打开收藏窗口");
+        log::warn!("音乐库尚未就绪，无法打开收藏窗口");
         return;
     };
     match gpui_kit::open_window(options, cx, move |window, cx| {
@@ -78,7 +78,7 @@ pub fn open_collect_window(parent: &Window, songs: Vec<Song>, cx: &mut App) {
         cx.new(|cx| CollectWindow::new(library, songs, window, cx))
     }) {
         Ok((window, _)) => desktop::set_collect_window(Some(window), cx),
-        Err(error) => eprintln!("打开收藏窗口失败：{error}"),
+        Err(error) => log::warn!("打开收藏窗口失败：{error}"),
     }
 }
 
@@ -195,7 +195,7 @@ impl CollectWindow {
                 self.creating = false;
                 self.close(window, cx);
             }
-            Err(message) => eprintln!("收藏失败：{message}"),
+            Err(message) => log::warn!("收藏失败：{message}"),
         }
         cx.notify();
     }
@@ -213,7 +213,7 @@ impl CollectWindow {
 
     fn playlist_rows(&self, colors: ColorTokens, cx: &Context<Self>) -> Vec<AnyElement> {
         let library = self.library.read(cx);
-        let mut rows = Vec::with_capacity(library.playlists.len() + 1);
+        let mut rows = Vec::with_capacity(library.playlists().len() + 1);
         if self.creating {
             rows.push(self.create_row(colors, cx));
         } else {
@@ -228,7 +228,7 @@ impl CollectWindow {
         }
         let playlists = library.favorite_playlist().into_iter().chain(
             library
-                .playlists
+                .playlists()
                 .iter()
                 .filter(|playlist| playlist.special_type != 5),
         );
