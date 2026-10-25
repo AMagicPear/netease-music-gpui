@@ -8,6 +8,7 @@
 - `gpui-image-transform-0.3.8.patch`：图片 GPU 旋转。
 - `gpui-backdrop-blur-0.3.8.patch`：圆角矩形背景模糊（毛玻璃）。
 - `gpui-svg-app-fonts-0.3.8.patch`：SVG 文本加载 `assets/font/` 中的应用字体，用于推荐页日历等图案。
+- `gpui-text-whitespace-0.3.8.patch`：区分空白折叠与保留换行，维护原文索引。
 
 首次构建或补丁更新后，在项目根目录运行：
 
@@ -40,7 +41,6 @@ Metal 构建脚本从同级 `gpui-pre` 生成共享结构，避免 Rust 与 shad
 升级补丁后先运行 `cargo check --locked --all-targets`，再手动启动应用，检查旋转方向、圆形裁剪和背景衔接。GPU 绘制效果需要在对应平台实际查看。
 
 背景模糊接口：
-
 ```rust
 window.paint_backdrop_blur(bounds, px(12.), px(20.).into());
 ```
@@ -57,6 +57,33 @@ Metal 后端每帧把 drawable 拷进一张带 mip 链的纹理：
 - 需要 `layer.set_framebuffer_only(false)` 才能读取 drawable，这是该接口开启的。
 
 WGPU 后端目前忽略该批次（Windows/Linux 上不绘制模糊）；需要在其他平台使用时照样补一个实现。
+
+文本空白规则：
+
+上游 GPUI 排版时无条件按 `\n` 切物理行，`white-space: nowrap` 只关掉「按宽度软换行」，
+所以正文里的换行会另起一行，把固定行高的行撑开。这个补丁提供类似 CSS 的基础空白模式：
+
+- `normal`（默认）与 `nowrap`：连续的空格、制表符、换行折成一个空格，首尾空白丢弃。
+  换行不再另起一行，只有宽度不够时才折行。
+- `pre-wrap`（新增 `.whitespace_pre_wrap()`）：保留空格、制表符和换行，超长仍折行。
+  CRLF、CR 和换页符统一为 LF；不折叠 NBSP、全角空格等其他 Unicode 空白。
+  需要「作者手写的分段」时用它，例如评论正文。
+
+只为空白被替换的区间记录偏移映射，普通文字按偏移差换算，不建立逐字节双表。
+截断单独记录被省略号替换的范围，支持头部、尾部、中间截断和多行省略。
+`TextLayout::len()`、位置查询和命中查询始终使用原文 UTF-8 字节索引；
+截掉的内部索引没有绘制位置，省略号不作为原文链接命中。
+`text()` / `wrapped_text()` 返回排版后的显示文本，不保证长度等于原文。
+
+这不是完整的 CSS 排版引擎：转换以单个文本元素为边界，软换行仍使用 GPUI 的规则，
+不实现跨元素空白合并、语言相关的换行转换和 CSS 行边缘空格消除。
+评论正文使用本地 `SelectableText`，复用 gpui-base 的拖选和复制状态，逐行按实际文字宽度绘制高亮。
+
+纯文本转换与偏移边界回归（不启动窗口）：
+
+```bash
+cargo test --locked --test text_whitespace
+```
 
 升级 GPUI 时，更新准备脚本中的版本与发布包 SHA-256，并重新生成、验证 patch。
 如果上游提供同等接口，可删除补丁、准备脚本和 Cargo 中的路径覆盖。

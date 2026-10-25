@@ -339,6 +339,9 @@ fn message_row(item: &MessageItem, colors: ColorTokens) -> AnyElement {
         .items_center()
         .gap(px(12.))
         .px(ROW_PADDING)
+        // 行高是固定的，内容一旦多出高度就会压到下一行；这里裁掉溢出，
+        // 保证「最多两行文字」这条约定在极端数据下也成立。
+        .overflow_hidden()
         .child(
             div()
                 .relative()
@@ -413,7 +416,8 @@ fn message_row(item: &MessageItem, colors: ColorTokens) -> AnyElement {
                                 .child(message_time(item.time)),
                         ),
                 )
-                // 第二行：正文截断（`source` 仍会解析，UI 暂不显示）。
+                // 第二行：正文。GPUI 的空白折叠规则会把正文里的换行折成空格，
+                // 所以这里只管放不下时省略，不会把行撑高。
                 .child(
                     div()
                         .flex_1()

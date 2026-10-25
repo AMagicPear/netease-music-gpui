@@ -392,10 +392,7 @@ impl Render for CommentsView {
                 Item::Comment(row) => {
                     let comment = &view.comments[row];
                     // 顺序用评论在列表里的下标：热评在前、其余在后，与视觉顺序一致。
-                    let selection = view
-                        .selection
-                        .get(&comment.id)
-                        .map(|entry| (entry.handle.clone(), row as u64));
+                    let selection = (view.selection[&comment.id].handle.clone(), row as u64);
                     comment_row(comment, colors, selection).into_any_element()
                 }
                 Item::Footer => footer(&entity, view, colors),

@@ -6,18 +6,19 @@
 
 use gpui::prelude::*;
 use gpui::*;
-use gpui_kit::base::{ColorTokens, SelectableText, TextSelectionHandle};
+use gpui_kit::base::{ColorTokens, TextSelectionHandle};
 use gpui_kit::component::Sizable;
 use gpui_kit::component::avatar::Avatar;
 
 use crate::models::SongComment;
 use crate::ui::assets::thumbnail_url;
+use crate::ui::components::SelectableText;
 use crate::ui::theme::{DOLPHIN_FAMILY, link_blue};
 
 /// 正文的选中身份：`handle` 由列表（[`CommentsView`](super::super::CommentsView)）按评论 id
 /// 持有，`order` 是它在整个评论文档里的阅读顺序（从 0 递增）。
 ///
-/// 顺序必须显式给：gpui-kit 的 `SelectableText::new` 默认 `document_order = 0`，
+/// 顺序必须显式给，
 /// 而跨参与者选区靠这个值判断谁在前谁在后；全为 0 时跨行拖选和复制顺序都退化成
 /// 窗口注册顺序，评论一多就会选串。
 pub type CommentSelection = (TextSelectionHandle, u64);
@@ -25,7 +26,7 @@ pub type CommentSelection = (TextSelectionHandle, u64);
 pub fn comment_row(
     comment: &SongComment,
     colors: ColorTokens,
-    selection: Option<CommentSelection>,
+    selection: CommentSelection,
 ) -> impl IntoElement {
     let now = time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
     let current_year = now.year();
@@ -76,6 +77,9 @@ pub fn comment_row(
                         .text_size(px(15.))
                         .line_height(px(23.))
                         .mb_1()
+                        // 评论正文保留换行（官方客户端也是分段显示），所以用
+                        // pre-wrap 而不是默认的折叠规则。
+                        .whitespace_pre_wrap()
                         // 文本命中区本来就覆盖整个正文块，这里只把指针形状同步成 I-beam，
                         // 否则鼠标停在可选文字上仍是箭头，看不出「能选」。
                         .cursor(CursorStyle::IBeam)
@@ -117,17 +121,12 @@ pub fn comment_row(
         )
 }
 
-/// 评论正文本身。有稳定 handle 时复用它（选中身份跨帧不变），没有就退回
-/// 元素自带的独立 handle —— 后者仍可选，只是拿不到「选区变化时刷新」的订阅。
-fn body(comment: &SongComment, selection: Option<CommentSelection>) -> SelectableText {
+/// handle 由列表持有，保持跨帧选中身份和重绘订阅。
+fn body(comment: &SongComment, selection: CommentSelection) -> SelectableText {
     let id = ("comment-content", comment.id);
     // 表情在文本层就换成 Unicode 字符：选中、复制、换行都由文字系统统一处理，
     // 不需要在文本流里插图片。handle 里的文本必须与这里一致，否则选区偏移会错位。
     let text = crate::ui::emoji::expand(&comment.content).into_owned();
-    match selection {
-        Some((handle, order)) => {
-            SelectableText::with_handle(id, handle, text).document_order(order)
-        }
-        None => SelectableText::new(id, text),
-    }
+    let (handle, order) = selection;
+    SelectableText::new(id, handle, text, order)
 }

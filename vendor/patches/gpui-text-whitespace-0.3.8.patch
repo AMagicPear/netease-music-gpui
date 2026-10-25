@@ -1,0 +1,781 @@
+--- a/vendor/gpui-pre/src/elements/text.rs
++++ b/vendor/gpui-pre/src/elements/text.rs
+@@ -628,6 +628,36 @@
+     truncate_width: Option<Pixels>,
+     size: Option<Size<Pixels>>,
+     bounds: Option<Bounds<Pixels>>,
++    offset_map: Option<Arc<TextOffsetMap>>,
++    truncation: Option<TextEdit>,
++}
++
++use crate::{TextEdit, TextOffsetMap, normalize_whitespace};
++
++impl TextLayoutInner {
++    fn display_index(&self, index: usize) -> Option<usize> {
++        if index > self.len {
++            return None;
++        }
++        let index = self
++            .offset_map
++            .as_ref()
++            .map_or(index, |map| map.to_display(index));
++        if let Some(edit) = &self.truncation {
++            return edit.to_display(index);
++        }
++        Some(index)
++    }
++
++    fn source_index(&self, index: usize) -> usize {
++        let index = self
++            .truncation
++            .as_ref()
++            .map_or(index, |edit| edit.to_source(index));
++        self.offset_map
++            .as_ref()
++            .map_or(index, |map| map.to_source(index))
++    }
+ }
+ 
+ impl TextLayout {
+@@ -651,11 +681,22 @@
+         } else {
+             vec![text_style.to_run(text.len())]
+         };
++
++        let original_len = text.len();
++        let (text, runs, offset_map) =
++            match normalize_whitespace(&text, &runs, text_style.white_space) {
++                Some((text, runs, map)) => (text, runs, Some(Arc::new(map))),
++                None => (text, runs, None),
++            };
++
+         window.request_measured_layout(Default::default(), {
+             let element_state = self.clone();
+ 
+             move |known_dimensions, available_space, window, cx| {
+-                let wrap_width = if text_style.white_space == WhiteSpace::Normal {
++                let wrap_width = if matches!(
++                    text_style.white_space,
++                    WhiteSpace::Normal | WhiteSpace::PreWrap
++                ) {
+                     known_dimensions.width.or(match available_space.width {
+                         crate::AvailableSpace::Definite(x) => Some(x),
+                         _ => None,
+@@ -701,11 +742,11 @@
+                 }
+ 
+                 let mut line_wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
+-                let (text, runs) = if let Some(truncate_width) = truncate_width {
++                let (text, runs, truncation) = if let Some(truncate_width) = truncate_width {
+                     if let Some(max_lines) = text_style.line_clamp
+                         && let Some(wrap_width) = wrap_width
+                     {
+-                        line_wrapper.truncate_wrapped_line(
++                        line_wrapper.truncate_wrapped_line_with_edit(
+                             text.clone(),
+                             wrap_width,
+                             max_lines,
+@@ -727,9 +768,9 @@
+                         // whenever the honestly-shaped text fits; the shaping result
+                         // comes from the line layout cache when the same text was
+                         // already measured untruncated this frame.
+-                        (text.clone(), Cow::Borrowed(&*runs))
++                        (text.clone(), Cow::Borrowed(&*runs), None)
+                     } else {
+-                        line_wrapper.truncate_line(
++                        line_wrapper.truncate_line_with_edit(
+                             text.clone(),
+                             truncate_width,
+                             &truncation_affix,
+@@ -738,9 +779,9 @@
+                         )
+                     }
+                 } else {
+-                    (text.clone(), Cow::Borrowed(&*runs))
++                    (text.clone(), Cow::Borrowed(&*runs), None)
+                 };
+-                let len = text.len();
++                let len = original_len;
+ 
+                 let Some(lines) = window
+                     .text_system()
+@@ -761,6 +802,8 @@
+                         truncate_width,
+                         size: Some(Size::default()),
+                         bounds: None,
++                        offset_map: offset_map.clone(),
++                        truncation,
+                     });
+                     return Size::default();
+                 };
+@@ -780,6 +823,8 @@
+                     truncate_width,
+                     size: Some(size),
+                     bounds: None,
++                    offset_map: offset_map.clone(),
++                    truncation,
+                 });
+ 
+                 size
+@@ -873,6 +918,8 @@
+             return Err(0);
+         }
+ 
++        let to_source = |index| element_state.source_index(index);
++
+         let line_height = element_state.line_height;
+         let mut line_origin = bounds.origin;
+         let mut line_start_ix = 0;
+@@ -884,13 +931,27 @@
+             } else {
+                 let position_within_line = position - line_origin;
+                 match line.index_for_position(position_within_line, line_height) {
+-                    Ok(index_within_line) => return Ok(line_start_ix + index_within_line),
+-                    Err(index_within_line) => return Err(line_start_ix + index_within_line),
++                    Ok(index_within_line) => {
++                        let index = line_start_ix + index_within_line;
++                        let source = to_source(index);
++                        return if element_state
++                            .truncation
++                            .as_ref()
++                            .is_some_and(|edit| edit.display.contains(&index))
++                        {
++                            Err(source)
++                        } else {
++                            Ok(source)
++                        };
++                    }
++                    Err(index_within_line) => {
++                        return Err(to_source(line_start_ix + index_within_line));
++                    }
+                 }
+             }
+         }
+ 
+-        Err(line_start_ix.saturating_sub(1))
++        Err(to_source(line_start_ix.saturating_sub(1)))
+     }
+ 
+     /// Get the pixel position for the given byte index.
+@@ -903,6 +964,8 @@
+             .bounds
+             .expect("prepaint has not been performed");
+         let line_height = element_state.line_height;
++
++        let index = element_state.display_index(index)?;
+ 
+         let mut line_origin = bounds.origin;
+         let mut line_start_ix = 0;
+@@ -930,6 +993,7 @@
+         let element_state = element_state
+             .as_ref()
+             .expect("measurement has not been performed");
++        let index = element_state.display_index(index)?;
+         let mut line_start_ix = 0;
+ 
+         for line in &element_state.lines {
+@@ -969,12 +1033,12 @@
+         self.0.borrow().as_ref().unwrap().line_height
+     }
+ 
+-    /// The UTF-8 length of the underlying text.
++    /// The UTF-8 length of the original input, including collapsed or truncated text.
+     pub fn len(&self) -> usize {
+         self.0.borrow().as_ref().unwrap().len
+     }
+ 
+-    /// The text for this layout.
++    /// The displayed text, after whitespace normalization and truncation.
+     pub fn text(&self) -> String {
+         self.0
+             .borrow()
+--- a/vendor/gpui-pre/src/style.rs
++++ b/vendor/gpui-pre/src/style.rs
+@@ -395,11 +395,24 @@
+ /// How to handle whitespace in text
+ #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+ pub enum WhiteSpace {
+-    /// Normal line wrapping when text overflows the width of the element
++    /// Normal line wrapping when text overflows the width of the element.
++    ///
++    /// Collapse ASCII spaces, tabs and segment breaks to a single space,
++    /// dropping leading/trailing whitespace within this text element.
++    /// Soft wrapping uses GPUI's line breaker, not the full CSS text algorithm.
+     #[default]
+     Normal,
+-    /// No line wrapping, text will overflow the width of the element
++    /// No line wrapping, text will overflow the width of the element.
++    ///
++    /// Whitespace is collapsed the same way as in [`WhiteSpace::Normal`],
++    /// but the text never wraps.
+     Nowrap,
++    /// Line wrapping when text overflows the width of the element, keeping
++    /// newlines as hard line breaks.
++    ///
++    /// Preserve spaces and tabs. Normalize CRLF, CR and form feed to LF;
++    /// newlines start new lines, while long lines still wrap.
++    PreWrap,
+ }
+ 
+ /// How to truncate text that overflows the width of the element
+--- a/vendor/gpui-pre/src/styled.rs
++++ b/vendor/gpui-pre/src/styled.rs
+@@ -84,6 +84,15 @@
+         self
+     }
+ 
++    /// Sets the whitespace of the element to `pre-wrap`.
++    ///
++    /// Newlines are kept as hard line breaks, while long lines still wrap.
++    /// [Docs](https://tailwindcss.com/docs/whitespace#pre-wrap)
++    fn whitespace_pre_wrap(mut self) -> Self {
++        self.text_style().white_space = Some(WhiteSpace::PreWrap);
++        self
++    }
++
+     /// Sets the truncate overflowing text with an ellipsis (…) at the end if needed.
+     /// [Docs](https://tailwindcss.com/docs/text-overflow#ellipsis)
+     fn text_ellipsis(mut self) -> Self {
+--- a/vendor/gpui-pre/src/text_system.rs
++++ b/vendor/gpui-pre/src/text_system.rs
+@@ -3,6 +3,7 @@
+ mod line;
+ mod line_layout;
+ mod line_wrapper;
++mod whitespace;
+ 
+ pub use font_fallbacks::*;
+ pub use font_features::*;
+@@ -11,6 +12,7 @@
+ pub use line_wrapper::*;
+ use schemars::JsonSchema;
+ use serde::{Deserialize, Serialize};
++pub(crate) use whitespace::{TextEdit, TextOffsetMap, normalize_whitespace};
+ 
+ use crate::{
+     Bounds, DevicePixels, Hsla, Pixels, PlatformTextSystem, Point, Result, SharedString, Size,
+--- /dev/null
++++ b/vendor/gpui-pre/src/text_system/whitespace.rs
+@@ -0,0 +1,294 @@
++use std::ops::Range;
++
++use crate::{SharedString, TextRun, WhiteSpace};
++
++/// A replacement in byte coordinates; unchanged spans need no entries.
++#[derive(Debug, Clone)]
++pub(crate) struct TextEdit {
++    pub source: Range<usize>,
++    pub display: Range<usize>,
++}
++
++#[derive(Debug)]
++pub(crate) struct TextOffsetMap {
++    edits: Vec<TextEdit>,
++    source_len: usize,
++    display_len: usize,
++}
++
++impl TextOffsetMap {
++    pub(crate) fn to_display(&self, index: usize) -> usize {
++        let index = index.min(self.source_len);
++        let next = self.edits.partition_point(|edit| edit.source.end <= index);
++        if let Some(edit) = self.edits.get(next)
++            && index >= edit.source.start
++        {
++            return edit.display.start;
++        }
++        self.edits[..next]
++            .last()
++            .map_or(index, |edit| edit.display.end + index - edit.source.end)
++    }
++
++    pub(crate) fn to_source(&self, index: usize) -> usize {
++        let index = index.min(self.display_len);
++        let next = self.edits.partition_point(|edit| edit.display.end <= index);
++        if let Some(edit) = self.edits.get(next)
++            && index >= edit.display.start
++        {
++            return edit.source.start;
++        }
++        self.edits[..next]
++            .last()
++            .map_or(index, |edit| edit.source.end + index - edit.display.end)
++    }
++}
++
++fn is_collapsible_whitespace(c: char) -> bool {
++    matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{0C}')
++}
++
++/// Normal/nowrap collapse ASCII whitespace; pre-wrap only normalizes segment breaks.
++pub(crate) fn normalize_whitespace(
++    text: &str,
++    runs: &[TextRun],
++    white_space: WhiteSpace,
++) -> Option<(SharedString, Vec<TextRun>, TextOffsetMap)> {
++    let preserve = white_space == WhiteSpace::PreWrap;
++    let needs_normalizing = if preserve {
++        text.contains(['\r', '\u{0C}'])
++    } else {
++        text.starts_with(' ')
++            || text.ends_with(' ')
++            || text.contains("  ")
++            || text.contains(['\t', '\n', '\r', '\u{0C}'])
++    };
++    if !needs_normalizing || runs.iter().map(|run| run.len).sum::<usize>() != text.len() {
++        return None;
++    }
++
++    let mut display = String::with_capacity(text.len());
++    let mut display_runs: Vec<TextRun> = Vec::with_capacity(runs.len());
++    let mut edits = Vec::new();
++    let mut run_index = 0;
++    let mut run_end = runs.first()?.len;
++    let mut previous_run = None;
++    let mut chars = text.char_indices().peekable();
++    while let Some((start, c)) = chars.next() {
++        while start >= run_end {
++            run_index += 1;
++            run_end += runs.get(run_index)?.len;
++        }
++        let mut end = start + c.len_utf8();
++        let replacement = if !preserve && is_collapsible_whitespace(c) {
++            while let Some(&(index, c)) = chars.peek() {
++                if !is_collapsible_whitespace(c) {
++                    break;
++                }
++                end = index + c.len_utf8();
++                chars.next();
++            }
++            if display.is_empty() || end == text.len() {
++                ""
++            } else {
++                " "
++            }
++        } else if preserve && matches!(c, '\r' | '\u{0C}') {
++            if c == '\r' && chars.peek().is_some_and(|(_, c)| *c == '\n') {
++                end += 1;
++                chars.next();
++            }
++            "\n"
++        } else {
++            &text[start..end]
++        };
++        let display_start = display.len();
++        display.push_str(replacement);
++        if replacement != &text[start..end] {
++            edits.push(TextEdit {
++                source: start..end,
++                display: display_start..display.len(),
++            });
++        }
++        if !replacement.is_empty() {
++            if previous_run == Some(run_index) {
++                display_runs.last_mut().unwrap().len += replacement.len();
++            } else {
++                let mut run = runs[run_index].clone();
++                run.len = replacement.len();
++                display_runs.push(run);
++                previous_run = Some(run_index);
++            }
++        }
++    }
++    let map = TextOffsetMap {
++        edits,
++        source_len: text.len(),
++        display_len: display.len(),
++    };
++    Some((display.into(), display_runs, map))
++}
++
++impl TextEdit {
++    /// Hidden source bytes have no painted position; the two edges remain addressable.
++    pub(crate) fn to_display(&self, index: usize) -> Option<usize> {
++        if index > self.source.start && index < self.source.end {
++            None
++        } else if index >= self.source.end {
++            Some(self.display.end + index - self.source.end)
++        } else {
++            Some(index)
++        }
++    }
++
++    pub(crate) fn to_source(&self, index: usize) -> usize {
++        if index >= self.display.end {
++            self.source.end + index - self.display.end
++        } else if index >= self.display.start {
++            self.source.start
++        } else {
++            index
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn dummy_runs(text: &str) -> Vec<TextRun> {
++        vec![TextRun {
++            len: text.len(),
++            ..Default::default()
++        }]
++    }
++
++    fn normalize(text: &str, mode: WhiteSpace) -> (SharedString, Vec<TextRun>, TextOffsetMap) {
++        normalize_whitespace(text, &dummy_runs(text), mode).unwrap()
++    }
++
++    #[test]
++    fn whitespace_modes_preserve_unicode_spaces_and_normalize_segment_breaks() {
++        for mode in [WhiteSpace::Normal, WhiteSpace::Nowrap] {
++            let (text, runs, _) = normalize(" \ta\r\n\u{0c} b \n", mode);
++            assert_eq!(text.as_ref(), "a b");
++            assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), text.len());
++            for text in ["", "a b", "稻　香", "a\u{a0}b", "a\u{b}b"] {
++                assert!(normalize_whitespace(text, &dummy_runs(text), mode).is_none());
++            }
++        }
++        let (text, _, _) = normalize(" a\r\nb\rc\u{0c}d\t ", WhiteSpace::PreWrap);
++        assert_eq!(text.as_ref(), " a\nb\nc\nd\t ");
++        assert!(
++            normalize_whitespace("a\n  b\t", &dummy_runs("a\n  b\t"), WhiteSpace::PreWrap)
++                .is_none()
++        );
++    }
++
++    #[test]
++    fn whitespace_keeps_run_styles_across_collapsed_and_empty_runs() {
++        let text = " a bcd";
++        let mut runs = [2, 0, 1, 3].map(|len| TextRun {
++            len,
++            ..Default::default()
++        });
++        for (index, run) in runs.iter_mut().enumerate() {
++            run.font.family = format!("run-{index}").into();
++        }
++        let (text, result, _) = normalize_whitespace(text, &runs, WhiteSpace::Normal).unwrap();
++        assert_eq!(text.as_ref(), "a bcd");
++        assert_eq!(
++            result.iter().map(|run| run.len).collect::<Vec<_>>(),
++            [1, 1, 3]
++        );
++        assert_eq!(
++            result
++                .iter()
++                .map(|run| run.font.family.as_ref())
++                .collect::<Vec<_>>(),
++            ["run-0", "run-2", "run-3"]
++        );
++        let text = "a \t\nb";
++        let mut runs = dummy_runs(text);
++        runs[0].len = 2;
++        runs.push(TextRun {
++            len: 3,
++            ..Default::default()
++        });
++        let (_, result, _) = normalize_whitespace(text, &runs, WhiteSpace::Normal).unwrap();
++        assert_eq!(result.iter().map(|run| run.len).collect::<Vec<_>>(), [2, 1]);
++    }
++
++    #[test]
++    fn whitespace_offsets_cover_edges_multibyte_and_empty_output() {
++        for original in ["a  ", "  a", " \t\n", " 稻\r\n\t香  ", "a\r\nb"] {
++            for mode in [WhiteSpace::Normal, WhiteSpace::Nowrap, WhiteSpace::PreWrap] {
++                let Some((display, _, map)) =
++                    normalize_whitespace(original, &dummy_runs(original), mode)
++                else {
++                    continue;
++                };
++                let mut previous = 0;
++                for index in (0..=original.len()).filter(|index| original.is_char_boundary(*index))
++                {
++                    let offset = map.to_display(index);
++                    assert!(offset >= previous && display.is_char_boundary(offset));
++                    previous = offset;
++                }
++                previous = 0;
++                for index in (0..=display.len()).filter(|index| display.is_char_boundary(*index)) {
++                    let offset = map.to_source(index);
++                    assert!(offset >= previous && original.is_char_boundary(offset));
++                    assert_eq!(map.to_display(offset), index);
++                    previous = offset;
++                }
++                assert_eq!(map.to_display(usize::MAX), display.len());
++                assert_eq!(map.to_source(usize::MAX), original.len());
++            }
++        }
++        let (_, _, map) = normalize("a  ", WhiteSpace::Normal);
++        assert_eq!(map.to_display(3), 1);
++        assert_eq!(map.edits.len(), 1);
++    }
++
++    #[test]
++    fn truncation_offsets_compose_with_whitespace_in_original_coordinates() {
++        let original = "  ab  cdef  ";
++        let (_, _, map) = normalize(original, WhiteSpace::Normal);
++        // "ab cdef" -> end: "ab…", start: "…def", middle: "ab…ef".
++        for edit in [
++            TextEdit {
++                source: 2..7,
++                display: 2..5,
++            },
++            TextEdit {
++                source: 0..4,
++                display: 0..3,
++            },
++            TextEdit {
++                source: 2..5,
++                display: 2..5,
++            },
++            TextEdit {
++                source: 2..7,
++                display: 2..2,
++            },
++        ] {
++            let before = map.to_source(edit.source.start);
++            let after = map.to_source(edit.source.end);
++            let hidden = map.to_source(edit.source.start + 1);
++            assert_eq!(
++                edit.to_display(map.to_display(before)),
++                Some(edit.display.start)
++            );
++            assert_eq!(
++                edit.to_display(map.to_display(after)),
++                Some(edit.display.end)
++            );
++            assert_eq!(edit.to_display(map.to_display(hidden)), None);
++            assert_eq!(map.to_source(edit.to_source(edit.display.end)), after);
++            if !edit.display.is_empty() {
++                assert_eq!(map.to_source(edit.to_source(edit.display.start)), before);
++            }
++        }
++    }
++}
+--- a/vendor/gpui-pre/src/text_system/line_wrapper.rs
++++ b/vendor/gpui-pre/src/text_system/line_wrapper.rs
+@@ -1,4 +1,4 @@
+-use crate::{FontId, Pixels, SharedString, TextRun, TextSystem, px};
++use crate::{FontId, Pixels, SharedString, TextEdit, TextRun, TextSystem, px};
+ use collections::HashMap;
+ use std::{borrow::Cow, iter, sync::Arc};
+ 
+@@ -304,6 +304,24 @@
+         runs: &'a [TextRun],
+         truncate_from: TruncateFrom,
+     ) -> (SharedString, Cow<'a, [TextRun]>) {
++        let (text, runs, _) = self.truncate_line_with_edit(
++            line,
++            truncate_width,
++            truncation_affix,
++            runs,
++            truncate_from,
++        );
++        (text, runs)
++    }
++
++    pub(crate) fn truncate_line_with_edit<'a>(
++        &mut self,
++        line: SharedString,
++        truncate_width: Pixels,
++        truncation_affix: &str,
++        runs: &'a [TextRun],
++        truncate_from: TruncateFrom,
++    ) -> (SharedString, Cow<'a, [TextRun]>, Option<TextEdit>) {
+         if truncate_from == TruncateFrom::Middle {
+             if let Some((front_end_ix, back_start_ix)) =
+                 self.should_truncate_line_middle(&line, truncate_width, truncation_affix)
+@@ -320,32 +338,42 @@
+                     front_end_ix,
+                     back_start_ix,
+                 );
+-                return (result, Cow::Owned(runs));
++                let edit = TextEdit {
++                    source: front_end_ix..back_start_ix,
++                    display: front_end_ix..front_end_ix + truncation_affix.len(),
++                };
++                return (result, Cow::Owned(runs), Some(edit));
+             } else {
+-                return (line, Cow::Borrowed(runs));
++                return (line, Cow::Borrowed(runs), None);
+             }
+         }
+ 
+         if let Some(truncate_ix) =
+             self.should_truncate_line(&line, truncate_width, truncation_affix, truncate_from)
+         {
+-            let result = match truncate_from {
+-                TruncateFrom::Start => SharedString::from(format!(
+-                    "{truncation_affix}{}",
+-                    &line[line.ceil_char_boundary(truncate_ix + 1)..]
+-                )),
+-                TruncateFrom::End => SharedString::from(format!(
+-                    "{}{truncation_affix}",
++            let removed = match truncate_from {
++                TruncateFrom::Start => 0..line.ceil_char_boundary(truncate_ix + 1),
++                TruncateFrom::End => {
+                     line[..truncate_ix]
+                         .trim_end_matches(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
+-                )),
++                        .len()..line.len()
++                }
+                 TruncateFrom::Middle => unreachable!("Middle truncation is handled above"),
++            };
++            let result = SharedString::from(format!(
++                "{}{truncation_affix}{}",
++                &line[..removed.start],
++                &line[removed.end..]
++            ));
++            let edit = TextEdit {
++                display: removed.start..removed.start + truncation_affix.len(),
++                source: removed,
+             };
+             let mut runs = runs.to_vec();
+             update_runs_after_truncation(&result, truncation_affix, &mut runs, truncate_from);
+-            (result, Cow::Owned(runs))
++            (result, Cow::Owned(runs), Some(edit))
+         } else {
+-            (line, Cow::Borrowed(runs))
++            (line, Cow::Borrowed(runs), None)
+         }
+     }
+ 
+@@ -367,8 +395,28 @@
+         runs: &'a [TextRun],
+         truncate_from: TruncateFrom,
+     ) -> (SharedString, Cow<'a, [TextRun]>) {
++        let (text, runs, _) = self.truncate_wrapped_line_with_edit(
++            text,
++            wrap_width,
++            max_lines,
++            truncation_affix,
++            runs,
++            truncate_from,
++        );
++        (text, runs)
++    }
++
++    pub(crate) fn truncate_wrapped_line_with_edit<'a>(
++        &mut self,
++        text: SharedString,
++        wrap_width: Pixels,
++        max_lines: usize,
++        truncation_affix: &str,
++        runs: &'a [TextRun],
++        truncate_from: TruncateFrom,
++    ) -> (SharedString, Cow<'a, [TextRun]>, Option<TextEdit>) {
+         if max_lines <= 1 || truncate_from == TruncateFrom::Start {
+-            return self.truncate_line(
++            return self.truncate_line_with_edit(
+                 text,
+                 wrap_width * max_lines,
+                 truncation_affix,
+@@ -377,7 +425,13 @@
+             );
+         }
+         if truncate_from == TruncateFrom::Middle {
+-            return self.truncate_line(text, wrap_width, truncation_affix, runs, truncate_from);
++            return self.truncate_line_with_edit(
++                text,
++                wrap_width,
++                truncation_affix,
++                runs,
++                truncate_from,
++            );
+         }
+ 
+         let affix_width: Pixels = truncation_affix
+@@ -410,7 +464,11 @@
+                         &mut runs,
+                         TruncateFrom::End,
+                     );
+-                    return (result, Cow::Owned(runs));
++                    let edit = TextEdit {
++                        source: truncated.len()..text.len(),
++                        display: truncated.len()..result.len(),
++                    };
++                    return (result, Cow::Owned(runs), Some(edit));
+                 }
+ 
+                 // Newline before the last line: it consumes a line.
+@@ -485,7 +543,11 @@
+                         &mut runs,
+                         TruncateFrom::End,
+                     );
+-                    return (result, Cow::Owned(runs));
++                    let edit = TextEdit {
++                        source: truncated.len()..text.len(),
++                        display: truncated.len()..result.len(),
++                    };
++                    return (result, Cow::Owned(runs), Some(edit));
+                 }
+             }
+ 
+@@ -493,7 +555,7 @@
+         }
+ 
+         // Text fits within max_lines without truncation.
+-        (text, Cow::Borrowed(runs))
++        (text, Cow::Borrowed(runs), None)
+     }
+ 
+     /// Any character in this list should be treated as a word character,
+@@ -935,6 +997,59 @@
+                 .collect::<Vec<_>>(),
+             &[Boundary::new(12, 0),], // special chars above take up 3, 2 and 3 bytes, so boundary ends up at 12
+         );
++    }
++
++    #[test]
++    fn truncation_reports_exact_replaced_bytes() {
++        let mut wrapper = build_wrapper();
++        for text in [
++            "aa bbb cccc ddddd eeee ffff",
++            "稻香稻香稻香稻香稻香",
++            "aa…aaa…aaaa…aaaaaaa",
++        ] {
++            let runs = generate_test_runs(&[text.len()]);
++            for from in [TruncateFrom::Start, TruncateFrom::End, TruncateFrom::Middle] {
++                for affix in ["…", "", "..."] {
++                    let (result, result_runs, edit) =
++                        wrapper.truncate_line_with_edit(text.into(), px(80.), affix, &runs, from);
++                    let edit = edit.expect("narrow width truncates these fixtures");
++                    assert_eq!(
++                        result.as_ref(),
++                        format!(
++                            "{}{}{}",
++                            &text[..edit.source.start],
++                            affix,
++                            &text[edit.source.end..]
++                        )
++                    );
++                    assert_eq!(&result[edit.display], affix);
++                    assert_eq!(
++                        result_runs.iter().map(|run| run.len).sum::<usize>(),
++                        result.len()
++                    );
++                }
++            }
++            let (result, _, edit) = wrapper.truncate_wrapped_line_with_edit(
++                text.into(),
++                px(80.),
++                2,
++                "…",
++                &runs,
++                TruncateFrom::End,
++            );
++            if let Some(edit) = edit {
++                assert_eq!(
++                    result.as_ref(),
++                    format!(
++                        "{}…{}",
++                        &text[..edit.source.start],
++                        &text[edit.source.end..]
++                    )
++                );
++            } else {
++                assert_eq!(result.as_ref(), text);
++            }
++        }
+     }
+ 
+     #[test]

@@ -22,7 +22,9 @@ def main():
     patches = sorted((root / "vendor/patches").glob("*.patch"))
     vendor = root / "vendor"
     stamp = vendor / ".gpui-patch-id"
-    patch_id = hashlib.sha256(b"".join(p.read_bytes() for p in patches)).hexdigest()
+    patch_id = hashlib.sha256(
+        Path(__file__).read_bytes() + b"".join(p.read_bytes() for p in patches)
+    ).hexdigest()
     if (stamp.exists() and stamp.read_text() == patch_id
             and all((vendor / name / "Cargo.toml").exists() for name in CRATES)):
         print("GPUI patches are ready", flush=True)
@@ -31,6 +33,8 @@ def main():
     # Prepare everything before replacing the generated source directories.
     with tempfile.TemporaryDirectory(prefix="gpui-", dir=vendor) as temporary:
         staging = Path(temporary)
+        # Isolate git apply from the parent repository, which can silently skip patches.
+        subprocess.run(["git", "init", "--quiet", str(staging)], check=True)
         for name, checksum in CRATES.items():
             url = f"https://static.crates.io/crates/{name}/{name}-{VERSION}.crate"
             print(f"Downloading {name} {VERSION}", flush=True)

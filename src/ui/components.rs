@@ -17,6 +17,7 @@ mod player_bar;
 mod playing_indicator;
 mod popover;
 mod progress_bar;
+mod selectable_text;
 mod side_panel;
 mod song_menu;
 mod song_table;
@@ -32,6 +33,7 @@ pub use collect_window::open_collect_window;
 pub use drag_preview::ResizeDragPreview;
 pub use player_bar::{PLAYER_BAR_HEIGHT, PlayerBar};
 pub use playing_indicator::PlayingIndicator;
+pub(in crate::ui) use selectable_text::SelectableText;
 pub use side_panel::{SidePanel, SidePanelContent};
 pub use song_menu::{Collect, PlayNext, show_song_menu};
 // 播放队列浮层、音质弹窗、账号弹层共用同一份圆角与投影；

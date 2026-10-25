@@ -119,11 +119,6 @@ pub struct PlaylistPage {
 impl EventEmitter<PlaylistCommentsTab> for PlaylistPage {}
 impl EventEmitter<PlaylistMetadataChanged> for PlaylistPage {}
 
-/// 简介压成一行：换行、连续空白、首尾空白都折叠成一个空格。
-fn one_line(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 /// 标签胶囊：跟在作者后面横向排开，一行放不下时整体被裁掉，不挤走创建时间。
 fn tag_row(tags: &[String], colors: ColorTokens) -> AnyElement {
     div()
@@ -703,7 +698,8 @@ impl PlaylistPage {
                     date.day()
                 )
             });
-        let description = playlist.and_then(Playlist::description).map(one_line);
+        // 简介里的换行由 GPUI 的空白折叠规则处理，这里只需要一份拥有所有权的副本。
+        let description = playlist.and_then(Playlist::description).map(str::to_owned);
         let tags = playlist.map(Playlist::tags).unwrap_or_default();
         let cover = div()
             .size(px(170.))
