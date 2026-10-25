@@ -12,7 +12,11 @@ use gpui_kit::component::native_menu::NativeMenu;
 
 use crate::models::Song;
 use crate::playback::{PlaybackController, PlaybackEvent};
-use crate::state::{daily::DailySongsStore, library::MusicLibrary};
+use crate::state::{
+    daily::DailySongsStore,
+    library::MusicLibrary,
+    resource::DataState,
+};
 use crate::ui::assets::track_cover_image;
 use crate::ui::components::{
     ACTION_BUTTON_HEIGHT, ACTION_BUTTON_PADDING, CELL_PADDING, DURATION_COLUMN_WIDTH, KeepRowHover,
@@ -60,7 +64,7 @@ impl DailySongsPage {
     ) -> Self {
         let store_subscription = cx.observe(&store, |this, store, cx| {
             // 序号列宽跟着行数走，数据换了要重新算列定义。
-            this.columns = table_columns(store.read(cx).songs.len());
+            this.columns = table_columns(store.read(cx).songs().len());
             cx.notify();
         });
         // 喜欢状态、当前播放歌曲都在行渲染时现读；这里只负责触发重绘。
@@ -70,7 +74,7 @@ impl DailySongsPage {
                 cx.notify();
             }
         });
-        let row_count = store.read(cx).songs.len();
+        let row_count = store.read(cx).songs().len();
         Self {
             store,
             _store_subscription: store_subscription,
@@ -84,8 +88,13 @@ impl DailySongsPage {
         }
     }
 
+    /// 切回本页时静默刷新一次：日推按天更新，切回来该是当天的。
+    pub fn revalidate(&mut self, cx: &mut Context<Self>) {
+        self.store.update(cx, |store, cx| store.revalidate(cx));
+    }
+
     fn play_from(&mut self, song_id: u64, cx: &mut Context<Self>) {
-        let songs = self.store.read(cx).songs.clone();
+        let songs = self.store.read(cx).songs().to_vec();
         self.playback.update(cx, |playback, cx| {
             playback.play_list(DAILY_SOURCE, songs, song_id, cx);
         });
@@ -100,7 +109,7 @@ impl DailySongsPage {
     }
 
     fn header(&self, colors: ColorTokens, cx: &mut Context<Self>) -> AnyElement {
-        let count = self.store.read(cx).songs.len();
+        let count = self.store.read(cx).songs().len();
         let today =
             time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
         div()
@@ -154,7 +163,7 @@ impl DailySongsPage {
                         .gap(px(12.))
                         .child(play_all_button(colors, false).on_click(cx.listener(
                             |this, _, _, cx| {
-                                let songs = this.store.read(cx).songs.clone();
+                                let songs = this.store.read(cx).songs().to_vec();
                                 this.playback.update(cx, |playback, cx| {
                                     playback.play_list_from_start(DAILY_SOURCE, songs, cx);
                                 });
@@ -207,26 +216,9 @@ impl DailySongsPage {
     }
 
     fn body(&mut self, colors: ColorTokens, cx: &mut Context<Self>) -> AnyElement {
-        let (loading, loaded, guest, error, empty) = {
-            let store = self.store.read(cx);
-            (
-                store.loading,
-                store.loaded,
-                store.needs_login(),
-                store.error.clone(),
-                store.songs.is_empty(),
-            )
-        };
-        if loading && empty {
-            return div()
-                .w_full()
-                .py(px(36.))
-                .flex()
-                .justify_center()
-                .child(spinner("daily-loading", 20., colors.muted_foreground))
-                .into_any_element();
-        }
-        if guest {
+        let store = self.store.read(cx);
+        // 游客没有日推：给登录提示，而不是「暂无推荐」。
+        if store.needs_login() {
             return centered_empty(
                 "images/empty/cm_empty_wuzuopin.png",
                 "登录后为你生成每日推荐",
@@ -234,9 +226,20 @@ impl DailySongsPage {
             )
             .into_any_element();
         }
-        if !loaded && empty {
-            return match error {
-                Some(error) => div()
+        // 还没有过数据：按状态给提示。有数据就直接往下走——旧内容继续显示，
+        // 新的到了自然替换。
+        match store.state() {
+            DataState::Loading => {
+                return div()
+                    .w_full()
+                    .py(px(36.))
+                    .flex()
+                    .justify_center()
+                    .child(spinner("daily-loading", 20., colors.muted_foreground))
+                    .into_any_element();
+            }
+            DataState::Failed(error) => {
+                return div()
                     .w_full()
                     .py(px(36.))
                     .flex()
@@ -245,36 +248,44 @@ impl DailySongsPage {
                     .gap(px(8.))
                     .text_size(px(14.))
                     .text_color(colors.muted_foreground)
-                    .child(error)
+                    .child(error.to_string())
                     .child(
                         Button::new("daily-retry")
                             .child("重试")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.store.update(cx, |store, cx| store.reload(cx));
-                            })),
+                            .on_click({
+                                let entity = cx.entity();
+                                move |_, _, cx| {
+                                    entity.update(cx, |this, cx| {
+                                        this.store.update(cx, |store, cx| store.reload(cx));
+                                    });
+                                }
+                            }),
                     )
-                    .into_any_element(),
-                None => {
-                    centered_empty("images/empty/cm_empty_wuzuopin.png", "暂无每日推荐", colors)
-                        .into_any_element()
+                    .into_any_element();
+            }
+            DataState::Ready(songs) => {
+                if songs.is_empty() {
+                    return centered_empty(
+                        "images/empty/cm_empty_wuzuopin.png",
+                        "暂无每日推荐",
+                        colors,
+                    )
+                    .into_any_element();
                 }
-            };
-        }
-        if empty {
-            return centered_empty("images/empty/cm_empty_wuzuopin.png", "暂无每日推荐", colors)
-                .into_any_element();
+            }
         }
         self.song_table(cx)
     }
 
     fn song_table(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let songs = self.store.read(cx).songs().len();
         virtual_table(
             cx.entity(),
             "daily-songs",
             self.columns.clone(),
-            self.store.read(cx).songs.len(),
+            songs,
             |this, index, _, cx| this.song_cells(index, cx),
-            |this, index, cx| this.store.read(cx).songs[index].id,
+            |this, index, cx| this.store.read(cx).songs()[index].id,
             |column, _| {
                 div()
                     .px(CELL_PADDING)
@@ -288,7 +299,7 @@ impl DailySongsPage {
                 let Some(song) = this
                     .store
                     .read(cx)
-                    .songs
+                    .songs()
                     .iter()
                     .find(|song| song.id == key)
                     .cloned()
@@ -304,7 +315,7 @@ impl DailySongsPage {
 
     fn song_cells(&mut self, index: usize, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let colors = Theme::global(cx).tokens.colors;
-        let song = self.store.read(cx).songs[index].clone();
+        let song = self.store.read(cx).songs()[index].clone();
         let display = SongDisplay::new(&song);
         let song_id = song.id;
         let liked = self.library.read(cx).liked_song_ids.contains(&song_id);

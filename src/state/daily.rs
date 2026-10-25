@@ -3,19 +3,16 @@
 use gpui::{Context, Entity, ReadGlobal, Subscription};
 
 use super::account::AccountState;
+use super::resource::{DataState, Resource};
 use crate::api::MusicApi;
 use crate::models::Song;
 
 /// 日推必须登录；游客没有数据，页面根据 `needs_login` 给提示。
 pub struct DailySongsStore {
-    pub songs: Vec<Song>,
-    pub loading: bool,
-    pub loaded: bool,
-    pub error: Option<String>,
+    /// 每天的推荐歌曲。显示层只管读它，数据层只管拉取和更新。
+    songs: Resource<Vec<Song>>,
     /// 已加载过的身份：`Some(0)` 表示游客，`None` 表示还没取过。
     user_id: Option<u64>,
-    generation: u64,
-    request: Option<tokio::task::AbortHandle>,
     _user_subscription: Option<Subscription>,
 }
 
@@ -25,13 +22,8 @@ impl DailySongsStore {
             this.load(user.read(cx).profile.user_id, false, cx);
         });
         let mut this = Self {
-            songs: Vec::new(),
-            loading: false,
-            loaded: false,
-            error: None,
+            songs: Resource::new(),
             user_id: None,
-            generation: 0,
-            request: None,
             _user_subscription: Some(subscription),
         };
         let (user_id, loading) = {
@@ -41,11 +33,18 @@ impl DailySongsStore {
         // 会话恢复完成后由账号通知触发加载，避免先按游客身份走一遍空态。
         if user_id != 0 || !loading {
             this.load(user_id, false, cx);
-        } else {
-            // 等账号结果期间页面显示加载中，而不是先闪一下「暂无推荐」。
-            this.loading = true;
         }
         this
+    }
+
+    /// 当前的歌曲。显示层按行取用：还没拿到过时是空的。
+    pub fn songs(&self) -> &[Song] {
+        self.songs.value().map(|songs| songs.as_slice()).unwrap_or(&[])
+    }
+
+    /// 显示状态：显示层按它决定给内容还是给提示。
+    pub fn state(&self) -> DataState<'_, Vec<Song>> {
+        self.songs.state()
     }
 
     /// 游客没有日推：页面据此显示登录提示，而不是「暂无推荐」。
@@ -58,38 +57,44 @@ impl DailySongsStore {
         self.load(self.user_id.unwrap_or_default(), true, cx);
     }
 
+    /// 切回页面时的静默刷新：重新拉一次，旧内容不清空，新数据到了再替换。
+    ///
+    /// 已经在拉就算了，不打断。
+    pub fn revalidate(&mut self, cx: &mut Context<Self>) {
+        if self.songs.is_loading() {
+            return;
+        }
+        self.load(self.user_id.unwrap_or_default(), true, cx);
+    }
+
     fn load(&mut self, user_id: u64, force: bool, cx: &mut Context<Self>) {
         if !self.should_load(user_id, force) {
             return;
         }
-        self.abort_request();
         if self.user_id != Some(user_id) {
-            self.songs.clear();
-            self.loaded = false;
+            // 换身份：旧数据是别人的，不能留着。
+            self.songs.reset();
         }
         self.user_id = Some(user_id);
-        self.generation = self.generation.wrapping_add(1);
-        let generation = self.generation;
-        self.error = None;
         if user_id == 0 {
-            self.loading = false;
-            self.loaded = true;
+            // 游客确定没有日推：给一份空数据，页面据此显示登录提示而不是转圈。
+            self.songs.set(Vec::new());
             cx.notify();
             return;
         }
-        self.loading = true;
+        let generation = self.songs.begin();
         let (runtime, client) = {
             let api = MusicApi::global(cx);
             (api.runtime.handle().clone(), api.client.clone())
         };
         let request = runtime.spawn(MusicApi::daily_songs(client));
-        self.request = Some(request.abort_handle());
+        self.songs.track(request.abort_handle());
         cx.spawn(async move |this, cx| {
             let result = request
                 .await
                 .unwrap_or_else(|_| Err("每日推荐请求任务失败".into()));
             let _ = this.update(cx, |this, cx| {
-                if this.apply(generation, result) {
+                if this.songs.apply(generation, result) {
                     cx.notify();
                 }
             });
@@ -100,54 +105,26 @@ impl DailySongsStore {
 
     /// 同一身份只取一次；失败或主动刷新时允许重试。
     fn should_load(&self, user_id: u64, force: bool) -> bool {
-        force || self.user_id != Some(user_id) || self.error.is_some()
-    }
-
-    fn apply(&mut self, generation: u64, result: Result<Vec<Song>, String>) -> bool {
-        if self.generation != generation {
-            return false;
-        }
-        self.request = None;
-        self.loading = false;
-        match result {
-            Ok(songs) => {
-                self.songs = songs;
-                self.loaded = true;
-                self.error = None;
-            }
-            // 失败保留上一批歌曲，重试成功后整体替换。
-            Err(message) => self.error = Some(message),
-        }
-        true
-    }
-
-    fn abort_request(&mut self) {
-        if let Some(request) = self.request.take() {
-            request.abort();
-        }
+        force || self.user_id != Some(user_id) || self.songs.error().is_some()
     }
 }
 
 impl Drop for DailySongsStore {
     fn drop(&mut self) {
-        self.abort_request();
+        self.songs.abort();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::DailySongsStore;
+    use super::super::resource::Resource;
     use crate::models::Song;
 
     fn store() -> DailySongsStore {
         DailySongsStore {
-            songs: Vec::new(),
-            loading: false,
-            loaded: false,
-            error: None,
+            songs: Resource::new(),
             user_id: None,
-            generation: 0,
-            request: None,
             _user_subscription: None,
         }
     }
@@ -166,42 +143,37 @@ mod tests {
         assert!(this.should_load(42, false));
         this.user_id = Some(42);
         assert!(!this.should_load(42, false));
-        this.error = Some("网络错误".into());
+        // 失败过一次就允许重试。
+        this.songs.begin();
+        let generation = this.songs.begin();
+        this.songs.apply(generation, Err("网络错误".into()));
         assert!(this.should_load(42, false));
-        this.error = None;
         assert!(this.should_load(42, true));
         assert!(this.should_load(7, false));
         assert!(this.should_load(0, false));
     }
 
     #[test]
-    fn stale_results_are_discarded_and_failures_keep_previous_songs() {
+    fn a_failure_keeps_the_previous_songs() {
         let mut this = store();
-        this.generation = 2;
-        this.loading = true;
-        assert!(!this.apply(1, Ok(vec![song(1)])));
-        assert!(this.songs.is_empty());
-        assert!(this.loading);
+        let generation = this.songs.begin();
+        assert!(this.songs.apply(generation, Ok(vec![song(2), song(3)])));
+        assert_eq!(this.songs.value().unwrap().len(), 2);
 
-        assert!(this.apply(2, Ok(vec![song(2), song(3)])));
-        assert!(!this.loading);
-        assert!(this.loaded);
-        assert_eq!(this.songs.len(), 2);
-
-        this.loading = true;
-        assert!(this.apply(2, Err("每日推荐请求失败".into())));
-        assert!(!this.loading);
-        assert!(this.error.is_some());
-        assert_eq!(this.songs.len(), 2);
+        let generation = this.songs.begin();
+        assert!(this.songs.apply(generation, Err("每日推荐请求失败".into())));
+        assert!(this.songs.error().is_some());
+        // 旧歌曲还在：失败不该把已经拿到的内容打回空态。
+        assert_eq!(this.songs.value().unwrap().len(), 2);
     }
 
     #[test]
     fn guests_have_no_requested_songs() {
         let mut this = store();
         this.user_id = Some(0);
-        this.loaded = true;
+        this.songs.set(Vec::new());
         assert!(this.needs_login());
-        assert!(this.songs.is_empty());
+        assert!(this.songs.value().unwrap().is_empty());
         assert!(!this.should_load(0, false));
     }
 }

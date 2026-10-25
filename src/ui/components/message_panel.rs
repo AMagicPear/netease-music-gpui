@@ -18,6 +18,7 @@ use super::tab_bar::{TabBar, TabChanged, TabItem};
 use crate::api::MusicApi;
 use crate::models::MessageItem;
 use crate::state::account::AccountState;
+use crate::state::resource::{DataState, Resource};
 use crate::ui::assets::thumbnail_url;
 use crate::ui::theme::DOLPHIN_FAMILY;
 
@@ -35,17 +36,11 @@ const TAB_COMMENTS: usize = 1;
 const TAB_MENTIONS: usize = 2;
 const TAB_COUNT: usize = 4;
 
-/// 一个 tab 的数据与加载状态。
+/// 一个 tab 的数据。显示层只管读，数据层只管拉取和更新。
 #[derive(Default)]
 struct TabData {
-    items: Vec<MessageItem>,
-    /// 服务端给出的账号级未读数（私信、@我 接口提供，其余为 0）。
-    unread_total: u32,
-    loaded: bool,
-    loading: bool,
-    error: Option<String>,
-    /// 请求代际：切 tab / 重开面板会发起新请求，旧响应按代际丢弃。
-    generation: u32,
+    /// 消息列表和服务端给出的账号级未读数（私信、@我 接口提供，其余为 0）。
+    data: Resource<(Vec<MessageItem>, u32)>,
 }
 
 pub struct MessagePanel {
@@ -109,22 +104,21 @@ impl MessagePanel {
 
     /// 确保某个 tab 有数据。`force` 为真时即使加载过也重拉（面板展开时）。
     fn load_tab(&mut self, tab: usize, force: bool, cx: &mut Context<Self>) {
-        let data = &mut self.tab_data[tab];
-        if data.loading || (data.loaded && !force) {
+        let data = &mut self.tab_data[tab].data;
+        if data.is_loading() || (data.value().is_some() && !force) {
             return;
         }
         let uid = self.account.read(cx).profile.user_id;
         if uid == 0 {
-            data.loading = false;
-            data.error = Some("未登录".into());
+            // 未登录没有消息可拉：给一份空数据，页面据此显示登录提示。
+            data.set((Vec::new(), 0));
             cx.notify();
             return;
         }
-        data.generation += 1;
-        let generation = data.generation;
-        data.loading = true;
+        let generation = data.begin();
         let api = MusicApi::global(cx);
         let request = api.runtime.spawn(fetch_tab(api.client.clone(), tab, uid));
+        data.track(request.abort_handle());
         cx.spawn(async move |this, cx| {
             let result = request
                 .await
@@ -138,31 +132,23 @@ impl MessagePanel {
     fn apply_tab(
         &mut self,
         tab: usize,
-        generation: u32,
+        generation: u64,
         result: Result<(Vec<MessageItem>, u32), String>,
         cx: &mut Context<Self>,
     ) {
-        let data = &mut self.tab_data[tab];
-        if data.generation != generation {
-            return;
-        }
-        data.loading = false;
-        match result {
-            Ok((items, unread_total)) => {
-                data.items = items;
-                data.unread_total = unread_total;
-                data.error = None;
-                data.loaded = true;
-                self.sync_tab_badge(tab, cx);
-            }
-            Err(error) => data.error = Some(error),
+        if self.tab_data[tab].data.apply(generation, result) {
+            self.sync_tab_badge(tab, cx);
         }
         cx.notify();
     }
 
     /// tab 上的未读角标：只有接口给出账号级未读数的两个 tab 才显示。
     fn sync_tab_badge(&mut self, tab: usize, cx: &mut Context<Self>) {
-        let unread = self.tab_data[tab].unread_total;
+        let unread = self.tab_data[tab]
+            .data
+            .value()
+            .map(|(_, unread)| *unread)
+            .unwrap_or(0);
         let count = if matches!(tab, TAB_PRIVATE | TAB_MENTIONS) && unread > 0 {
             Some(unread.to_string())
         } else {
@@ -180,10 +166,11 @@ impl MessagePanel {
     /// 请求失败时静默忽略：本地已经清了，下次重拉徽标会如实回来。
     fn mark_all_read(&mut self, cx: &mut Context<Self>) {
         for tab in 0..TAB_COUNT {
-            let data = &mut self.tab_data[tab];
-            data.unread_total = 0;
-            for item in &mut data.items {
-                item.unread = 0;
+            if let Some((items, unread_total)) = self.tab_data[tab].data.value_mut() {
+                *unread_total = 0;
+                for item in items.iter_mut() {
+                    item.unread = 0;
+                }
             }
             self.sync_tab_badge(tab, cx);
         }
@@ -228,7 +215,7 @@ async fn fetch_tab(
 impl Render for MessagePanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = Theme::global(cx).tokens.colors;
-        let data = &self.tab_data[self.active_tab];
+        let data = &self.tab_data[self.active_tab].data;
         let list_state = message_list_state(data, colors);
 
         // 内容填满 side_panel 的外壳；这里只管排版，不管定位与动画。
@@ -285,7 +272,10 @@ impl Render for MessagePanel {
 }
 
 /// 列表内容：加载中 / 出错 / 空态各给一个居中提示，有数据就铺消息行。
-fn message_list_state(data: &TabData, colors: ColorTokens) -> Vec<AnyElement> {
+fn message_list_state(
+    data: &Resource<(Vec<MessageItem>, u32)>,
+    colors: ColorTokens,
+) -> Vec<AnyElement> {
     let centered = |content: AnyElement| -> AnyElement {
         div()
             .flex_1()
@@ -295,21 +285,59 @@ fn message_list_state(data: &TabData, colors: ColorTokens) -> Vec<AnyElement> {
             .child(content)
             .into_any_element()
     };
-    if data.loading && data.items.is_empty() {
-        return vec![centered(
-            spinner("message-panel-loading", 20., colors.muted_foreground).into_any_element(),
-        )];
-    }
-    if let Some(error) = &data.error {
-        return vec![centered(
+    let items = data
+        .value()
+        .map(|(items, _)| items.as_slice())
+        .unwrap_or(&[]);
+    let mut rows: Vec<AnyElement> = Vec::new();
+    // 手上有旧消息、同时正在刷新：给一条提示，不然用户看不到任何动静。
+    if data.is_refreshing() {
+        rows.push(
             div()
-                .text_size(px(13.))
-                .text_color(colors.muted_foreground)
-                .child(error.clone())
+                .w_full()
+                .flex_none()
+                .px(ROW_PADDING)
+                .py(px(6.))
+                .text_size(px(11.))
+                .text_color(colors.muted_foreground.alpha(0.7))
+                .child("刷新中…")
                 .into_any_element(),
-        )];
+        );
     }
-    if data.items.is_empty() {
+    match data.state() {
+        DataState::Loading => {
+            return vec![centered(
+                spinner("message-panel-loading", 20., colors.muted_foreground).into_any_element(),
+            )];
+        }
+        DataState::Failed(error) if items.is_empty() => {
+            // 一条消息都没有：错误就是全部内容。
+            return vec![centered(
+                div()
+                    .text_size(px(13.))
+                    .text_color(colors.muted_foreground)
+                    .child(error.to_string())
+                    .into_any_element(),
+            )];
+        }
+        DataState::Failed(error) => {
+            // 手里还有旧消息：旧消息继续显示，错误只当一条提示。
+            // 刷新失败不该把用户正在看的那一屏弄没。
+            rows.push(
+                div()
+                    .w_full()
+                    .flex_none()
+                    .px(ROW_PADDING)
+                    .py(px(8.))
+                    .text_size(px(12.))
+                    .text_color(colors.muted_foreground)
+                    .child(error.to_string())
+                    .into_any_element(),
+            );
+        }
+        DataState::Ready(_) => {}
+    }
+    if items.is_empty() {
         return vec![centered(
             div()
                 .text_size(px(13.))
@@ -318,10 +346,8 @@ fn message_list_state(data: &TabData, colors: ColorTokens) -> Vec<AnyElement> {
                 .into_any_element(),
         )];
     }
-    data.items
-        .iter()
-        .map(|item| message_row(item, colors))
-        .collect()
+    rows.extend(items.iter().map(|item| message_row(item, colors)));
+    rows
 }
 
 /// 一条消息行：圆形头像（未读时右上角红色计数徽标）+ 昵称/时间 + 正文/来源。

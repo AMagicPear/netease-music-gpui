@@ -3,5 +3,6 @@ pub mod daily;
 pub mod library;
 pub mod playlist_detail;
 pub mod recommend;
+pub mod resource;
 pub mod search_results;
 pub mod song_counts;

@@ -54,10 +54,10 @@ impl RecommendPage {
             if let Some(pending) = &this.pending_heart {
                 let user_id = pending.user_id;
                 let store = store.read(cx);
-                if this.library.read(cx).user_id != user_id || !store.heart_loading {
+                if this.library.read(cx).user_id != user_id || !store.heart.is_loading() {
                     this.pending_heart = None;
                     if this.library.read(cx).user_id == user_id
-                        && let Some(heart) = store.heart.clone()
+                        && let Some(heart) = store.heart.value().cloned()
                     {
                         this.playback.update(cx, |playback, cx| {
                             playback.play_heart_recommendation(user_id, heart, cx);
@@ -91,6 +91,11 @@ impl RecommendPage {
         }
     }
 
+    /// 切回本页时静默刷新一次：离开期间推荐内容可能变了。
+    pub fn revalidate(&mut self, cx: &mut Context<Self>) {
+        self.store.update(cx, |store, cx| store.revalidate(cx));
+    }
+
     pub fn content(
         view: Entity<Self>,
         available_width: Pixels,
@@ -113,11 +118,14 @@ impl RecommendPage {
         let daily_cover = self
             .daily
             .read(cx)
-            .songs
+            .songs()
             .first()
             .and_then(|song| song.al.pic_url.as_deref());
         store
             .entries
+            .value()
+            .map(|entries| entries.as_slice())
+            .unwrap_or(&[])
             .iter()
             .map(|entry| match entry.kind {
                 QuickEntryKind::DailySongs if daily_cover.is_some() => {
@@ -126,7 +134,7 @@ impl RecommendPage {
                 QuickEntryKind::HeartMode => {
                     let cover = store
                         .heart
-                        .as_ref()
+                        .value()
                         .and_then(|heart| heart.songs.first())
                         .and_then(|song| song.al.pic_url.as_deref());
                     cover.map_or_else(
@@ -156,16 +164,16 @@ impl RecommendPage {
             .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
             .day();
         let store = self.store.read(cx);
-        let mut entries = store.entries.clone();
+        let mut entries = store.entries.value().cloned().unwrap_or_default();
         for entry in &mut entries {
             if entry.kind == QuickEntryKind::HeartMode {
                 entry.caption = if let Some(song) =
-                    store.heart.as_ref().and_then(|heart| heart.songs.first())
+                    store.heart.value().and_then(|heart| heart.songs.first())
                 {
                     format!("心动模式 | 从「{}」听起", song.name).into()
-                } else if store.heart_loading {
+                } else if store.heart.is_loading() {
                     "正在准备心动推荐…".into()
-                } else if let Some(error) = &store.heart_error {
+                } else if let Some(error) = store.heart.error() {
                     format!("{error} · 点击重试").into()
                 } else if self.library.read(cx).user_id == 0 {
                     "登录后从你喜欢的歌听起".into()
@@ -174,7 +182,7 @@ impl RecommendPage {
                 };
             }
             if entry.kind == QuickEntryKind::DailySongs {
-                entry.caption = self.daily.read(cx).songs.first().map_or_else(
+                entry.caption = self.daily.read(cx).songs().first().map_or_else(
                     || "每日推荐".into(),
                     |song| format!("每日推荐 | 从「{}」听起", song.name).into(),
                 );
@@ -194,12 +202,13 @@ impl RecommendPage {
                 &entries,
                 &self.entry_colors,
                 covers,
-                store.radar.first(),
+                store.radar.value().and_then(|radar| radar.first()),
                 cx,
             ));
         }
         page = page.child(self.recommended_section(columns, colors, cx));
-        if !store.radar.is_empty() {
+        let radar = store.radar.value().map(|radar| radar.as_slice()).unwrap_or(&[]);
+        if !radar.is_empty() {
             page = page.child(
                 div()
                     .flex()
@@ -207,7 +216,7 @@ impl RecommendPage {
                     .gap(px(16.))
                     .child(section_title("雷达歌单", colors))
                     .child(playlist_row(
-                        &store.radar,
+                        radar,
                         columns,
                         colors,
                         "recommend-radar",
@@ -215,10 +224,15 @@ impl RecommendPage {
                     )),
             );
         }
-        if !store.featured.is_empty() {
+        let featured = store
+            .featured
+            .value()
+            .map(|featured| featured.as_slice())
+            .unwrap_or(&[]);
+        if !featured.is_empty() {
             page = page.child(featured_activities(
                 colors,
-                &store.featured,
+                featured,
                 svg_font_family(&Theme::global(cx).tokens.typography.sans),
             ));
         }
@@ -389,7 +403,7 @@ fn quick_entry(
                 QuickTarget::DailySongs => NavigationBus::emit(cx, Navigate::DailySongs),
                 QuickTarget::HeartMode => {
                     let user_id = this.library.read(cx).user_id;
-                    let recommendation = this.store.read(cx).heart.clone();
+                    let recommendation = this.store.read(cx).heart.value().cloned();
                     if let Some(heart) = recommendation {
                         this.pending_heart = None;
                         this.playback.update(cx, |playback, cx| {
@@ -482,7 +496,7 @@ impl RecommendPage {
     }
 
     fn refresh_button(&self, colors: ColorTokens, cx: &Context<Self>) -> AnyElement {
-        let loading = self.store.read(cx).loading;
+        let loading = self.store.read(cx).playlists.is_loading();
         if loading {
             return svg()
                 .path("icons/refresh.svg")
@@ -522,7 +536,8 @@ impl RecommendPage {
         cx: &Context<Self>,
     ) -> AnyElement {
         let store = self.store.read(cx);
-        if store.loading && store.playlists.is_empty() {
+        let playlists = store.playlists.value().map(|list| list.as_slice()).unwrap_or(&[]);
+        if store.playlists.is_loading() && playlists.is_empty() {
             return div()
                 .w_full()
                 .py(px(36.))
@@ -531,8 +546,8 @@ impl RecommendPage {
                 .child(spinner("recommend-loading", 20., colors.muted_foreground))
                 .into_any_element();
         }
-        if store.playlists.is_empty() && !store.loaded {
-            return match &store.error {
+        if playlists.is_empty() && store.playlists.value().is_none() {
+            return match store.playlists.error() {
                 Some(error) => div()
                     .w_full()
                     .py(px(36.))
@@ -542,7 +557,7 @@ impl RecommendPage {
                     .gap(px(8.))
                     .text_size(px(14.))
                     .text_color(colors.muted_foreground)
-                    .child(error.clone())
+                    .child(error.to_string())
                     .child(
                         Button::new("recommend-retry")
                             .child("重试")
@@ -557,7 +572,7 @@ impl RecommendPage {
                 }
             };
         }
-        playlist_row(&store.playlists, columns, colors, "recommend-playlist", cx).into_any_element()
+        playlist_row(playlists, columns, colors, "recommend-playlist", cx).into_any_element()
     }
 }
 

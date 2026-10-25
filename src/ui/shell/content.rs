@@ -1,4 +1,4 @@
-use std::{cell::Cell, collections::HashMap, rc::Rc};
+use std::{cell::Cell, collections::HashMap, collections::HashSet, rc::Rc};
 
 use gpui::prelude::{FluentBuilder, StatefulInteractiveElement};
 use gpui::*;
@@ -59,6 +59,9 @@ pub struct MainContent {
     page_scroll: HashMap<ContentPage, ScrollHandle>,
     pub(super) playlist_backdrop: Backdrop,
     playing_indicator: PlayingIndicator,
+    /// 已经去过的页面。切回一个去过的页面时静默刷新一次——
+    /// 用户离开期间内容可能变了（推荐歌单每天换、日推按天更新）。
+    visited: HashSet<ContentPage>,
     _sidebar_subscription: Subscription,
     _sidebar_login_subscription: Subscription,
     _user_profile_subscription: Subscription,
@@ -232,6 +235,7 @@ impl MainContent {
             side_panel,
             playlist_backdrop,
             playing_indicator,
+            visited: HashSet::new(),
             page_scroll: ContentPage::all()
                 .map(|page| (page, ScrollHandle::default()))
                 .collect(),
@@ -285,10 +289,32 @@ impl MainContent {
         if page != ContentPage::Search {
             self.search_page.update(cx, |page, _| page.reset_scroll());
         }
+        // 切回一个去过的页面时静默刷新：用户离开期间内容可能变了。
+        // 首次进入不刷新——页面自己建好时已经拉过一轮了。
+        if changed && !self.visited.insert(page) {
+            self.revalidate(page, cx);
+        }
         if changed {
             cx.emit(ContentLayoutChanged);
         }
         cx.notify();
+    }
+
+    /// 页面重新可见时要不要重新拉一次数据。
+    ///
+    /// 只给「内容会随时间变」的页面开：推荐歌单每天换，日推按天更新。
+    /// 歌单详情、搜索结果是用户主动选出来的，重新打开就该按 id 重新加载，
+    /// 不走这条路。
+    fn revalidate(&mut self, page: ContentPage, cx: &mut Context<Self>) {
+        match page {
+            ContentPage::Recommend => {
+                self.recommend_page.update(cx, |page, cx| page.revalidate(cx));
+            }
+            ContentPage::DailySongs => {
+                self.daily_page.update(cx, |page, cx| page.revalidate(cx));
+            }
+            _ => {}
+        }
     }
 
     /// 先用摘要显示页头；导航补充喜欢状态，同 ID 的加载不会重复发请求。
