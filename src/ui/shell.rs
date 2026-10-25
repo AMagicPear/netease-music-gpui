@@ -8,7 +8,7 @@ use gpui_kit::base::{Button, ColorTokens, Theme};
 
 use super::assets::{CoverPrefetch, track_cover_url};
 use super::comments::ViewSongComments;
-use super::components::{Collect, PLAYER_BAR_HEIGHT, PlayNext, PlayerBar, icon_hover_color};
+use super::components::{Collect, PLAYER_BAR_HEIGHT, PlayNext, PlayerBar, Toast, icon_hover_color};
 use super::cover_color::{Backdrop, CoverColor, CoverGradient, gradient_layer};
 use super::events::{ContentLayoutChanged, Navigate, NavigationBus, PlaylistMetadataChanged};
 use super::now_playing::{NowPlaying, NowPlayingPage};
@@ -26,6 +26,8 @@ pub struct MainWindow {
     pub main_content: Entity<MainContent>,
     pub player_bar: Entity<PlayerBar>,
     now_playing_page: Entity<NowPlayingPage>,
+    /// 全局提示条，画在最上层。
+    toast: Entity<Toast>,
     /// Action 沿焦点祖先链派发，启动时由根视图持有焦点。
     focus_handle: FocusHandle,
     _nav_subscription: Subscription,
@@ -48,6 +50,7 @@ impl MainWindow {
     ) -> Self {
         let now_playing_page =
             cx.new(|cx| NowPlayingPage::new(playback.clone(), library, now_playing, cx));
+        let toast = Toast::global(cx);
         let focus_handle = cx.focus_handle();
         let nav_subscription = cx.subscribe_in(
             &NavigationBus::global(cx),
@@ -61,6 +64,10 @@ impl MainWindow {
                     this.main_content.update(cx, |content, cx| {
                         content.navigate(ContentPage::DailySongs, cx)
                     });
+                }
+                Navigate::HeartMode => {
+                    this.main_content
+                        .update(cx, |content, cx| content.start_heart_mode(window, cx));
                 }
             },
         );
@@ -87,6 +94,7 @@ impl MainWindow {
             main_content,
             player_bar,
             now_playing_page,
+            toast,
             focus_handle,
             _nav_subscription: nav_subscription,
             _playback_subscription: playback_subscription,
@@ -205,6 +213,8 @@ impl Render for MainWindow {
                 super::components::open_collect_window(window, vec![action.0.clone()], cx);
             }))
             .size_full()
+            // 提示条要贴着整个窗口定位，根节点得是定位参照。
+            .relative()
             .flex()
             .flex_col()
             .bg(colors.background)
@@ -252,6 +262,8 @@ impl Render for MainWindow {
             )
             .child(self.player_bar.read(cx).vinyl_overlay())
             .children(self.now_playing_page.read(cx).vinyl_overlays())
+            // 提示条排在最后：它是全窗口最上层的那一层。
+            .child(self.toast.clone())
     }
 }
 

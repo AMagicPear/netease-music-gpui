@@ -4,10 +4,11 @@ use gpui::*;
 use gpui_kit::base::{Button, ColorTokens, Theme};
 
 use super::assets::thumbnail_url;
+use super::events::{Navigate, NavigationBus};
 use super::pages::{ContentPage, LIBRARY_PAGES, MAIN_PAGES};
 use super::shell::{HEADER_HEIGHT, HEADER_TOP_INSET};
-use super::theme::IconSize;
-use crate::models::Playlist;
+use super::theme::{IconSize, PRESSED_ICON_ALPHA};
+use crate::models::{PlayMode, Playlist};
 use crate::state::library::MusicLibrary;
 
 /// 选中项变化时发出的事件，`MainContent` 订阅它来重新渲染右侧内容。
@@ -117,6 +118,50 @@ fn divider(colors: ColorTokens) -> impl IntoElement {
     div().w_full().h(px(1.)).my(px(12.)).bg(colors.border)
 }
 
+/// 「我喜欢的音乐」右侧的心动模式入口：一个纯图标按钮。
+///
+/// 它嵌在导航按钮内部，所以按下时先把鼠标事件拦下：GPUI 的点击是冒泡的，
+/// 不拦的话外层导航会跟着一起触发，点了图标反而跳到「我喜欢的音乐」。
+///
+/// 配色跟着所在导航项走：这一行被选中时底色是品牌红，图标就得转白，
+/// 否则红底上一个灰图标会糊在一起；未选中时保持灰，hover 才亮成品牌红。
+fn heart_mode_entry(
+    active: bool,
+    colors: ColorTokens,
+    cx: &mut Context<SidebarPage>,
+) -> impl IntoElement {
+    let (idle, hover, pressed) = if active {
+        (
+            colors.primary_foreground.alpha(0.8),
+            colors.primary_foreground,
+            colors.primary_foreground.alpha(PRESSED_ICON_ALPHA),
+        )
+    } else {
+        (
+            colors.muted_foreground,
+            colors.primary,
+            colors.primary.alpha(PRESSED_ICON_ALPHA),
+        )
+    };
+    svg()
+        .path(PlayMode::Heart.icon_path())
+        .size(px(18.))
+        .flex_none()
+        .text_color(idle)
+        .hover(move |style| style.text_color(hover))
+        // 纯 SVG 想当按钮用必须先有 id，之后才能挂 role / aria_label / on_click。
+        .id("sidebar-heart-mode")
+        .role(Role::Button)
+        .aria_label("心动模式")
+        .active(move |style| style.text_color(pressed))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(|_, _, _, cx| {
+            cx.stop_propagation();
+            // 和首页那张心动卡片是同一件事，走同一条意图总线。
+            NavigationBus::emit(cx, Navigate::HeartMode);
+        }))
+}
+
 /// 单个导航项：选中时用主题色高亮，未选中时悬停才显示背景。
 fn page_nav_item(
     page: ContentPage,
@@ -125,6 +170,9 @@ fn page_nav_item(
     cx: &mut Context<SidebarPage>,
 ) -> impl IntoElement {
     let active = page == active_page;
+    // 「我喜欢的音乐」多一个心动模式入口。
+    let with_heart = page == ContentPage::FavoriteMusic;
+    let heart = with_heart.then(|| heart_mode_entry(active, colors, cx));
 
     Button::new(page.id())
         .w_full()
@@ -159,6 +207,10 @@ fn page_nav_item(
                 }),
         )
         .child(page.title())
+        // 有心动入口的行，用一个撑开的空元素把图标顶到行尾。
+        .when_some(heart, |this, heart| {
+            this.child(div().flex_1().min_w(px(0.))).child(heart)
+        })
         .when(page.has_notification(), |this| {
             this.child(
                 div()

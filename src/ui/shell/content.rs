@@ -18,7 +18,7 @@ use crate::ui::assets::thumbnail_url;
 use crate::ui::comments::SongCommentsPage;
 use crate::ui::components::{
     PAGE_SIDE_PADDING, PlayingIndicator, ResizeDragPreview, SidePanel, SidePanelContent,
-    SurfacePopover, search_clear_button, window_drag_area,
+    SurfacePopover, Toast, search_clear_button, window_drag_area,
 };
 use crate::ui::cover_color::Backdrop;
 use crate::ui::events::{ContentLayoutChanged, PlaylistCommentsTab};
@@ -54,6 +54,7 @@ pub struct MainContent {
     search_page: Entity<SearchPage>,
     search_results: Entity<SearchResults>,
     library: Entity<MusicLibrary>,
+    playback: Entity<PlaybackController>,
     side_panel: Entity<SidePanel>,
     page_scroll: HashMap<ContentPage, ScrollHandle>,
     pub(super) playlist_backdrop: Backdrop,
@@ -110,15 +111,8 @@ impl MainContent {
         let song_comments_page = cx.new(|cx| SongCommentsPage::new(window, cx));
         let recommended = cx.new(|cx| RecommendStore::new(user_profile.clone(), cx));
         let daily_store = cx.new(|cx| DailySongsStore::new(user_profile.clone(), cx));
-        let recommend_page = cx.new(|cx| {
-            RecommendPage::new(
-                recommended,
-                daily_store.clone(),
-                library.clone(),
-                playback.clone(),
-                cx,
-            )
-        });
+        let recommend_page =
+            cx.new(|cx| RecommendPage::new(recommended, daily_store.clone(), library.clone(), cx));
         let recommend_subscription = cx.observe(&recommend_page, |this, _, cx| {
             if this.active_page == ContentPage::Recommend {
                 cx.notify();
@@ -194,9 +188,10 @@ impl MainContent {
                 playback.validate_heart_account(user_profile.read(cx).profile.user_id, cx)
             });
         }
+        let account_playback = playback.clone();
         let user_profile_subscription = cx.observe(&user_profile, move |this, account, cx| {
             if !account.read(cx).loading {
-                playback.update(cx, |playback, cx| {
+                account_playback.update(cx, |playback, cx| {
                     playback.validate_heart_account(account.read(cx).profile.user_id, cx)
                 });
             }
@@ -232,6 +227,7 @@ impl MainContent {
             search_page,
             search_results,
             library,
+            playback,
             side_panel,
             playlist_backdrop,
             playing_indicator,
@@ -258,6 +254,31 @@ impl MainContent {
         let keywords = self.search_input.read(cx).value().trim().to_owned();
         if !keywords.is_empty() {
             self.submit_search(keywords, cx);
+        }
+    }
+
+    /// 开始心动模式。
+    ///
+    /// 官方的心动模式只要一颗种子就能换一整条推荐流，所以这里不做预取：
+    /// 点开的时候给播放器一颗种子，播放器一次请求就把整条流拿回来，
+    /// 播到队尾再自动续订。
+    pub(super) fn start_heart_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 种子从红心里随机挑一颗；账号和「我喜欢的音乐」的歌单 id
+        // 播放器那边已经存着了（`set_heart_source`），不用再传一遍。
+        let (user_id, seed) = {
+            let library = self.library.read(cx);
+            (library.user_id, library.random_liked_song())
+        };
+        if user_id == 0 {
+            self.login_window =
+                login::open(window, self.user_profile.clone(), self.login_window, cx);
+            return;
+        }
+        let started = self
+            .playback
+            .update(cx, |playback, cx| playback.enter_heart_mode(seed, cx));
+        if started {
+            Toast::show(cx, "心动模式开启中");
         }
     }
 

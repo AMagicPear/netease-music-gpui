@@ -3,7 +3,6 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use super::*;
-use crate::models::HeartRecommendation;
 
 /// 只持久化续播所需的身份和来源；请求、错误和等待状态不会跨启动恢复。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -50,6 +49,10 @@ impl PlaybackController {
         }
     }
 
+    /// 播放栏的模式按钮走到心动模式那一档。
+    ///
+    /// 这时正播放「我喜欢的音乐」，心动模式接着当前这首往下接推荐，
+    /// 当前音源和进度都留着。
     pub(super) fn start_heart_mode(&mut self, cx: &mut Context<Self>) {
         if self.state.heart_loading || !self.heart_reachable() {
             return;
@@ -59,34 +62,34 @@ impl PlaybackController {
         self.heart = source;
         self.heart_continue = true;
         self.heart_waiting = false;
-        self.request_heart(cx);
+        // 接着当前这首往下接，种子就是它。
+        self.request_heart(cx, None);
     }
 
-    /// 首页卡片是一份已准备好的新队列，与当前播放模式无关。
-    pub fn play_heart_recommendation(
-        &mut self,
-        user_id: u64,
-        recommendation: HeartRecommendation,
-        cx: &mut Context<Self>,
-    ) {
-        if user_id == 0 {
-            return;
-        }
+    /// 从任意位置开始心动模式：换一条新队列，从头播起。
+    ///
+    /// 官方的心动模式就是这么做的——给一颗种子歌，服务端回一整条推荐流。
+    /// 这里不做预取：想要心动流的时候才去要，否则一次请求换来的
+    /// 一百多首歌会白放在内存里。
+    ///
+    /// 账号和「我喜欢的音乐」的歌单 id 由 [`Self::set_heart_source`] 供给，
+    /// 这里只补一颗种子歌；没有种子就由接口那边从红心里随机挑。
+    ///
+    /// 返回是否真的开始了：没登录、来源还没准备好时给 false，
+    /// 调用方据此决定要不要告诉用户「正在开启」。
+    pub fn enter_heart_mode(&mut self, seed: Option<u64>, cx: &mut Context<Self>) -> bool {
+        let Some(source) = self.heart_source.clone() else {
+            return false;
+        };
         self.cancel_heart();
-        self.heart = Some(HeartSession {
-            user_id,
-            playlist_id: recommendation.playlist_id,
-        });
+        self.heart = Some(source);
+        // 不是接着当前队列播，而是换一条新的。
+        self.heart_continue = false;
+        // 拿到第一批就开播。
         self.heart_waiting = true;
-        if let Some((song, play)) = self.finish_heart(
-            self.heart_generation,
-            Ok((recommendation.playlist_id, recommendation.songs)),
-        ) {
-            self.load_song(song, Duration::ZERO, play, cx);
-        }
-        self.save_cache();
-        self.publish(cx, PlaybackEvent::SnapshotChanged);
-        self.maybe_preload(cx);
+        // 队列和模式都要等推荐回来才换，所以现在不用落盘。
+        self.request_heart(cx, seed);
+        true
     }
 
     pub fn retry_heart_mode(&mut self, cx: &mut Context<Self>) {
@@ -94,13 +97,21 @@ impl PlaybackController {
             return;
         }
         self.state.heart_error = None;
-        if !self.state.duration.is_zero() && self.state.position >= self.state.duration {
+        // 第一次就没起来：重来一批就直接开播；
+        // 已经生效：只有「上一首刚好播完」才继续等推荐。
+        if !self.heart_active()
+            || (!self.state.duration.is_zero() && self.state.position >= self.state.duration)
+        {
             self.heart_waiting = true;
         }
-        self.request_heart(cx);
+        self.request_heart(cx, None);
     }
 
-    fn request_heart(&mut self, cx: &mut Context<Self>) {
+    /// 要一批心动推荐。
+    ///
+    /// `seed` 是种子歌：给了就用它，没给就看是不是「接着当前这首」，
+    /// 再没有就交给接口那边从红心里随机挑一颗。
+    fn request_heart(&mut self, cx: &mut Context<Self>, seed: Option<u64>) {
         if self.state.heart_loading {
             return;
         }
@@ -112,10 +123,11 @@ impl PlaybackController {
         let generation = self.heart_generation;
         let api = MusicApi::global(cx);
         let client = api.client.clone();
-        let seed = self
-            .heart_continue
-            .then(|| self.current_list_song().map(|song| song.id))
-            .flatten();
+        let seed = seed.filter(|id| *id != 0).or_else(|| {
+            self.heart_continue
+                .then(|| self.current_list_song().map(|song| song.id))
+                .flatten()
+        });
         let request = api.runtime.spawn(async move {
             let playlist_id = if session.playlist_id == 0 {
                 MusicApi::heart_playlist(&client, session.user_id).await?
@@ -172,7 +184,7 @@ impl PlaybackController {
                 self.state.heart_error = Some(message);
                 self.heart_waiting = false;
                 if initial {
-                    self.heart = None;
+                    // 会话留着：重试时还能拿它再发一次请求，这次只是没播成。
                     self.heart_continue = false;
                 }
                 return None;
@@ -251,7 +263,7 @@ impl PlaybackController {
                 self.queue.len().saturating_sub(cursor + 1) <= REFILL_REMAINING
             })
         {
-            self.request_heart(cx);
+            self.request_heart(cx, None);
         }
     }
 
@@ -264,7 +276,7 @@ impl PlaybackController {
         if self.state.heart_error.is_some() {
             self.retry_heart_mode(cx);
         } else {
-            self.request_heart(cx);
+            self.request_heart(cx, None);
         }
         true
     }
@@ -433,8 +445,57 @@ mod tests {
             assert_eq!(controller.state.current_song.as_ref().unwrap().id, 90);
             assert_eq!(controller.state.mode, PlayMode::Shuffle);
             assert!(controller.state.heart_error.is_some());
-            assert!(controller.heart.is_none());
+            // 会话留着，重试时还能拿它再发一次请求。
+            assert!(controller.heart.is_some());
+            // 但它没生效，落盘时不写进去。
+            assert!(!controller.heart_active());
         }
+    }
+
+    #[test]
+    fn entering_heart_mode_replaces_the_queue_and_plays_the_first_recommendation() {
+        let mut controller = PlaybackController::for_test();
+        controller.set_list(Some(3), songs(&[30, 31]), Some(30));
+        controller.state.current_song = controller.current_list_song();
+        controller.state.mode = PlayMode::Shuffle;
+        controller.heart = Some(HeartSession {
+            user_id: 1,
+            playlist_id: 0,
+        });
+
+        // 换队列：从头播，不接着当前这首。
+        controller.heart_continue = false;
+        controller.heart_waiting = true;
+        let selected = controller
+            .finish_heart(controller.heart_generation, Ok((9, songs(&[90, 91]))))
+            .unwrap();
+        assert_eq!((selected.0.id, selected.1), (90, true));
+        assert_eq!(ids(&controller), [90, 91]);
+        assert_eq!(controller.queue_cursor, Some(0));
+        assert_eq!(controller.state.mode, PlayMode::Heart);
+        assert_eq!(controller.queue_source, Some(9));
+    }
+
+    #[test]
+    fn a_failed_first_batch_keeps_the_session_so_a_retry_can_reuse_it() {
+        let mut controller = pending();
+        controller.heart_continue = false;
+        controller.heart_waiting = true;
+        assert!(
+            controller
+                .finish_heart(controller.heart_generation, Err("断网".into()))
+                .is_none()
+        );
+        assert!(controller.state.heart_error.is_some());
+        assert!(controller.heart.is_some());
+        // 重试时把「拿到就播」的意图补回来。
+        controller.state.heart_error = None;
+        controller.heart_waiting = true;
+        let selected = controller
+            .finish_heart(controller.heart_generation, Ok((9, songs(&[90, 91]))))
+            .unwrap();
+        assert_eq!((selected.0.id, selected.1), (90, true));
+        assert_eq!(controller.state.mode, PlayMode::Heart);
     }
 
     #[test]

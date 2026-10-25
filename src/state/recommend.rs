@@ -6,8 +6,8 @@ use super::account::AccountState;
 use super::resource::{Resource, request};
 use crate::api::MusicApi;
 use crate::models::{
-    FeaturedActivity, HeartRecommendation, PLAYLIST_BLOCK_CODE, RecommendEntry,
-    RecommendedPlaylist, playlists_from_creatives,
+    FeaturedActivity, PLAYLIST_BLOCK_CODE, RecommendEntry, RecommendedPlaylist,
+    playlists_from_creatives,
 };
 
 /// 顶部入口的展示类型；每日推荐和私人漫游有独立角标。
@@ -118,8 +118,6 @@ pub struct RecommendStore {
     pub playlists: Resource<Vec<RecommendedPlaylist>>,
     /// 精选活动横幅。
     pub featured: Resource<Vec<FeaturedActivity>>,
-    /// 心动模式的推荐流：预取，不触碰正在播放的队列。
-    pub heart: Resource<HeartRecommendation>,
     /// 雷达歌单第一首的封面。
     pub radar_first_song_cover: Resource<Option<SharedString>>,
     /// 已加载过的身份：`Some(0)` 表示游客，`None` 表示还没取过。
@@ -141,7 +139,6 @@ impl RecommendStore {
             radar: Resource::new(),
             playlists: Resource::new(),
             featured: Resource::new(),
-            heart: Resource::new(),
             radar_first_song_cover: Resource::new(),
             user_id: None,
             _user_subscription: Some(subscription),
@@ -182,7 +179,6 @@ impl RecommendStore {
             self.radar.reset();
             self.playlists.reset();
             self.featured.reset();
-            self.heart.reset();
             self.radar_first_song_cover.reset();
         }
         self.user_id = Some(user_id);
@@ -191,7 +187,6 @@ impl RecommendStore {
         self.load_radar(user_id, cx);
         self.load_playlists(user_id, cx);
         self.load_featured(cx);
-        self.load_heart(cx);
         cx.notify();
     }
 
@@ -264,23 +259,6 @@ impl RecommendStore {
             cx,
             |this| &mut this.featured,
             MusicApi::featured_activities(client),
-        );
-    }
-
-    pub fn load_heart(&mut self, cx: &mut Context<Self>) {
-        let Some(user_id) = self.user_id.filter(|id| *id != 0) else {
-            return;
-        };
-        let client = MusicApi::global(cx).client.clone();
-        self.heart.fetch(
-            "heart recommendation",
-            cx,
-            |this| &mut this.heart,
-            async move {
-                let playlist_id = MusicApi::heart_playlist(&client, user_id).await?;
-                let songs = MusicApi::heart_songs(client, playlist_id).await?;
-                Ok(HeartRecommendation { playlist_id, songs })
-            },
         );
     }
 
@@ -402,7 +380,6 @@ mod tests {
             radar: Resource::new(),
             playlists: Resource::new(),
             featured: Resource::new(),
-            heart: Resource::new(),
             radar_first_song_cover: Resource::new(),
             user_id: None,
             _user_subscription: None,

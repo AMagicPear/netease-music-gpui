@@ -240,7 +240,7 @@ fn format_count(count: u64) -> String {
 /// 无预设样式的图标按钮：Button 管交互，SVG 管颜色。
 fn hover_icon(
     id: &'static str,
-    label: &'static str,
+    label: impl Into<SharedString>,
     icon_path: &'static str,
     size: Pixels,
     color: Hsla,
@@ -334,6 +334,8 @@ impl Render for PlayerBar {
         // 心动模式生效后模式本身就是那一档；还在加载时队列尚未换上，
         // 模式还是原来那一档，就先用心动图标提示正在准备。
         let loading_heart = snapshot.heart_loading && mode != PlayMode::Heart;
+        // 心动没起来时把原因摆出来，按钮同时变成重试入口。
+        let heart_error = snapshot.heart_error.clone();
         let selected_quality = snapshot.quality;
         // 优先显示实际拿到的音质，降级时不会谎报。
         let quality_label = snapshot
@@ -486,29 +488,59 @@ impl Render for PlayerBar {
                             .gap(px(20.))
                             .text_color(colors.foreground)
                             .child(
-                                hover_icon(
-                                    "player-order-button",
-                                    if loading_heart {
-                                        "正在获取心动推荐…"
-                                    } else {
-                                        mode.label()
-                                    },
-                                    if loading_heart {
-                                        PlayMode::Heart.icon_path()
-                                    } else {
-                                        mode.icon_path()
-                                    },
-                                    IconSize::Large.pixels(),
-                                    colors.muted_foreground,
-                                    colors,
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        cx.stop_propagation();
-                                        this.playback
-                                            .update(cx, |playback, cx| playback.cycle_mode(cx));
-                                    },
-                                )),
+                                div()
+                                    .relative()
+                                    .flex_none()
+                                    .child(
+                                        hover_icon(
+                                            "player-order-button",
+                                            heart_error.as_deref().unwrap_or(if loading_heart {
+                                                "正在获取心动推荐…"
+                                            } else {
+                                                mode.label()
+                                            }),
+                                            if loading_heart || heart_error.is_some() {
+                                                PlayMode::Heart.icon_path()
+                                            } else {
+                                                mode.icon_path()
+                                            },
+                                            IconSize::Large.pixels(),
+                                            if heart_error.is_some() {
+                                                colors.primary
+                                            } else {
+                                                colors.muted_foreground
+                                            },
+                                            colors,
+                                        )
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                cx.stop_propagation();
+                                                this.playback.update(cx, |playback, cx| {
+                                                    // 心动没起来时，这个按钮就是重试。
+                                                    if playback.snapshot().heart_error.is_some() {
+                                                        playback.retry_heart_mode(cx);
+                                                    } else {
+                                                        playback.cycle_mode(cx);
+                                                    }
+                                                });
+                                            }),
+                                        ),
+                                    )
+                                    // 失败原因浮在按钮上方，不挤动播放控件。
+                                    .when_some(heart_error.clone(), |button, message| {
+                                        button.child(
+                                            div()
+                                                .absolute()
+                                                .bottom_full()
+                                                .mb(px(8.))
+                                                .left(px(-70.))
+                                                .w(px(180.))
+                                                .text_center()
+                                                .text_size(px(12.))
+                                                .text_color(colors.primary)
+                                                .child(message),
+                                        )
+                                    }),
                             )
                             .child(
                                 hover_icon(

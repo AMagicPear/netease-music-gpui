@@ -12,6 +12,11 @@ pub(crate) enum Navigate {
     SongComments(Song),
     /// 每日推荐不是歌单，单独一条路由；页面的数据由 DailySongsStore 自己加载。
     DailySongs,
+    /// 开始心动模式：换一条新的推荐队列，从头播起。
+    ///
+    /// 和 [`Self::DailySongs`] 一样是「入口卡片触发的动作」而不是翻页，
+    /// 首页卡片和侧栏图标共用这一条。
+    HeartMode,
 }
 
 pub(crate) struct NavigationBus;

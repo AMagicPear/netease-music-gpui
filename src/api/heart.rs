@@ -55,10 +55,11 @@ impl MusicApi {
             .ok_or_else(|| "没有找到我喜欢的音乐歌单".into())
     }
 
-    pub async fn heart_songs(client: ApiClient, playlist_id: u64) -> Result<Vec<Song>, String> {
-        Self::heart_songs_from_seed(client, playlist_id, None).await
-    }
-
+    /// 官方的智能歌单接口：一颗种子歌换一整条推荐流。
+    ///
+    /// `songId` 是种子、`playlistId` 是红心歌单；服务端给的顺序就是播放顺序，
+    /// 客户端不再洗牌。实测 `count` 被服务端忽略，一次就回一百多首，
+    /// 所以只要给一颗种子就够播很久。
     pub async fn heart_songs_from_seed(
         client: ApiClient,
         playlist_id: u64,

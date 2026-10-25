@@ -14,7 +14,7 @@ use playback::PlaybackController;
 use state::{account::AccountState, library::MusicLibrary, song_counts::SongCounts};
 use ui::{
     assets::Assets,
-    components::{PlayerBar, SidePanel},
+    components::{PlayerBar, SidePanel, Toast, ToastHandle},
     events::{NavigationBus, NavigationBusHandle},
     now_playing::NowPlaying,
     shell::{MainContent, MainWindow},
@@ -68,6 +68,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // MainWindow 订阅一次接管，不再按来源各挂一条订阅。
                 let nav_bus = cx.new(|_| NavigationBus);
                 cx.set_global(NavigationBusHandle(nav_bus));
+                // 全局提示条：同样只有一个实体，谁都能弹一句话，窗口层负责画。
+                let toast = cx.new(|_| Toast::new());
+                cx.set_global(ToastHandle(toast));
                 desktop::configure_window(window, cx);
                 let playback =
                     cx.new(|cx| PlaybackController::new(window, persistence.clone(), cx));

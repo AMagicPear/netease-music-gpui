@@ -24,6 +24,7 @@ mod song_table;
 mod spinner;
 mod tab_bar;
 mod text;
+mod toast;
 mod vinyl;
 mod vinyl_stage;
 mod virtual_table;
@@ -48,6 +49,7 @@ pub use spinner::spinner;
 pub use tab_bar::{TabBar, TabChanged, TabItem};
 use text::match_highlight;
 pub(super) use text::{keyword_ranges, match_highlights, text_with_matches};
+pub use toast::{Toast, ToastHandle};
 pub(in crate::ui) use vinyl::{RotationClock, Vinyl};
 pub use vinyl_stage::{Tonearm, vinyl_stage};
 pub use virtual_table::{

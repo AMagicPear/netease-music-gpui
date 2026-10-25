@@ -3,8 +3,7 @@ use std::time::Duration;
 use gpui::*;
 use gpui_kit::base::{Button, ColorTokens, Theme};
 
-use crate::models::{FeaturedActivity, PlayMode, Playlist, RecommendedPlaylist};
-use crate::playback::{PlaybackController, PlaybackEvent};
+use crate::models::{FeaturedActivity, Playlist, RecommendedPlaylist};
 use crate::state::daily::DailySongsStore;
 use crate::state::library::MusicLibrary;
 use crate::state::recommend::{QuickEntry, QuickEntryKind, RecommendStore};
@@ -22,23 +21,13 @@ const CARD_TEXT_HEIGHT: Pixels = px(48.);
 const TARGET_CARD_WIDTH: f32 = 135.;
 const PLACEHOLDER_COVER: &str = "images/trackBlank.png";
 
-struct PendingHeartPlayback {
-    user_id: u64,
-    revision: u64,
-    mode: PlayMode,
-    play_requested: bool,
-}
-
 /// shell 通过 content 注入可用宽度，所有区块共用同一列数。
 pub struct RecommendPage {
     store: Entity<RecommendStore>,
     _store_subscription: Subscription,
     _daily_subscription: Subscription,
-    _playback_subscription: Subscription,
-    pending_heart: Option<PendingHeartPlayback>,
     daily: Entity<DailySongsStore>,
     library: Entity<MusicLibrary>,
-    playback: Entity<PlaybackController>,
     /// 与 entries 按下标对齐，新封面加载中保留上一张的颜色。
     entry_colors: Vec<CoverColor>,
 }
@@ -48,48 +37,16 @@ impl RecommendPage {
         store: Entity<RecommendStore>,
         daily: Entity<DailySongsStore>,
         library: Entity<MusicLibrary>,
-        playback: Entity<PlaybackController>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let subscription = cx.observe(&store, |this, store, cx| {
-            if let Some(pending) = &this.pending_heart {
-                let user_id = pending.user_id;
-                let store = store.read(cx);
-                if this.library.read(cx).user_id != user_id || !store.heart.is_loading() {
-                    this.pending_heart = None;
-                    if this.library.read(cx).user_id == user_id
-                        && let Some(heart) = store.heart.value().cloned()
-                    {
-                        this.playback.update(cx, |playback, cx| {
-                            playback.play_heart_recommendation(user_id, heart, cx);
-                        });
-                    }
-                }
-            }
-            cx.notify();
-        });
-        let playback_subscription = cx.subscribe(&playback, |this, playback, event, cx| {
-            if matches!(event, PlaybackEvent::SnapshotChanged) {
-                let playback = playback.read(cx);
-                if this.pending_heart.as_ref().is_some_and(|pending| {
-                    pending.revision != playback.snapshot().revision
-                        || pending.mode != playback.snapshot().mode
-                        || pending.play_requested != playback.is_play_requested()
-                }) {
-                    this.pending_heart = None;
-                }
-            }
-        });
+        let subscription = cx.observe(&store, |_, _, cx| cx.notify());
         let daily_subscription = cx.observe(&daily, |_, _, cx| cx.notify());
         Self {
             store,
             _store_subscription: subscription,
             _daily_subscription: daily_subscription,
-            _playback_subscription: playback_subscription,
-            pending_heart: None,
             daily,
             library,
-            playback,
             entry_colors: Vec::new(),
         }
     }
@@ -136,11 +93,13 @@ impl RecommendPage {
                     track_cover_url(daily_cover, 300).into()
                 }
                 QuickEntryKind::HeartMode => {
-                    let cover = store
-                        .heart
-                        .value()
-                        .and_then(|heart| heart.songs.first())
-                        .and_then(|song| song.al.pic_url.as_deref());
+                    // 心动模式的封面就是「我喜欢的音乐」那张歌单封面，
+                    // 音乐库里已经有了，不必为它单独请求。
+                    let cover = self
+                        .library
+                        .read(cx)
+                        .favorite_playlist()
+                        .and_then(|playlist| playlist.cover_img_url.as_deref());
                     cover.map_or_else(
                         || PLACEHOLDER_COVER.into(),
                         |cover| track_cover_url(Some(cover), 300).into(),
@@ -183,18 +142,13 @@ impl RecommendPage {
         let mut entries = store.entries.value().cloned().unwrap_or_default();
         for entry in &mut entries {
             if entry.kind == QuickEntryKind::HeartMode {
-                entry.caption =
-                    if let Some(song) = store.heart.value().and_then(|heart| heart.songs.first()) {
-                        format!("心动模式 | 从「{}」听起", song.name).into()
-                    } else if store.heart.is_loading() {
-                        "正在准备心动推荐…".into()
-                    } else if store.heart.error().is_some() {
-                        "暂时无法获取推荐 · 点击重试".to_string().into()
-                    } else if self.library.read(cx).user_id == 0 {
-                        "登录后从你喜欢的歌听起".into()
-                    } else {
-                        "你的红心歌曲和更多相似推荐".into()
-                    };
+                // 推荐流是点开时现取的，卡片上预告不了第一首，
+                // 只说明它从哪儿起播。
+                entry.caption = if self.library.read(cx).user_id == 0 {
+                    "登录后从你喜欢的歌听起".into()
+                } else {
+                    "你的红心歌曲和更多相似推荐".into()
+                };
             }
             if entry.kind == QuickEntryKind::DailySongs {
                 entry.caption = self.daily.read(cx).songs().first().map_or_else(
@@ -412,27 +366,10 @@ fn quick_entry(
             .role(Role::Button)
             .aria_label(entry.title.clone())
             .cursor_pointer()
-            .on_click(cx.listener(move |this, _, _, cx| match &target {
+            .on_click(cx.listener(move |_, _, _, cx| match &target {
                 QuickTarget::DailySongs => NavigationBus::emit(cx, Navigate::DailySongs),
-                QuickTarget::HeartMode => {
-                    let user_id = this.library.read(cx).user_id;
-                    let recommendation = this.store.read(cx).heart.value().cloned();
-                    if let Some(heart) = recommendation {
-                        this.pending_heart = None;
-                        this.playback.update(cx, |playback, cx| {
-                            playback.play_heart_recommendation(user_id, heart, cx);
-                        });
-                    } else if user_id != 0 {
-                        let playback = this.playback.read(cx);
-                        this.pending_heart = Some(PendingHeartPlayback {
-                            user_id,
-                            revision: playback.snapshot().revision,
-                            mode: playback.snapshot().mode,
-                            play_requested: playback.is_play_requested(),
-                        });
-                        this.store.update(cx, |store, cx| store.load_heart(cx));
-                    }
-                }
+                // 心动模式交给上层统一发起：卡片只提交意图。
+                QuickTarget::HeartMode => NavigationBus::emit(cx, Navigate::HeartMode),
                 QuickTarget::Playlist { id, summary } => NavigationBus::emit(
                     cx,
                     Navigate::Playlist {

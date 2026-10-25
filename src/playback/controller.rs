@@ -244,18 +244,18 @@ impl PlaybackController {
     }
 
     /// 音乐库提供账号与红心歌单来源；控制器据此判断 Heart 是否可选。
+    ///
+    /// 歌单 id 暂时拿不到也先记下账号：心动模式要靠它去找「我喜欢的音乐」。
     pub fn set_heart_source(
         &mut self,
         user_id: u64,
         playlist_id: Option<u64>,
         cx: &mut Context<Self>,
     ) {
-        let source = playlist_id
-            .filter(|id| *id != 0 && user_id != 0)
-            .map(|playlist_id| HeartSession {
-                user_id,
-                playlist_id,
-            });
+        let source = (user_id != 0).then_some(HeartSession {
+            user_id,
+            playlist_id: playlist_id.unwrap_or(0),
+        });
         if self.heart_source == source {
             return;
         }
@@ -265,10 +265,9 @@ impl PlaybackController {
 
     pub fn heart_reachable(&self) -> bool {
         self.current_list_song().is_some()
-            && self
-                .heart_source
-                .as_ref()
-                .is_some_and(|source| self.queue_source == Some(source.playlist_id))
+            && self.heart_source.as_ref().is_some_and(|source| {
+                source.playlist_id != 0 && self.queue_source == Some(source.playlist_id)
+            })
     }
 
     /// 心动模式是否已经生效：模式本身就是这一档，看 mode 就够了。

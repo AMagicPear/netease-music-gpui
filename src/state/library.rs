@@ -7,6 +7,7 @@ use crate::{
     models::{Playlist, Song},
 };
 use gpui::{Context, Entity, ReadGlobal, Subscription};
+use rand::seq::IteratorRandom;
 use std::collections::{HashMap, HashSet};
 
 mod collection;
@@ -62,6 +63,15 @@ impl MusicLibrary {
         self.playlists()
             .iter()
             .find(|playlist| playlist.special_type == 5)
+    }
+
+    /// 心动模式的种子：从红心里随机挑一颗。
+    ///
+    /// 官方的心动模式只要一颗种子就能换一整条推荐流，所以这里不必
+    /// 把整张红心歌单拉下来——`likes` 里已经是收藏的歌曲 id。
+    pub fn random_liked_song(&self) -> Option<u64> {
+        let likes = self.likes.value()?;
+        likes.iter().copied().choose(&mut rand::rng())
     }
 
     pub fn retry(&mut self, cx: &mut Context<Self>) {

@@ -14,8 +14,14 @@ fn heart_mode_can_load_real_recommendations() {
         let playlist_id = MusicApi::heart_playlist(&api.client, user.user_id)
             .await
             .unwrap();
+        // 种子就是一颗红心，和官方一样：给一颗种子换一整条推荐流。
+        let likes = MusicApi::liked_song_ids(&api.client, user.user_id)
+            .await
+            .unwrap();
+        assert!(!likes.is_empty(), "红心歌单为空，跳过");
         for _ in 0..2 {
-            let songs = MusicApi::heart_songs(api.client.clone(), playlist_id)
+            let seed = likes.first().copied();
+            let songs = MusicApi::heart_songs_from_seed(api.client.clone(), playlist_id, seed)
                 .await
                 .unwrap();
             assert!(!songs.is_empty());
