@@ -103,7 +103,10 @@ impl AccountState {
 
     fn accept_login(&mut self, cookie: String, profile: UserProfile, cx: &mut Context<Self>) {
         self.generation = self.generation.wrapping_add(1);
-        cx.global_mut::<MusicApi>().client = create_client(Some(cookie));
+        let api = cx.global_mut::<MusicApi>();
+        api.client = create_client(Some(cookie.clone()));
+        // 写操作要用的 csrf 存在原始 Cookie 里，客户端换了，这份也得跟着换。
+        api.cookie = Some(cookie);
         self.loading = false;
         self.error = None;
         self.set_profile(profile, cx);
@@ -153,7 +156,9 @@ impl AccountState {
                 account.loading = false;
                 match result {
                     Ok(Ok(())) => {
-                        cx.global_mut::<MusicApi>().client = create_client(None);
+                        let api = cx.global_mut::<MusicApi>();
+                        api.client = create_client(None);
+                        api.cookie = None;
                         account.profile = UserProfile {
                             nickname: "未登录".into(),
                             ..Default::default()

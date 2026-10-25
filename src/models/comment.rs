@@ -27,6 +27,31 @@ pub struct SongComments {
     pub more: bool,
 }
 
+/// 评论挂在哪种资源上。歌曲和歌单的评论接口不同，但列表、分页、发布流程完全一致，
+/// 所以只在这里区分资源类型：接口层按它选端点，UI 层按它认语境。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommentResource {
+    Song(u64),
+    Playlist(u64),
+}
+
+impl CommentResource {
+    /// 网易云的资源类型编号：0 = 歌曲，2 = 歌单。发布评论要按它拼 threadId。
+    pub fn api_type(&self) -> &'static str {
+        match self {
+            CommentResource::Song(_) => "0",
+            CommentResource::Playlist(_) => "2",
+        }
+    }
+
+    /// 资源 id：歌曲 id 或歌单 id。
+    pub fn id(&self) -> u64 {
+        match self {
+            CommentResource::Song(id) | CommentResource::Playlist(id) => *id,
+        }
+    }
+}
+
 /// 解析一页评论。`offset` 是这一页普通评论的起始位置：热评只合并在第一页
 /// （`offset == 0`），否则接口也会把热评塞回来，翻页时整页都是重复数据。
 pub(crate) fn parse_page(body: Value, offset: usize) -> Result<SongComments, String> {

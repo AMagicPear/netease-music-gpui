@@ -11,7 +11,7 @@ mod user;
 
 pub use audio_source::{AudioQualityLevel, AudioSourceInfo};
 pub(crate) use comment::parse_page as parse_comment_page;
-pub use comment::{SongComment, SongComments};
+pub use comment::{CommentResource, SongComment, SongComments};
 pub(crate) use homepage::parse_blocks as parse_homepage_blocks;
 // 推荐页的新接口解析已经直接走 `homepage` 模块内部，这个导出只给测试夹具用。
 #[cfg(test)]

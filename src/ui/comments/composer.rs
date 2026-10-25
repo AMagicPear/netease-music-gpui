@@ -34,7 +34,8 @@ pub(in crate::ui) fn new_input(window: &mut Window, cx: &mut App) -> Entity<Text
             .scroll_beyond_last_line(Some(0));
         let colors = Theme::global(cx).tokens.colors;
         input.set_editor_style(InputEditorStyle {
-            foreground: colors.foreground,
+            // 正文用墨色 70%（#283248B3）：比标题淡一档，长评论读起来不刺眼。
+            foreground: colors.foreground.alpha(0.7),
             muted_foreground: colors.muted_foreground,
             selection: colors.selection,
             ..Default::default()
@@ -150,7 +151,17 @@ fn input_box(
     cx: &App,
 ) -> AnyElement {
     let colors = Theme::global(cx).tokens.colors;
+    let draft = input.read(cx).value();
     let remaining = COMMENT_LIMIT.saturating_sub(input.read(cx).text().len_chars());
+    // 发布状态归列表所有：它才是评论数据的主人，编辑框只负责把内容递过去。
+    let publishing = comments.read(cx).publishing();
+    let publish_error = comments.read(cx).publish_error().map(str::to_owned);
+    // 空内容没有可发布的，也就没必要让按钮亮着。
+    let can_publish = !publishing && !draft.trim().is_empty();
+    // 滚轮和发布按钮都要用这两个实体，各拿一份。
+    let scroll_comments = comments.clone();
+    let publish_input = input.clone();
+    let publish_comments = comments.clone();
     div()
         .id("comment-composer")
         .w_full()
@@ -173,7 +184,7 @@ fn input_box(
         })
         // Textarea 只有实际滚动文字时才停止冒泡；空框及文字边界都继续滚动页面。
         .on_scroll_wheel(move |event: &ScrollWheelEvent, _, cx| {
-            comments.update(cx, |comments, cx| {
+            scroll_comments.update(cx, |comments, cx| {
                 comments
                     .scroll_state()
                     .scroll_by(-event.delta.pixel_delta(px(20.)).y);
@@ -201,7 +212,7 @@ fn input_box(
                         .w_full()
                         .flex_1()
                         .min_h(px(0.))
-                        .text_size(px(13.))
+                        .text_size(px(14.))
                         .line_height(px(20.))
                         .text_color(colors.foreground)
                         .child(Textarea::new(&input)),
@@ -215,21 +226,46 @@ fn input_box(
                         .justify_between()
                         .text_color(colors.muted_foreground)
                         .child(
+                            // 发布失败的原因顶掉字数提示：出错时更需要知道为什么错。
                             div()
-                                .id("comment-remaining")
+                                .id("comment-status")
+                                .flex_1()
+                                .min_w(px(0.))
                                 .text_size(px(10.))
-                                .aria_label(format!("还可输入 {remaining} 字"))
-                                .child(remaining.to_string()),
+                                .truncate()
+                                .when_some(publish_error.clone(), |status, error| {
+                                    status
+                                        .text_color(colors.destructive)
+                                        .aria_label(error.clone())
+                                        .child(error)
+                                })
+                                .when(publish_error.is_none(), |status| {
+                                    status
+                                        .text_color(colors.muted_foreground)
+                                        .aria_label(format!("还可输入 {remaining} 字"))
+                                        .child(remaining.to_string())
+                                }),
                         )
                         .child(
                             div().flex().items_center().gap(px(10.)).child(
                                 Button::new("comment-publish")
-                                    .disabled(true)
-                                    .aria_label("发布评论（暂未支持）")
+                                    .disabled(!can_publish)
+                                    .aria_label("发布评论")
                                     .h(px(20.))
                                     .text_size(px(13.))
-                                    .text_color(colors.muted_foreground)
-                                    .child("发布"),
+                                    .text_color(if can_publish {
+                                        colors.foreground
+                                    } else {
+                                        colors.muted_foreground
+                                    })
+                                    .on_click(move |_, _, cx| {
+                                        // 内容在点击这一刻才读：按钮按下时框里是什么就发什么。
+                                        let content = publish_input.read(cx).value().to_string();
+                                        publish_comments.update(cx, |view, cx| {
+                                            view.publish(content, cx);
+                                        });
+                                    })
+                                    .child(if publishing { "发布中" } else { "发布" }),
                             ),
                         ),
                 ),

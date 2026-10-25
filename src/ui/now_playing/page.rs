@@ -11,7 +11,7 @@ use super::{NowPlaying, NowPlayingEvent};
 use crate::playback::{PlaybackController, PlaybackEvent};
 use crate::state::library::MusicLibrary;
 use crate::ui::assets::track_cover_url;
-use crate::ui::comments::{CommentResource, CommentsView, ListMode};
+use crate::ui::comments::{CommentResource, CommentsView, ListMode, open_comment_window};
 use crate::ui::components::{PLAYER_BAR_HEIGHT, Tonearm, Vinyl, format_duration, window_drag_area};
 use crate::ui::cover_color::{
     Backdrop, CoverColor, CoverGradient, dark_colors, dark_gradient, gradient_layer,
@@ -804,7 +804,6 @@ impl Render for NowPlayingPage {
                                                 )
                                                 .child(
                                                     Button::new("publish-song-comment")
-                                                        .disabled(true)
                                                         .w(px(152.))
                                                         .h(px(40.))
                                                         .rounded_full()
@@ -822,6 +821,18 @@ impl Render for NowPlayingPage {
                                                         .border_1()
                                                         .border_color(white().alpha(0.10))
                                                         .text_color(white())
+                                                        .on_click({
+                                                            let comments = self.comments.clone();
+                                                            move |_, window, cx| {
+                                                                // 这一屏没有编辑框，弹一个
+                                                                // 小窗出来写评论。
+                                                                open_comment_window(
+                                                                    window,
+                                                                    comments.clone(),
+                                                                    cx,
+                                                                );
+                                                            }
+                                                        })
                                                         .child("发布评论"),
                                                 ),
                                         ),

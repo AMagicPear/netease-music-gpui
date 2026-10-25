@@ -13,15 +13,16 @@ use gpui_kit::base::input::{InputEvent, TextareaState};
 
 use super::{CommentComposer, CommentResource, CommentsView, ListMode, clamp_to_limit, new_input};
 use crate::ui::cover_color::Backdrop;
+use crate::ui::events::CommentPublished;
 
 pub(in crate::ui) struct CommentsPanel {
     list: Entity<CommentsView>,
     input: Entity<TextareaState>,
     composer: CommentComposer,
-    /// 两个订阅都挂在宿主实体上（gpui 的 Subscription 一丢就退订），所以必须存在这里：
+    /// 三个订阅都挂在宿主实体上（gpui 的 Subscription 一丢就退订），所以必须存在这里：
     /// 输入框限长由它通知宿主重绘剩余字数，列表滚动 / 翻页时宿主也要跟着重绘，
-    /// 吸顶编辑框才能贴着占位重新定位。
-    _subscriptions: [Subscription; 2],
+    /// 吸顶编辑框才能贴着占位重新定位；发布成功则由它清空草稿。
+    _subscriptions: [Subscription; 3],
 }
 
 impl CommentsPanel {
@@ -41,26 +42,47 @@ impl CommentsPanel {
         list.update(cx, |view, cx| view.set_header(header, cx));
         let input = new_input(window, cx);
         let composer = CommentComposer::new(input.clone(), list.clone(), backdrop);
+        let edited_list = list.clone();
         let input_subscription = cx.subscribe_in(
             &input,
             window,
-            |_, input, event: &InputEvent, window, cx| {
+            move |_, input, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::Change) {
                     input.update(cx, |input, cx| clamp_to_limit(input, window, cx));
+                    // 用户又开始改了，上一次的失败提示就不再相关。
+                    edited_list.update(cx, |view, cx| view.clear_publish_error(cx));
                 }
                 cx.notify();
             },
         );
         let list_subscription = cx.observe(&list, |_, _, cx| cx.notify());
+        // 发布成功由列表广播，编辑框据此清空草稿：谁在编辑由谁决定怎么清。
+        let publish_input = input.clone();
+        let publish_subscription =
+            cx.subscribe_in(&list, window, move |_, _, _: &CommentPublished, window, cx| {
+                // `set_value` 不发 InputEvent::Change，宿主得自己重绘，
+                // 否则剩余字数还停在旧值上。
+                publish_input.update(cx, |input, cx| input.set_value("", window, cx));
+                cx.notify();
+            });
         Self {
             list,
             input,
             composer,
-            _subscriptions: [input_subscription, list_subscription],
+            _subscriptions: [input_subscription, list_subscription, publish_subscription],
         }
     }
 
-    /// 打开一个资源的评论。同一资源重复打开不会重载，切回评论页时保留评论与滚动位置。
+    /// 列表实体：宿主要订阅它的事件（比如发布成功后更新页签上的评论数）。
+    pub(in crate::ui) fn list(&self) -> &Entity<CommentsView> {
+        &self.list
+    }
+
+    /// 打开一个资源的评论。
+    ///
+    /// 每次切到评论页都会拉一次：资源变了就重新加载，没变也刷新第一页，
+    /// 让列表回到服务端的最新那份。滚动位置和已加载的分页都留着。
+    ///
     /// `total` 是宿主手上已有的评论数：先用它渲染标题，别让标题空等到第一页回来。
     pub(in crate::ui) fn open_resource(
         &self,
@@ -69,8 +91,7 @@ impl CommentsPanel {
         cx: &mut App,
     ) {
         self.list.update(cx, |view, cx| {
-            view.set_resource(Some(resource), cx);
-            view.set_estimated_total(total, cx);
+            view.open_resource(resource, total, cx);
             view.configure(ListMode::Owned, cx);
         });
     }

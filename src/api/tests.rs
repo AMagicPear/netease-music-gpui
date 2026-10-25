@@ -1,7 +1,7 @@
 //! 真实接口回归默认忽略，显式运行时读取 COOKIE 或已保存的会话。
 
 use super::*;
-use crate::models::{CreativeTarget, MessageItem, PLAYLIST_BLOCK_CODE};
+use crate::models::{CommentResource, CreativeTarget, MessageItem, PLAYLIST_BLOCK_CODE};
 use futures::AsyncReadExt;
 use gpui::http_client::HttpClient;
 
@@ -237,6 +237,20 @@ fn homepage_blocks_can_parse_real_results() {
             .iter()
             .any(|creative| matches!(creative.target, Some(CreativeTarget::Playlist(_))))
     );
+}
+
+#[test]
+#[ignore = "会真的在账号上留下一条评论，需要登录会话（或 COOKIE 环境变量）和网络连接"]
+fn publish_comment_can_post_to_a_real_song() {
+    let api = MusicApi::from_env().expect("无法读取 COOKIE 环境变量");
+    api.runtime
+        .block_on(MusicApi::publish_comment(
+            api.client.clone(),
+            api.cookie.clone(),
+            CommentResource::Song(186016),
+            "这是一条自动化测试发布的评论",
+        ))
+        .expect("评论发布失败");
 }
 
 #[test]

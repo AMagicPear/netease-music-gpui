@@ -21,9 +21,10 @@ use std::{
 };
 
 use crate::api::MusicApi;
-use crate::models::{SongComment, SongComments};
+use crate::models::{CommentResource, SongComment, SongComments};
 use crate::ui::components::{empty_state, spinner};
 use crate::ui::cover_color::{Backdrop, dark_colors, dark_gradient};
+use crate::ui::events::CommentPublished;
 use crate::ui::theme::DOLPHIN_FAMILY;
 
 use super::comment_row;
@@ -47,13 +48,6 @@ struct SelectionEntry {
     refresh: Option<Subscription>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum CommentResource {
-    Song(u64),
-    Playlist(u64),
-}
-
-/// 外层决定何时交出滚轮；翻页和返回动画期间列表都保持原位。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ListMode {
     /// 滚轮归列表：外层已经整屏翻到位。
@@ -91,9 +85,18 @@ pub struct CommentsView {
     total: u64,
     offset: usize,
     more: bool,
+    /// 加载中：已有请求在途。
     loading: bool,
+    /// 排队中的刷新：当前页回来后接着刷第一页。
+    reload_pending: bool,
     error: Option<String>,
     request: Option<tokio::task::AbortHandle>,
+    /// 发布评论的进行中状态：一次只允许一条在途，连点不会重复发。
+    publishing: bool,
+    /// 发布失败的原因，直接显示在编辑框旁边。
+    publish_error: Option<String>,
+    /// 在途的发布请求：换资源或实体销毁时取消。
+    publish_request: Option<tokio::task::AbortHandle>,
     /// 这一帧滚轮归谁、位置归谁，见 [`ListMode`]。
     mode: ListMode,
     /// 上一次轮到列表接管滚轮时它停在哪。不接管期间钉回这里，而不是无条件钉到顶
@@ -101,6 +104,9 @@ pub struct CommentsView {
     parked_at: ListOffset,
     layout_pending: bool,
 }
+
+/// 发布成功只发一个信号：编辑框要不要清草稿、怎么清，是消费者的事。
+impl EventEmitter<CommentPublished> for CommentsView {}
 
 impl CommentsView {
     pub(in crate::ui) fn new(backdrop: Option<Backdrop>) -> Self {
@@ -127,12 +133,46 @@ impl CommentsView {
             offset: 0,
             more: false,
             loading: false,
+            reload_pending: false,
             error: None,
             request: None,
+            publishing: false,
+            publish_error: None,
+            publish_request: None,
             mode,
             parked_at: ListOffset::default(),
             layout_pending: false,
         }
+    }
+
+    /// 打开一个资源的评论。
+    ///
+    /// 资源变了就重新加载；没变（切回评论页签）也刷一次：用户每次切到评论页
+    /// 都该看到服务端最新的那份，而不是上次留在内存里的。
+    ///
+    /// `total` 是调用方手上已有的评论数，先用它渲染标题，别让标题空等到第一页回来。
+    pub fn open_resource(
+        &mut self,
+        resource: CommentResource,
+        total: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.resource == Some(resource) {
+            self.set_estimated_total(total, cx);
+            self.reload(cx);
+            return;
+        }
+        self.set_resource(Some(resource), cx);
+        self.set_estimated_total(total, cx);
+    }
+
+    /// 丢掉当前这份评论内容：评论、去重集合、选中句柄、精选小节。
+    fn clear_comments(&mut self) {
+        self.comments.clear();
+        self.seen.clear();
+        self.selection.clear();
+        self.hot_rows = 0;
+        self.hot_total = 0;
     }
 
     pub fn set_resource(&mut self, resource: Option<CommentResource>, cx: &mut Context<Self>) {
@@ -142,18 +182,20 @@ impl CommentsView {
         if let Some(request) = self.request.take() {
             request.abort();
         }
+        if let Some(request) = self.publish_request.take() {
+            request.abort();
+        }
         self.resource = resource;
         self.generation = self.generation.wrapping_add(1);
-        self.comments.clear();
-        self.selection.clear();
-        self.hot_rows = 0;
-        self.hot_total = 0;
-        self.seen.clear();
+        self.clear_comments();
         self.total = 0;
         self.offset = 0;
         self.more = false;
         self.loading = false;
+        self.reload_pending = false;
         self.error = None;
+        self.publishing = false;
+        self.publish_error = None;
         self.list.reset(2 + usize::from(self.header.is_some()));
         self.parked_at = ListOffset::default();
         self.layout_pending = true;
@@ -165,9 +207,22 @@ impl CommentsView {
 
     /// 调用方手上已经有的评论数：先用它渲染标题，接口返回后再覆盖成准确值。
     pub fn set_estimated_total(&mut self, total: Option<u64>, cx: &mut Context<Self>) {
-        if let Some(total) = total {
-            self.total = total;
+        if self.apply_estimated_total(total) {
             cx.notify();
+        }
+    }
+
+    /// 只在还不知道总数时用（0 表示未知）。已经有准确值时不能用旧快照盖回去：
+    /// 那会让标题上的数字在刷新回来之前先退回旧值。
+    ///
+    /// 返回总数有没有被改，用来决定要不要重绘。
+    fn apply_estimated_total(&mut self, total: Option<u64>) -> bool {
+        match total {
+            Some(total) if self.total == 0 => {
+                self.total = total;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -230,13 +285,19 @@ impl CommentsView {
     }
 
     fn load(&mut self, cx: &mut Context<Self>) {
+        self.load_page(self.offset, cx);
+    }
+
+    /// 拉一页评论。
+    ///
+    /// 请求始终串行——同一时刻只有一个在途，`reload_pending` 负责把刷新排到队尾。
+    fn load_page(&mut self, offset: usize, cx: &mut Context<Self>) {
         if self.loading {
             return;
         }
         let Some(resource) = self.resource else {
             return;
         };
-        let offset = self.offset;
         let generation = self.generation;
         self.loading = true;
         self.error = None;
@@ -257,10 +318,28 @@ impl CommentsView {
                 if this.finish(resource, generation, offset, result) {
                     cx.notify();
                 }
+                // 排队中的刷新：这一页回来了，接着刷第一页。
+                if this.reload_pending {
+                    this.reload_pending = false;
+                    this.reload(cx);
+                }
             });
         })
         .detach();
         cx.notify();
+    }
+
+    /// 重新拉第一页。
+    ///
+    /// 请求在途期间不清空列表：旧内容继续显示，新的到了才换上去。
+    /// 换的时候整份换成新的第一页，后面几页作废——用户滚到底会重新加载。
+    fn reload(&mut self, cx: &mut Context<Self>) {
+        if self.loading {
+            // 正在加载别的页：等它回来再刷。
+            self.reload_pending = true;
+            return;
+        }
+        self.load_page(0, cx);
     }
 
     fn finish(
@@ -281,34 +360,123 @@ impl CommentsView {
                 self.error = None;
                 self.total = page.total;
                 self.more = page.more;
-                self.offset = offset + 20;
+                if offset == 0 {
+                    // 第一页是最新的：整份换掉旧的第一页，旧的分页作废。
+                    self.clear_comments();
+                }
                 let before = self.comments.len();
                 for comment in page.comments {
                     if self.seen.insert(comment.id) {
                         self.comments.push(comment);
                     }
                 }
-                if self.comments.len() == before {
-                    self.more = false;
-                }
+                let added = self.comments.len() - before;
                 // 热评只合并在第一页；行数以真正入列的为准（去重可能吃掉几条），
                 // 标题上的数字用总数——超出 5 条的热评只是不进精选小节，
                 // 它们留在列表里跟着进「最新评论」。
                 if offset == 0 {
                     self.hot_rows = page.hot_count.min(HOT_SECTION_MAX).min(self.comments.len());
                     self.hot_total = page.hot_count as u64;
+                    // 整份换掉了：条目重排，滚动位置从头开始。
+                    // 条目 = 页头 + （精选标题）+ 评论行 + 「最新评论」标题 + 脚标。
+                    let count = usize::from(self.header.is_some())
+                        + usize::from(self.hot_rows > 0)
+                        + self.comments.len()
+                        + 2;
+                    self.list.reset(count);
+                } else {
+                    if added == 0 {
+                        // 这一页全是重复的：没有更多了。
+                        self.more = false;
+                    }
+                    // 脚标恒在末尾，插在它之前，保留已有行的测量与滚动锚点。
+                    let footer = before + 1 + usize::from(self.header.is_some());
+                    self.list.splice(footer..footer, added);
                 }
-                // 精选小节标题插在行前面；脚标恒在末尾，插在它之前
-                // 保留已有行的测量与滚动锚点。
-                let section = usize::from(offset == 0 && self.hot_rows > 0);
-                let footer = before + 1 + usize::from(self.header.is_some());
-                self.list
-                    .splice(footer..footer, (self.comments.len() - before) + section);
+                self.offset = offset + 20;
                 self.layout_pending = true;
             }
             Err(error) => self.error = Some(error),
         }
         true
+    }
+
+    /// 发布一条评论。内容为空、没有资源或已有在途请求时直接返回。
+    ///
+    /// 评论数据归列表所有，所以发布也由它发起。成功后不往列表里塞一条本地
+    /// 拼的评论，而是重新拉第一页：新增的评论、总数都以服务端那份为准。
+    pub fn publish(&mut self, content: String, cx: &mut Context<Self>) {
+        let Some(resource) = self.resource else {
+            // 没有评论对象就没有可发的地方，窗口里要能看见这句话。
+            self.publish_error = Some("没有可评论的内容".into());
+            cx.notify();
+            return;
+        };
+        let content = content.trim().to_string();
+        if content.is_empty() || self.publishing {
+            return;
+        }
+        self.publishing = true;
+        self.publish_error = None;
+        let generation = self.generation;
+        let api = MusicApi::global(cx);
+        let client = api.client.clone();
+        let cookie = api.cookie.clone();
+        let request = api.runtime.spawn(async move {
+            MusicApi::publish_comment(client, cookie, resource, &content).await
+        });
+        self.publish_request = Some(request.abort_handle());
+        cx.spawn(async move |this, cx| {
+            let result = request.await.unwrap_or_else(|_| Err("评论发布失败".into()));
+            let _ = this.update(cx, |this, cx| {
+                this.finish_publish(resource, generation, result, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// 发布结果回来。资源类型、id 或代次变了就丢掉，别把旧评论插进新列表。
+    fn finish_publish(
+        &mut self,
+        resource: CommentResource,
+        generation: u64,
+        result: Result<(), String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.resource != Some(resource) || self.generation != generation {
+            return;
+        }
+        self.publishing = false;
+        self.publish_request = None;
+        match result {
+            Ok(()) => {
+                self.publish_error = None;
+                // 列表跟着服务端走：重新拉第一页，新评论和总数一起更新。
+                self.reload(cx);
+                // 编辑框据此清空草稿：谁在编辑由谁处理，这里只负责说「发出去了」。
+                cx.emit(CommentPublished);
+            }
+            Err(error) => self.publish_error = Some(error),
+        }
+    }
+
+    /// 发布进行中：编辑框据此禁用按钮。
+    pub fn publishing(&self) -> bool {
+        self.publishing
+    }
+
+    /// 上一次发布失败的原因；用户重新编辑后由编辑框清掉。
+    pub fn publish_error(&self) -> Option<&str> {
+        self.publish_error.as_deref()
+    }
+
+    /// 用户又开始改了，旧的失败提示不再相关。
+    pub fn clear_publish_error(&mut self, cx: &mut Context<Self>) {
+        if self.publish_error.take().is_some() {
+            cx.notify();
+        }
     }
 
     /// 滚到接近底部就续拉下一页。外层的活（拍板何时接管、翻页补位）不在这里，
@@ -556,6 +724,9 @@ impl Drop for CommentsView {
         if let Some(request) = self.request.take() {
             request.abort();
         }
+        if let Some(request) = self.publish_request.take() {
+            request.abort();
+        }
     }
 }
 
@@ -624,6 +795,120 @@ mod tests {
 
     fn items(view: &CommentsView, len: usize) -> Vec<Item> {
         (0..len).map(|ix| view.item_at(ix)).collect()
+    }
+
+    #[test]
+    fn a_refreshed_first_page_replaces_the_whole_list() {
+        let resource = CommentResource::Song(1);
+        let mut view = CommentsView::new(None);
+        view.resource = Some(resource);
+        assert!(view.finish(resource, 0, 0, page(&[1, 2])));
+        // 最新评论标题 + 2 行 + 脚标。
+        assert_eq!(view.list.item_count(), 4);
+        // 刷新第一页：服务端多了一条评论，整份换成新的。
+        assert!(view.finish(resource, 0, 0, page(&[99, 1, 2])));
+        assert_eq!(view.list.item_count(), 5);
+        assert_eq!(view.comments[0].id, 99);
+        assert_eq!(
+            items(&view, 5),
+            [
+                Item::LatestHeading,
+                Item::Comment(0),
+                Item::Comment(1),
+                Item::Comment(2),
+                Item::Footer,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_refreshed_first_page_keeps_the_featured_section_above_the_new_comments() {
+        let resource = CommentResource::Song(1);
+        let mut view = CommentsView::new(None);
+        view.resource = Some(resource);
+        let mut first = page(&[1, 2, 3]).unwrap();
+        first.hot_count = 2;
+        assert!(view.finish(resource, 0, 0, Ok(first)));
+        // 精选标题 + 2 行热评 + 最新标题 + 1 行 + 脚标。
+        assert_eq!(view.list.item_count(), 6);
+        // 服务端的第一页：两条精选 + 新评论 + 原来那条。
+        let mut refreshed = page(&[1, 2, 99, 3]).unwrap();
+        refreshed.hot_count = 2;
+        assert!(view.finish(resource, 0, 0, Ok(refreshed)));
+        assert_eq!(view.list.item_count(), 7);
+        assert_eq!(
+            items(&view, 7),
+            [
+                Item::FeaturedHeading,
+                Item::Comment(0),
+                Item::Comment(1),
+                Item::LatestHeading,
+                Item::Comment(2),
+                Item::Comment(3),
+                Item::Footer,
+            ]
+        );
+        // 新评论在热评之后：id 99 排在第三条，前两条仍是精选。
+        assert_eq!(
+            view.comments.iter().map(|item| item.id).collect::<Vec<_>>(),
+            [1, 2, 99, 3]
+        );
+        assert_eq!(view.hot_rows, 2);
+        assert_eq!(view.hot_total, 2);
+    }
+
+    #[test]
+    fn a_stale_estimate_never_overwrites_an_accurate_total() {
+        let mut view = CommentsView::new(None);
+        // 还没有总数：调用方手上的数先用上，标题不用空等。
+        assert!(view.apply_estimated_total(Some(100)));
+        assert_eq!(view.total, 100);
+        // 已经有准确值：旧快照盖不回去，否则刷新回来之前标题会先退回旧数。
+        assert!(!view.apply_estimated_total(Some(99)));
+        assert_eq!(view.total, 100);
+        // 没有快照可用时也不动。
+        assert!(!view.apply_estimated_total(None));
+        assert_eq!(view.total, 100);
+    }
+
+    #[test]
+    fn a_refreshed_first_page_drops_the_older_pages() {
+        let resource = CommentResource::Playlist(1);
+        let mut view = CommentsView::new(None);
+        view.resource = Some(resource);
+        assert!(view.finish(resource, 0, 0, page(&[1, 2])));
+        // 已经翻到第二页。
+        assert!(view.finish(resource, 0, 20, page(&[3, 4])));
+        assert_eq!(view.comments.len(), 4);
+        // 刷新第一页：整份换成新的，旧的分页作废（滚到底会重新加载）。
+        assert!(view.finish(resource, 0, 0, page(&[9, 1, 2])));
+        assert_eq!(
+            view.comments.iter().map(|item| item.id).collect::<Vec<_>>(),
+            [9, 1, 2]
+        );
+        // 总数跟服务端走。
+        assert_eq!(view.total, 100);
+        // 翻页进度也回到第一页之后。
+        assert_eq!(view.offset, 20);
+        // 已经在列表里的评论不会重复插一遍。
+        assert!(view.finish(resource, 0, 0, page(&[9, 1, 2])));
+        assert_eq!(view.comments.len(), 3);
+        assert_eq!(view.list.item_count(), 5);
+    }
+
+    #[test]
+    fn a_refreshed_first_page_respects_the_page_header() {
+        let resource = CommentResource::Playlist(1);
+        let mut view = CommentsView::new(None);
+        view.resource = Some(resource);
+        view.header = Some(Rc::new(|_, _| div().into_any_element()));
+        view.list.reset(3);
+        assert!(view.finish(resource, 0, 0, page(&[1])));
+        // 条目 = 页头 + 评论 + 「最新评论」标题 + 脚标。
+        assert_eq!(view.list.item_count(), 4);
+        assert!(view.finish(resource, 0, 0, page(&[2, 1])));
+        assert_eq!(view.list.item_count(), 5);
+        assert_eq!(view.comments.len(), 2);
     }
 
     #[test]

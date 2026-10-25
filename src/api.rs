@@ -1,3 +1,4 @@
+mod comment;
 mod heart;
 mod message;
 mod playlist;
@@ -20,6 +21,9 @@ use crate::models::{UserProfile, VipInfo};
 pub struct MusicApi {
     pub client: ApiClient,
     pub runtime: Runtime,
+    /// 当前登录会话的 Cookie 串。SDK 的客户端不暴露原始 Cookie，写评论要从中
+    /// 取 csrf，只能在这里留一份；登录 / 登出时同步更新。
+    pub cookie: Option<String>,
     http: Arc<reqwest_client::ReqwestClient>,
     audio_http: reqwest::Client,
 }
@@ -71,7 +75,8 @@ impl MusicApi {
             Arc::new(reqwest_client::ReqwestClient::new())
         };
         Ok(Self {
-            client: create_client(cookie),
+            client: create_client(cookie.clone()),
+            cookie,
             runtime,
             http,
             audio_http,

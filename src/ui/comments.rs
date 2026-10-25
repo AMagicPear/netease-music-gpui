@@ -6,7 +6,8 @@
 //! 目录后改动总要跨模块来回传话，因此按功能收在这里：
 //!
 //! - `list`：变高虚拟列表 [`CommentsView`] —— 分页、去重、重试、滚动与滚动条；
-//!   正在播放页的下半屏、歌曲评论页、歌单评论页共用同一个实体。
+//!   正在播放页的下半屏、歌曲评论页、歌单评论页共用同一个实体。发布评论也由它发起：
+//!   评论数据归它所有，成功的新评论直接进列表。
 //! - `row`：单条评论的行渲染 [`comment_row`]。
 //! - `composer`：吸顶评论框 [`CommentComposer`]，占位与覆盖层都在它内部。
 //! - `panel`：列表 + 评论框的组合件 [`CommentsPanel`]，两个评论页各自持有一份。
@@ -15,14 +16,17 @@
 //! 歌单评论页没有在这里：它是歌单页的一个页签，页头要用歌单详情，交给
 //! `pages::playlist` 自己渲染，只从这里取 [`CommentsPanel`]。
 
+mod comment_window;
 mod composer;
 mod list;
 mod page;
 mod panel;
 mod row;
 
-pub(in crate::ui) use composer::{CommentComposer, clamp_to_limit, new_input};
-pub(in crate::ui) use list::{CommentResource, CommentsView, ListMode};
+pub(in crate::ui) use crate::models::CommentResource;
+pub(in crate::ui) use comment_window::open_comment_window;
+pub(in crate::ui) use composer::{COMMENT_LIMIT, CommentComposer, clamp_to_limit, new_input};
+pub(in crate::ui) use list::{CommentsView, ListMode};
 pub(in crate::ui) use page::{SongCommentsPage, ViewSongComments};
 pub(in crate::ui) use panel::CommentsPanel;
 pub(in crate::ui) use row::comment_row;

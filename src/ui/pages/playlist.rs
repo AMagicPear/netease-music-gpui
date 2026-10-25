@@ -53,7 +53,9 @@ use crate::ui::components::{
     text_with_matches, title_with_subtitle, virtual_table,
 };
 use crate::ui::cover_color::{Backdrop, blend_color};
-use crate::ui::events::{Navigate, NavigationBus, PlaylistCommentsTab, PlaylistMetadataChanged};
+use crate::ui::events::{
+    CommentPublished, Navigate, NavigationBus, PlaylistCommentsTab, PlaylistMetadataChanged,
+};
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPACITY};
 
 // 「更多」菜单里的三个命令。
@@ -91,6 +93,8 @@ pub struct PlaylistPage {
     is_favorite_view: bool,
     tabs: Entity<TabBar>,
     _tabs_subscription: Subscription,
+    /// 发布成功后页签上的评论数要跟着加，订阅的是评论列表。
+    _comment_published_subscription: Subscription,
     library: Entity<MusicLibrary>,
     playback: Entity<PlaybackController>,
     _playback_subscription: Subscription,
@@ -375,6 +379,24 @@ impl PlaylistPage {
             this.rebuild_display_order(cx);
             cx.notify();
         });
+        // 发布评论成功后，页签上的评论数要跟着加。它取的是详情里的
+        // `comment_count` —— 那是接口给的快照，不改就跟列表里的总数对不上。
+        // 列表那边会重新拉第一页把总数换成服务端那份，这里先补上这一条。
+        let comments_list = comments.list().clone();
+        let comment_published_subscription =
+            cx.subscribe(&comments_list, |this, _, _: &CommentPublished, cx| {
+                this.detail.update(cx, |detail, cx| {
+                    if let Some(count) = detail
+                        .playlist
+                        .as_mut()
+                        .and_then(|playlist| playlist.comment_count.as_mut())
+                    {
+                        *count += 1;
+                    }
+                    // 详情变了，下面那条订阅会重算页签上的三个数字。
+                    cx.notify();
+                });
+            });
         Self {
             detail,
             comments,
@@ -383,6 +405,7 @@ impl PlaylistPage {
             is_favorite_view: false,
             tabs,
             _tabs_subscription: tabs_subscription,
+            _comment_published_subscription: comment_published_subscription,
             library,
             playback,
             _playback_subscription: playback_subscription,

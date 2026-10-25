@@ -46,6 +46,8 @@ struct Desktop {
     bounds: WindowBounds,
     /// 「收藏到歌单」弹窗的句柄；为空表示当前没有打开。同一时刻只允许存在一个。
     collect_window: Option<AnyWindowHandle>,
+    /// 「发布评论」小窗的句柄；为空表示当前没有打开。同一时刻只允许存在一个。
+    comment_window: Option<AnyWindowHandle>,
     _tray: Option<TrayIcon>,
     #[cfg(target_os = "macos")]
     _dock_subscriptions: Vec<Subscription>,
@@ -70,6 +72,7 @@ pub fn init(
         library: library.clone(),
         bounds,
         collect_window: None,
+        comment_window: None,
         _tray: None,
         #[cfg(target_os = "macos")]
         _dock_subscriptions: Vec::new(),
@@ -106,6 +109,16 @@ pub(crate) fn collect_window(cx: &App) -> Option<AnyWindowHandle> {
 /// 记录 / 清除收藏弹窗句柄。窗口关闭后必须清掉，否则会留下一个失效句柄。
 pub(crate) fn set_collect_window(window: Option<AnyWindowHandle>, cx: &mut App) {
     cx.global_mut::<Desktop>().collect_window = window;
+}
+
+/// 当前打开发布评论小窗的句柄；`None` 表示没有打开。
+pub(crate) fn comment_window(cx: &App) -> Option<AnyWindowHandle> {
+    cx.try_global::<Desktop>()?.comment_window
+}
+
+/// 记录 / 清除发布评论小窗句柄。窗口关闭后必须清掉，否则会留下一个失效句柄。
+pub(crate) fn set_comment_window(window: Option<AnyWindowHandle>, cx: &mut App) {
+    cx.global_mut::<Desktop>().comment_window = window;
 }
 
 /// macOS Dock 右键菜单：播放控制、喜欢开关、播放方式。
