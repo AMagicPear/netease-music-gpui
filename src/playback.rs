@@ -12,8 +12,10 @@ use crate::models::{AudioQualityLevel, PlayMode, Song};
 use std::time::Duration;
 
 /// 按变化类型通知，避免位置推进触发无关视图重绘。
+///
+/// 以 `Changed` 结尾的是「状态变了」的广播，谁关心都能听；语义更具体的变化
+/// （比如队列新增了一首）单开一个变体，订阅方才好只对它做反应。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[expect(clippy::enum_variant_names, reason = "Changed 明确表示状态变化通知")]
 pub enum PlaybackEvent {
     /// 歌曲、队列、模式、音质、播放/缓冲/加载/错误状态变化。
     SnapshotChanged,
@@ -23,6 +25,8 @@ pub enum PlaybackEvent {
     VolumeChanged,
     /// 音频预加载候选变化，供封面预取跟随；不影响播放控件和列表。
     PreloadChanged,
+    /// 队列新增了一首（「下一首播放」）。播放栏据此在播放列表按钮上方给提示。
+    QueueInserted,
 }
 
 /// 控制器的只读视图；UI 通过 snapshot() 借用，不能直接修改播放状态。

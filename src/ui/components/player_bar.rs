@@ -4,12 +4,15 @@ use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_kit::base::{Button, ColorTokens, Theme, Transition, transition};
+use gpui_kit::base::{Button, ColorTokens, Presence, Theme, Transition, transition};
 
+use super::balloon::{ARROW_HEIGHT, paint_balloon};
 use super::progress_bar::ProgressBar;
 use super::side_panel::{SidePanel, SidePanelContent};
 use super::volume_control::VolumeControl;
-use super::{LAYER_PROGRESS_BAR, Vinyl, artist_label, icon_hover_color, like_icon_path};
+use super::{
+    LAYER_PROGRESS_BAR, LAYER_QUEUE_HINT, Vinyl, artist_label, icon_hover_color, like_icon_path,
+};
 use crate::models::PlayMode;
 use crate::playback::{PlaybackController, PlaybackEvent};
 use crate::state::library::MusicLibrary;
@@ -21,6 +24,25 @@ use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA, PRESSED_OPA
 
 /// 播放栏固定高度；专辑歌词页据此估算可视区域高度。
 pub const PLAYER_BAR_HEIGHT: f32 = 86.;
+
+/// 「已添加至播放列表」提示：浮在播放列表按钮上方。
+const QUEUE_HINT_TEXT: &str = "已添加至播放列表";
+/// 停留时长：够读完一句话。
+const QUEUE_HINT_DURATION: Duration = Duration::from_millis(2000);
+/// 进出场时长，和音量气泡同一路数。
+const QUEUE_HINT_MOTION: Duration = Duration::from_millis(150);
+/// 进场时从按钮那头往上浮一点。
+const QUEUE_HINT_RISE: Pixels = px(4.);
+/// 箭尖与按钮上沿的间距。
+const QUEUE_HINT_GAP: Pixels = px(8.);
+/// 气泡矩形部分的高度：13px 文字上下各留一点。
+const QUEUE_HINT_BODY_HEIGHT: Pixels = px(30.);
+/// 气泡左右留白。
+const QUEUE_HINT_PADDING: Pixels = px(12.);
+/// 箭尖相对气泡左边沿的偏移。气泡比按钮宽得多，箭头落在偏左处而不是正中。
+const QUEUE_HINT_ARROW_OFFSET: Pixels = px(24.);
+/// 气泡整体相对按钮左边沿的左移量：箭头因此正好指着按钮正中。
+const QUEUE_HINT_SHIFT: Pixels = px(-12.);
 
 pub struct PlayerBar {
     playback: Entity<PlaybackController>,
@@ -36,6 +58,10 @@ pub struct PlayerBar {
     quality_open: bool,
     now_playing: Entity<NowPlaying>,
     side_panel: Entity<SidePanel>,
+    /// 「已添加至播放列表」提示是否可见。
+    queue_hint_visible: bool,
+    /// 每条提示一个号：后一条来了，前一条的定时器就作废。
+    queue_hint_generation: u64,
     _playback_subscription: Subscription,
     _counts_subscription: Subscription,
     _progress_subscription: Subscription,
@@ -72,9 +98,12 @@ impl PlayerBar {
             )
         });
         // 进度推进由进度条处理，不重绘整条播放栏。
-        let playback_subscription = cx.subscribe(&playback, move |_, _, event, cx| {
-            if matches!(event, PlaybackEvent::SnapshotChanged) {
-                cx.notify();
+        let playback_subscription = cx.subscribe(&playback, move |this, _, event, cx| {
+            match event {
+                PlaybackEvent::SnapshotChanged => cx.notify(),
+                // 队列多了一首：播放列表按钮上方冒个提示。
+                PlaybackEvent::QueueInserted => this.show_queue_hint(cx),
+                _ => {}
             }
         });
         let counts_subscription = cx.observe(&song_counts, |_, _, cx| cx.notify());
@@ -101,6 +130,8 @@ impl PlayerBar {
             quality_open: false,
             now_playing,
             side_panel,
+            queue_hint_visible: false,
+            queue_hint_generation: 0,
             _playback_subscription: playback_subscription,
             _counts_subscription: counts_subscription,
             _progress_subscription: progress_subscription,
@@ -221,6 +252,64 @@ impl PlayerBar {
             })
             .into_any_element()
     }
+
+    /// 「下一首播放」之后弹出提示：先进场，停一会儿，再退场。
+    ///
+    /// 停留时间自己算：每次提示带一个号，后一条来了就把前一条的定时器作废，
+    /// 免得连着加两首时第一条刚冒出来就被收走。
+    fn show_queue_hint(&mut self, cx: &mut Context<Self>) {
+        self.queue_hint_generation += 1;
+        let generation = self.queue_hint_generation;
+        self.queue_hint_visible = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(QUEUE_HINT_DURATION).await;
+            let _ = this.update(cx, |bar, cx| {
+                // 期间又加了一首：那条提示还没到时间，这条定时器作废。
+                if bar.queue_hint_generation == generation {
+                    bar.queue_hint_visible = false;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// 播放列表按钮上方的提示气泡。
+    ///
+    /// 形状、底色、投影都复用音量气泡那套（`balloon` 模块）：圆角矩形 + 底部小三角，
+    /// 只是三角落在偏左的位置，不再居中。
+    fn queue_hint_bubble(&self, colors: ColorTokens) -> Div {
+        div()
+            .relative()
+            // 气泡整体高度含底部那一段三角。
+            .h(QUEUE_HINT_BODY_HEIGHT + ARROW_HEIGHT)
+            .flex()
+            .flex_col()
+            // 背景先画，内容后画：子元素按声明顺序绘制。
+            .child(
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, _, window, _| {
+                        paint_balloon(window, bounds, colors, QUEUE_HINT_ARROW_OFFSET);
+                    },
+                )
+                // 用 inset_0 而不是百分比尺寸：气泡宽度由文字撑开，
+                // 四边贴齐才能正好盖住整个气泡（含底部那段三角）。
+                .absolute()
+                .inset_0(),
+            )
+            .child(
+                div()
+                    .h(QUEUE_HINT_BODY_HEIGHT)
+                    .flex()
+                    .items_center()
+                    .px(QUEUE_HINT_PADDING)
+                    .text_size(px(13.))
+                    .text_color(colors.foreground)
+                    .child(QUEUE_HINT_TEXT),
+            )
+    }
 }
 
 /// 互动区的三个命中部件，用作 hitbox 和元素 id 的后缀。
@@ -294,6 +383,11 @@ impl Render for PlayerBar {
             cx,
         );
         let play_button_enlarged = self.play_button_hovered && !self.play_button_pressed;
+        // 「已添加至播放列表」提示的进出场：和音量气泡共用一条 Presence，
+        // 退场期间仍为真，气泡才能淡出去再卸载。
+        let queue_hint = Presence::new("player-queue-hint", self.queue_hint_visible)
+            .transition(Transition::new(QUEUE_HINT_MOTION).ease(ease_out_quint()))
+            .sample(window, cx);
         let play_button_size = if play_button_enlarged {
             px(42.)
         } else {
@@ -642,34 +736,59 @@ impl Render for PlayerBar {
                                 )),
                             )
                             .child(
-                                hover_icon(
-                                    "player-playlist-button",
-                                    "播放列表",
-                                    "icons/playlist.svg",
-                                    IconSize::Large.pixels(),
-                                    colors.muted_foreground,
-                                    colors,
-                                )
-                                // 按下（capture 阶段，先于面板的 out 监听）时若面板开着，
-                                // 拦住「面板外按下收起」，让松开后的 click 自己决定开合。
-                                .capture_any_mouse_down(cx.listener(
-                                    |this, event: &MouseDownEvent, _, cx| {
-                                        if event.button == MouseButton::Left {
-                                            this.side_panel
-                                                .update(cx, |panel, _| panel.suppress_out_close());
-                                        }
-                                    },
-                                ))
-                                // 松开时才开合，和其它浮层触发一致；点击不冒泡到
-                                // 播放栏根部的歌词页开合。
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        cx.stop_propagation();
-                                        this.side_panel.update(cx, |panel, cx| {
-                                            panel.toggle(SidePanelContent::PlayQueue, cx)
-                                        });
-                                    },
-                                )),
+                                div()
+                                    .relative()
+                                    .flex_none()
+                                    .child(
+                                        hover_icon(
+                                            "player-playlist-button",
+                                            "播放列表",
+                                            "icons/playlist.svg",
+                                            IconSize::Large.pixels(),
+                                            colors.muted_foreground,
+                                            colors,
+                                        )
+                                        // 按下（capture 阶段，先于面板的 out 监听）时若面板开着，
+                                        // 拦住「面板外按下收起」，让松开后的 click 自己决定开合。
+                                        .capture_any_mouse_down(cx.listener(
+                                            |this, event: &MouseDownEvent, _, cx| {
+                                                if event.button == MouseButton::Left {
+                                                    this.side_panel.update(cx, |panel, _| {
+                                                        panel.suppress_out_close();
+                                                    });
+                                                }
+                                            },
+                                        ))
+                                        // 松开时才开合，和其它浮层触发一致；点击不冒泡到
+                                        // 播放栏根部的歌词页开合。
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                cx.stop_propagation();
+                                                this.side_panel.update(cx, |panel, cx| {
+                                                    panel.toggle(SidePanelContent::PlayQueue, cx)
+                                                });
+                                            }),
+                                        ),
+                                    )
+                                    // 「下一首播放」之后冒出来的提示，挂在按钮上方。
+                                    .when(queue_hint.should_render(), |button| {
+                                        button.child(
+                                            deferred(
+                                                self.queue_hint_bubble(colors)
+                                                    .absolute()
+                                                    // 气泡底边（箭尖）在按钮上沿之下 8px。
+                                                    .bottom_full()
+                                                    .mb(QUEUE_HINT_GAP
+                                                        + QUEUE_HINT_RISE
+                                                            * (1. - queue_hint.progress))
+                                                    // 气泡比按钮宽得多，箭头落在偏左处；
+                                                    // 整体再左移一点，箭头就指着按钮正中。
+                                                    .left(QUEUE_HINT_SHIFT)
+                                                    .opacity(queue_hint.progress),
+                                            )
+                                            .with_priority(LAYER_QUEUE_HINT),
+                                        )
+                                    }),
                             ),
                     )
                     // 右侧：收藏、音量等工具

@@ -580,6 +580,9 @@ impl PlaybackController {
         self.insert_queue_song(song);
         self.save_cache();
         self.publish(cx, PlaybackEvent::SnapshotChanged);
+        // 单独再发一条：订阅方要分得清「队列变了」和「多了一首」，
+        // 比如播放栏据此在播放列表按钮上方冒个提示。
+        self.publish(cx, PlaybackEvent::QueueInserted);
     }
 
     /// 清空播放队列：停止播放并移除全部队列项。

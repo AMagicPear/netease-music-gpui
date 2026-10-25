@@ -7,17 +7,13 @@ use gpui_kit::base::{
 };
 use gpui_kit::component::slider::{SliderEvent, SliderState};
 
+use super::balloon::{ARROW_HEIGHT, paint_balloon};
 use super::{LAYER_VOLUME_BALLOON, icon_hover_color};
 use crate::playback::{PlaybackController, PlaybackEvent};
 use crate::ui::cover_color::dark_colors;
 use crate::ui::now_playing::{NowPlaying, NowPlayingEvent};
 use crate::ui::theme::{DOLPHIN_FAMILY, IconSize, PRESSED_ICON_ALPHA};
 
-/// 气泡圆角。
-const BALLOON_RADIUS: Pixels = px(10.);
-/// 底部小三角：宽度沿矩形底边展开，高度单独占气泡底部的一段。
-const ARROW_WIDTH: Pixels = px(12.);
-const ARROW_HEIGHT: Pixels = px(6.);
 /// 气泡整体尺寸（含三角占的那一段高度）。
 const BALLOON_WIDTH: Pixels = px(36.);
 const BALLOON_HEIGHT: Pixels = px(140.);
@@ -202,25 +198,8 @@ impl VolumeControl {
                 canvas(
                     |_, _, _| {},
                     move |bounds, _, window, _| {
-                        let rect = Bounds::new(
-                            bounds.origin,
-                            Size {
-                                width: bounds.size.width,
-                                height: bounds.size.height - ARROW_HEIGHT,
-                            },
-                        );
-                        // 投影只支持矩形（paint_drop_shadows 只吃 corner_radii），
-                        // 三角没有自己的投影；当前投影很轻，看不出断裂。
-                        window.paint_drop_shadows(
-                            rect,
-                            Corners::all(BALLOON_RADIUS),
-                            &[BoxShadow::new(px(0.), px(2.), colors.foreground.alpha(0.1))
-                                .blur_radius(px(6.))],
-                        );
-                        let Ok(path) = balloon_path(bounds) else {
-                            return;
-                        };
-                        window.paint_path(path, colors.surface);
+                        // 三角居中，对着下方的音量图标。
+                        paint_balloon(window, bounds, colors, bounds.size.width / 2.);
                     },
                 )
                 .absolute()
@@ -381,38 +360,4 @@ impl Render for VolumeControl {
                 )
             })
     }
-}
-
-/// 气泡轮廓：圆角矩形，底边中途绕出一个向下的三角。
-///
-/// 三角直接长在底边上，整条路径一次填充，
-/// 不像两个形状拼接那样在小数 DPI 下露出接缝。
-fn balloon_path(bounds: Bounds<Pixels>) -> Result<Path<Pixels>> {
-    let mut path = PathBuilder::fill();
-    let left = bounds.origin.x;
-    let top = bounds.origin.y;
-    let right = bounds.origin.x + bounds.size.width;
-    // 矩形底边：三角从这里往下长出去。
-    let bottom = top + bounds.size.height - ARROW_HEIGHT;
-    let tip_y = top + bounds.size.height;
-    let r = BALLOON_RADIUS;
-    let tip_x = left + bounds.size.width / 2.;
-    let arrow_left = tip_x - ARROW_WIDTH / 2.;
-    let arrow_right = tip_x + ARROW_WIDTH / 2.;
-
-    path.move_to(point(left + r, top));
-    path.line_to(point(right - r, top));
-    path.arc_to(point(r, r), px(0.), false, true, point(right, top + r));
-    path.line_to(point(right, bottom - r));
-    path.arc_to(point(r, r), px(0.), false, true, point(right - r, bottom));
-    // 底边从右往左走，走到三角时绕出去再回来。
-    path.line_to(point(arrow_right, bottom));
-    path.line_to(point(tip_x, tip_y));
-    path.line_to(point(arrow_left, bottom));
-    path.line_to(point(left + r, bottom));
-    path.arc_to(point(r, r), px(0.), false, true, point(left, bottom - r));
-    path.line_to(point(left, top + r));
-    path.arc_to(point(r, r), px(0.), false, true, point(left + r, top));
-    path.close();
-    path.build()
 }
