@@ -818,9 +818,26 @@ impl Render for NowPlayingPage {
                                                                 1.,
                                                             ),
                                                         ))
+                                                        // 悬停时整体降亮：用更暗的渐变替换，质感仍是实心玻璃。
+                                                        .hover(|style| {
+                                                            style.bg(linear_gradient(
+                                                                180.,
+                                                                linear_color_stop(
+                                                                    white().alpha(0.18),
+                                                                    0.,
+                                                                ),
+                                                                linear_color_stop(
+                                                                    white().alpha(0.09),
+                                                                    1.,
+                                                                ),
+                                                            ))
+                                                        })
                                                         .border_1()
                                                         .border_color(white().alpha(0.10))
                                                         .text_color(white())
+                                                        // 挡住下方评论列表的鼠标事件（点击/悬停），
+                                                        // 但放行滚轮，列表仍能继续滚。
+                                                        .block_mouse_except_scroll()
                                                         .on_click({
                                                             let comments = self.comments.clone();
                                                             move |_, window, cx| {
@@ -833,7 +850,21 @@ impl Render for NowPlayingPage {
                                                                 );
                                                             }
                                                         })
-                                                        .child("发布评论"),
+                                                        .child(
+                                                            div()
+                                                                .flex()
+                                                                .items_center()
+                                                                .justify_center()
+                                                                .gap_2()
+                                                                .child(
+                                                                    svg()
+                                                                        .path("icons/edit.svg")
+                                                                        .size(px(22.))
+                                                                        .flex_none()
+                                                                        .text_color(white()),
+                                                                )
+                                                                .child("发布评论"),
+                                                        ),
                                                 ),
                                         ),
                                 )
