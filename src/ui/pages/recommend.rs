@@ -1,7 +1,10 @@
-use std::time::Duration;
+use std::{cell::Cell, rc::Rc, time::Duration};
 
+use gpui::prelude::{FluentBuilder, StatefulInteractiveElement};
 use gpui::*;
-use gpui_kit::base::{Button, ColorTokens, Theme};
+use gpui_kit::base::{
+    Button, ColorTokens, MotionStatus, Theme, Transition, transition_with_status,
+};
 
 use crate::models::{FeaturedActivity, Playlist, RecommendedPlaylist};
 use crate::state::daily::DailySongsStore;
@@ -19,6 +22,9 @@ const COVER_RADIUS: Pixels = px(8.);
 const SPIN_PERIOD: Duration = Duration::from_millis(900);
 const CARD_TEXT_HEIGHT: Pixels = px(48.);
 const TARGET_CARD_WIDTH: f32 = 135.;
+const ROW_ARROW_SIZE: f32 = 26.;
+const ROW_ARROW_ICON: f32 = 20.;
+const ROW_SCROLL_DURATION: Duration = Duration::from_millis(300);
 const PLACEHOLDER_COVER: &str = "images/trackBlank.png";
 
 /// shell 通过 content 注入可用宽度，所有区块共用同一列数。
@@ -30,6 +36,9 @@ pub struct RecommendPage {
     library: Entity<MusicLibrary>,
     /// 与 entries 按下标对齐，新封面加载中保留上一张的颜色。
     entry_colors: Vec<CoverColor>,
+    entries_scroll: CardScroll,
+    playlists_scroll: CardScroll,
+    radar_scroll: CardScroll,
 }
 
 impl RecommendPage {
@@ -48,6 +57,9 @@ impl RecommendPage {
             daily,
             library,
             entry_colors: Vec::new(),
+            entries_scroll: CardScroll::default(),
+            playlists_scroll: CardScroll::default(),
+            radar_scroll: CardScroll::default(),
         }
     }
 
@@ -64,6 +76,13 @@ impl RecommendPage {
         cx: &mut App,
     ) -> AnyElement {
         view.update(cx, |this, cx| {
+            for (id, scroll) in [
+                ("recommend-entries-motion", &this.entries_scroll),
+                ("recommend-playlist-motion", &this.playlists_scroll),
+                ("recommend-radar-motion", &this.radar_scroll),
+            ] {
+                scroll.step(id, window, cx);
+            }
             let covers = this.entry_covers(cx);
             this.entry_colors
                 .resize_with(covers.len(), CoverColor::default);
@@ -157,38 +176,37 @@ impl RecommendPage {
                 );
             }
         }
-        let natural_columns = columns_for(available_width);
-        let columns = if entries.is_empty() {
-            natural_columns
-        } else {
-            natural_columns.min(entries.len())
-        };
         let mut page = div().w_full().flex().flex_col().gap(SECTION_GAP);
         if !entries.is_empty() {
-            page = page.child(quick_entries(
+            let mut row = RowLayout::new(available_width, entries.len(), &self.entries_scroll);
+            row.arrow_center += CARD_TEXT_HEIGHT / 2.;
+            let cards = quick_entry_cards(
                 today,
-                columns,
+                &row,
                 &entries,
                 &self.entry_colors,
                 covers,
                 store.radar.value().and_then(|radar| radar.first()),
                 cx,
-            ));
+            );
+            page = page.child(card_row("recommend-entries", &row, cards, colors, cx));
         }
-        page = page.child(self.recommended_section(columns, colors, cx));
+        page = page.child(self.recommended_section(available_width, colors, cx));
         let radar = store
             .radar
             .value()
             .map(|radar| radar.as_slice())
             .unwrap_or(&[]);
         if !radar.is_empty() {
+            let row = RowLayout::new(available_width, radar.len(), &self.radar_scroll);
+            let cards = playlist_cards(radar, &row, colors, "recommend-radar", cx);
             page = page.child(
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(16.))
                     .child(section_title("雷达歌单", colors))
-                    .child(playlist_row(radar, columns, colors, "recommend-radar", cx)),
+                    .child(card_row("recommend-radar", &row, cards, colors, cx)),
             );
         }
         let featured = store
@@ -234,57 +252,229 @@ enum QuickTarget {
     },
 }
 
-/// 卡片平分一行；窗口较窄时只显示前 columns 张。
-fn quick_entries(
+#[derive(Clone, Default)]
+struct CardScroll {
+    handle: ScrollHandle,
+    target: Rc<Cell<Option<Pixels>>>,
+}
+
+impl CardScroll {
+    fn step(&self, id: &'static str, window: &mut Window, cx: &mut App) {
+        let target = self.target.get();
+        let motion = transition_with_status(
+            id,
+            target
+                .unwrap_or_else(|| self.handle.offset().x)
+                .clamp(-self.handle.max_offset().x, px(0.)),
+            Transition::new(if target.is_some() {
+                ROW_SCROLL_DURATION
+            } else {
+                Duration::ZERO
+            })
+            .ease(ease_out_quint()),
+            window,
+            cx,
+        );
+        if target.is_some() {
+            self.handle.set_offset(point(motion.value, px(0.)));
+            if matches!(motion.status, MotionStatus::Idle | MotionStatus::Finished) {
+                self.target.set(None);
+            }
+        }
+    }
+}
+
+struct RowLayout {
+    card_width: Pixels,
+    arrow_center: Pixels,
+    content_width: Pixels,
+    overflow: Pixels,
+    scroll: CardScroll,
+}
+
+impl RowLayout {
+    fn new(available_width: Pixels, count: usize, scroll: &CardScroll) -> Self {
+        let columns = columns_for(available_width).min(count.max(1));
+        let gaps = px(CARD_GAP) * columns.saturating_sub(1) as f32;
+        let card_width = ((available_width - gaps) / columns as f32).max(px(0.));
+        let content_width =
+            card_width * count as f32 + px(CARD_GAP) * count.saturating_sub(1) as f32;
+        Self {
+            card_width,
+            arrow_center: card_width / 2.,
+            content_width,
+            overflow: (content_width - available_width).max(px(0.)),
+            scroll: scroll.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ArrowDirection {
+    Left,
+    Right,
+}
+
+fn card_row(
+    id: &'static str,
+    row: &RowLayout,
+    cards: Vec<AnyElement>,
+    colors: ColorTokens,
+    cx: &Context<RecommendPage>,
+) -> impl IntoElement {
+    let offset = row.scroll.handle.offset().x.clamp(-row.overflow, px(0.));
+    let target = row.scroll.target.clone();
+
+    div()
+        .id((ElementId::Name(id.into()), "row"))
+        .relative()
+        .w_full()
+        .min_w(px(0.))
+        .child(
+            div()
+                .id(id)
+                .w_full()
+                .min_w(px(0.))
+                .flex()
+                .overflow_x_scroll()
+                // 竖向手势留给外层页面。
+                .restrict_scroll_to_axis()
+                .track_scroll(&row.scroll.handle)
+                .on_scroll_wheel(move |event, window, _| {
+                    if !event.delta.pixel_delta(window.line_height()).x.is_zero() {
+                        target.set(None);
+                    }
+                })
+                .child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .w(row.content_width)
+                        .gap(px(CARD_GAP))
+                        .children(cards),
+                ),
+        )
+        .children(
+            [ArrowDirection::Left, ArrowDirection::Right]
+                .into_iter()
+                .map(|direction| {
+                    let enabled = match direction {
+                        ArrowDirection::Left => offset < px(-0.5),
+                        ArrowDirection::Right => offset > -row.overflow + px(0.5),
+                    };
+                    scroll_arrow(id, direction, row, enabled, colors, cx)
+                }),
+        )
+}
+
+fn scroll_arrow(
+    row_id: &'static str,
+    direction: ArrowDirection,
+    row: &RowLayout,
+    enabled: bool,
+    colors: ColorTokens,
+    cx: &Context<RecommendPage>,
+) -> impl IntoElement {
+    let (tag, label) = match direction {
+        ArrowDirection::Left => ("arrow-left", "滚动到最左侧"),
+        ArrowDirection::Right => ("arrow-right", "滚动到最右侧"),
+    };
+    let scroll = row.scroll.clone();
+
+    div()
+        .id((ElementId::Name(row_id.into()), tag))
+        .absolute()
+        .top(row.arrow_center - px(ROW_ARROW_SIZE / 2.))
+        .when(direction == ArrowDirection::Left, |arrow| {
+            arrow.left(px(-ROW_ARROW_SIZE))
+        })
+        .when(direction == ArrowDirection::Right, |arrow| {
+            arrow.right(px(-ROW_ARROW_SIZE))
+        })
+        .size(px(ROW_ARROW_SIZE))
+        .flex()
+        .items_center()
+        .justify_center()
+        .role(Role::Button)
+        .aria_label(label)
+        .when(!enabled, |arrow| arrow.aria_description("已到达边界"))
+        .when(enabled, |arrow| {
+            arrow
+                .cursor_pointer()
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    // max_offset 是正的范围；实际偏移向右滚时为负，且需等布局后读取。
+                    let target = match direction {
+                        ArrowDirection::Left => px(0.),
+                        ArrowDirection::Right => -scroll.handle.max_offset().x,
+                    };
+                    scroll.target.set(Some(target));
+                    cx.notify();
+                }))
+        })
+        .child(
+            svg()
+                .path("icons/chevron_side.svg")
+                .size(px(ROW_ARROW_ICON))
+                .text_color(colors.foreground.alpha(if enabled { 0.85 } else { 0.25 }))
+                .when(direction == ArrowDirection::Left, |icon| {
+                    icon.with_transformation(Transformation::rotate(percentage(0.5)))
+                }),
+        )
+}
+
+struct EntrySkin {
+    strip: Hsla,
+    cover: SharedString,
+}
+
+fn quick_entry_cards(
     today: u8,
-    columns: usize,
+    row: &RowLayout,
     entries: &[QuickEntry],
     entry_colors: &[CoverColor],
     covers: &[SharedString],
     radar: Option<&RecommendedPlaylist>,
     cx: &Context<RecommendPage>,
-) -> impl IntoElement {
-    div()
-        .flex()
-        .gap(px(CARD_GAP))
-        .children(
-            entries
-                .iter()
-                .take(columns)
-                .enumerate()
-                .map(|(index, entry)| {
-                    let strip =
-                        dark_gradient(entry_colors.get(index).and_then(CoverColor::current)).0[0]
-                            .into();
-                    let cover = covers
-                        .get(index)
-                        .cloned()
-                        .unwrap_or_else(|| PLACEHOLDER_COVER.into());
-                    let target = match entry.kind {
-                        QuickEntryKind::DailySongs => Some(QuickTarget::DailySongs),
-                        QuickEntryKind::HeartMode => Some(QuickTarget::HeartMode),
-                        QuickEntryKind::Radar => radar.map(|playlist| QuickTarget::Playlist {
-                            id: playlist.id,
-                            summary: Box::new(playlist.to_summary()),
-                        }),
-                        _ => None,
-                    };
-                    quick_entry(entry, today, strip, cover, index, target, cx)
+) -> Vec<AnyElement> {
+    entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let skin = EntrySkin {
+                strip: dark_gradient(entry_colors.get(index).and_then(CoverColor::current)).0[0]
+                    .into(),
+                cover: covers
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(|| PLACEHOLDER_COVER.into()),
+            };
+            let target = match entry.kind {
+                QuickEntryKind::DailySongs => Some(QuickTarget::DailySongs),
+                QuickEntryKind::HeartMode => Some(QuickTarget::HeartMode),
+                QuickEntryKind::Radar => radar.map(|playlist| QuickTarget::Playlist {
+                    id: playlist.id,
+                    summary: Box::new(playlist.to_summary()),
                 }),
-        )
+                _ => None,
+            };
+            quick_entry(entry, today, skin, index, row, target, cx).into_any_element()
+        })
+        .collect()
 }
 
 fn quick_entry(
     entry: &QuickEntry,
     today: u8,
-    strip: Hsla,
-    cover: SharedString,
+    skin: EntrySkin,
     index: usize,
+    row: &RowLayout,
     target: Option<QuickTarget>,
     cx: &Context<RecommendPage>,
 ) -> impl IntoElement {
+    let EntrySkin { strip, cover } = skin;
     let card = div()
-        .flex_1()
+        .flex_none()
+        .w(row.card_width)
         .min_w(px(0.))
         .flex()
         .flex_col()
@@ -425,7 +615,7 @@ fn roam_badge() -> AnyElement {
 impl RecommendPage {
     fn recommended_section(
         &self,
-        columns: usize,
+        available_width: Pixels,
         colors: ColorTokens,
         cx: &Context<Self>,
     ) -> impl IntoElement {
@@ -442,7 +632,7 @@ impl RecommendPage {
                     .child(section_title("推荐歌单", colors))
                     .child(self.refresh_button(colors, cx)),
             )
-            .child(self.recommended_body(columns, colors, cx))
+            .child(self.recommended_body(available_width, colors, cx))
     }
 
     fn refresh_button(&self, colors: ColorTokens, cx: &Context<Self>) -> AnyElement {
@@ -481,7 +671,7 @@ impl RecommendPage {
 
     fn recommended_body(
         &self,
-        columns: usize,
+        available_width: Pixels,
         colors: ColorTokens,
         cx: &Context<Self>,
     ) -> AnyElement {
@@ -526,23 +716,25 @@ impl RecommendPage {
                 }
             };
         }
-        playlist_row(playlists, columns, colors, "recommend-playlist", cx).into_any_element()
+        let row = RowLayout::new(available_width, playlists.len(), &self.playlists_scroll);
+        let cards = playlist_cards(playlists, &row, colors, "recommend-playlist", cx);
+        card_row("recommend-playlist", &row, cards, colors, cx).into_any_element()
     }
 }
 
-fn playlist_row(
+fn playlist_cards(
     playlists: &[RecommendedPlaylist],
-    columns: usize,
+    row: &RowLayout,
     colors: ColorTokens,
     id_prefix: &'static str,
     cx: &Context<RecommendPage>,
-) -> impl IntoElement {
-    div().flex().gap(px(CARD_GAP)).children(
-        playlists
-            .iter()
-            .take(columns)
-            .map(|playlist| recommended_card(playlist, colors, id_prefix, cx)),
-    )
+) -> Vec<AnyElement> {
+    playlists
+        .iter()
+        .map(|playlist| {
+            recommended_card(playlist, colors, id_prefix, row.card_width, cx).into_any_element()
+        })
+        .collect()
 }
 
 fn cover_shade() -> Background {
@@ -557,12 +749,14 @@ fn recommended_card(
     playlist: &RecommendedPlaylist,
     colors: ColorTokens,
     id_prefix: &'static str,
+    card_width: Pixels,
     cx: &Context<RecommendPage>,
 ) -> impl IntoElement {
     let playlist_id = playlist.id;
     let summary = playlist.to_summary();
     div()
-        .flex_1()
+        .flex_none()
+        .w(card_width)
         .min_w(px(0.))
         .flex()
         .flex_col()

@@ -310,6 +310,8 @@ impl Render for LyricsView {
                     .id("song-lyric-lines")
                     .size_full()
                     .overflow_y_scroll()
+                    // 横向手势不改写成竖向：一次滑动只认一个方向。
+                    .restrict_scroll_to_axis()
                     .track_scroll(&self.scroll)
                     .on_scroll_wheel(cx.listener(|this, _, _, cx| {
                         if this.active {

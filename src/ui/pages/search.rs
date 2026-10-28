@@ -344,6 +344,8 @@ impl SearchPage {
                     .min_h(px(0.))
                     .px(PAGE_SIDE_PADDING)
                     .overflow_y_scroll()
+                    // 横向手势不改写成竖向：一次滑动只认一个方向。
+                    .restrict_scroll_to_axis()
                     .track_scroll(&self.table_scroll)
                     .child(table),
             )

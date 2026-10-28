@@ -412,6 +412,8 @@ impl Render for SidebarPage {
                     .flex_1()
                     .min_h(px(0.))
                     .overflow_y_scroll()
+                    // 横向手势不改写成竖向：一次滑动只认一个方向。
+                    .restrict_scroll_to_axis()
                     .child(
                         div()
                             .w_full()

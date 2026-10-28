@@ -732,6 +732,8 @@ impl Render for NowPlayingPage {
                                     // 外层是普通平台滚动：两屏按文档流上下排布，滚到第二屏就是评论区。
                                     // 嵌套的歌词 / 评论列表自己决定什么时候拦位移，到边自然交回这里。
                                     .overflow_y_scroll()
+                                    // 横向手势不改写成竖向：一次滑动只认一个方向。
+                                    .restrict_scroll_to_axis()
                                     .track_scroll(&self.scroll)
                                     // 只采样滚轮事件、不拦位移：位移照旧由平台滚动和
                                     // 评论列表分。延迟吸附靠这份采样判手停了没有、

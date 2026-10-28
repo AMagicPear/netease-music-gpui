@@ -717,6 +717,8 @@ impl Render for MainContent {
                                         content
                                             .px(PAGE_SIDE_PADDING)
                                             .overflow_y_scroll()
+                                            // 横向手势留给卡片行，避免同时触发页面竖滚。
+                                            .restrict_scroll_to_axis()
                                             .track_scroll(page_scroll)
                                     })
                                     .children(page),
