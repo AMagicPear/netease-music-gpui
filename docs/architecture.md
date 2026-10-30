@@ -58,6 +58,8 @@ RUST_LOG=warn,netease_music_gpui=debug cargo run --locked
 UI 只经 `PlaybackController` 提交命令，读取只读 `snapshot()`。页面歌曲与播放队列是两份数据，排序和离开页面不会改变正在播放的队列。
 队列游标指向具体条目，支持重复歌曲；随机播放只洗牌一次，退出时恢复原顺序。播放方式、音质、队列和进度由 `Persistence` 保存，恢复时暂停。
 
+系统媒体桥接由 `playback/system_media.rs` 按快照同步。Windows 使用 `system_media/windows.rs` 将 SMTC 绑定到主窗口 HWND；macOS / Linux 沿用 souvlaki。原生命令通过通道回到 GPUI，再调用同一个播放控制器，不直接操作音频线程。Windows 封面先把 `file://` URL 解码成原生路径，再同步打开为只读随机访问流；不能简单截掉 URL 前缀，也不在 Entity 更新中阻塞等待 WinRT 异步文件操作，避免路径错误和消息泵重入。封面失败不阻止发布歌曲信息，事件注册在销毁时成对移除。
+
 心动模式由 `playback/controller/heart.rs` 持有会话、补曲与取消。播放器的喜欢歌单续播入口和推荐卡片的新队列入口是不同操作。
 换队列、账号或退出心动使旧请求失效；API 的 `songInfo: null` 按 ID 补详情并保持服务端顺序，不把 `count` 当分页游标。
 

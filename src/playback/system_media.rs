@@ -2,10 +2,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::Window;
-use souvlaki::{
-    MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition, PlatformConfig,
-};
+#[cfg(not(target_os = "windows"))]
+use souvlaki::MediaControls;
+use souvlaki::{MediaControlEvent, MediaMetadata, MediaPlayback, MediaPosition, PlatformConfig};
+#[cfg(target_os = "windows")]
+mod windows;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
+#[cfg(target_os = "windows")]
+use windows::MediaControls;
 
 use super::PlaybackSnapshot;
 use super::cover_art::CoverArtCache;
@@ -37,7 +41,7 @@ impl SystemMedia {
     pub fn new(
         _window: &Window,
         covers: Arc<CoverArtCache>,
-    ) -> Result<(Self, UnboundedReceiver<MediaControlEvent>), Box<dyn std::error::Error>> {
+    ) -> anyhow::Result<(Self, UnboundedReceiver<MediaControlEvent>)> {
         let fallback_cover_url =
             crate::ui::assets::Assets::file_url(crate::ui::assets::DEFAULT_TRACK_COVER)?;
         #[cfg(target_os = "windows")]
@@ -46,10 +50,10 @@ impl SystemMedia {
             // `HandleError` 只有在 raw-window-handle 开启 `std` feature 时才实现
             // std::error::Error，这里手动转成字符串错误，避免依赖 feature 统一。
             let handle = HasWindowHandle::window_handle(_window)
-                .map_err(|err| format!("无法获取窗口句柄: {err}"))?;
+                .map_err(|err| anyhow::anyhow!("无法获取窗口句柄: {err}"))?;
             match handle.as_raw() {
                 RawWindowHandle::Win32(handle) => Some(handle.hwnd.get() as *mut std::ffi::c_void),
-                _ => return Err("系统媒体控件需要 Win32 窗口句柄".into()),
+                _ => anyhow::bail!("系统媒体控件需要 Win32 窗口句柄"),
             }
         };
         #[cfg(not(target_os = "windows"))]
@@ -78,11 +82,7 @@ impl SystemMedia {
         ))
     }
 
-    pub fn sync(
-        &mut self,
-        state: &PlaybackSnapshot,
-        has_source: bool,
-    ) -> Result<(), souvlaki::Error> {
+    pub fn sync(&mut self, state: &PlaybackSnapshot, has_source: bool) -> anyhow::Result<()> {
         // 没有歌曲时不发布空会话；进度通知不会反复加载封面。
         if let Some(song) = &state.current_song {
             let key = (song.id, state.duration);

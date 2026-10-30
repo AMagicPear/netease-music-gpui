@@ -394,6 +394,33 @@ fn play_orpheus_target(target: OrpheusTarget, playback: Entity<PlaybackControlle
     .detach();
 }
 
+/// GPUI 0.3.8 的 Windows zoom() 只最大化，按钮的第二次点击需显式还原。
+pub fn toggle_maximize(window: &Window) {
+    #[cfg(target_os = "windows")]
+    {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            IsZoomed, SW_MAXIMIZE, SW_RESTORE, ShowWindowAsync,
+        };
+        if let Ok(handle) = HasWindowHandle::window_handle(window)
+            && let RawWindowHandle::Win32(handle) = handle.as_raw()
+        {
+            let hwnd = handle.hwnd.get() as _;
+            // 异步派发，避免原生 resize 回调重入 GPUI 的点击处理。
+            unsafe {
+                let command = if IsZoomed(hwnd) != 0 {
+                    SW_RESTORE
+                } else {
+                    SW_MAXIMIZE
+                };
+                ShowWindowAsync(hwnd, command);
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    window.zoom_window();
+}
+
 pub fn configure_window(window: &Window, cx: &App) {
     window.on_window_should_close(cx, |window, cx| {
         #[cfg(any(target_os = "macos", target_os = "windows"))]

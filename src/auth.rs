@@ -116,10 +116,7 @@ fn extract_cookie(response: &ApiResponse, missing_credential: &str) -> Result<St
         }
         cookies.insert(name.to_owned(), value.trim().to_owned());
     }
-    if !cookies
-        .get("MUSIC_U")
-        .is_some_and(|value| !value.is_empty())
-    {
+    if cookies.get("MUSIC_U").is_none_or(|value| value.is_empty()) {
         return Err(missing_credential.into());
     }
     Ok(cookies

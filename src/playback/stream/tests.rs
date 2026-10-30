@@ -923,7 +923,15 @@ async fn hung_download_is_detected_as_stalled_before_it_ever_fails() {
 /// 而暂停时没人再提交需求。现在必须留下记录，供恢复播放时判断。
 #[tokio::test]
 async fn background_download_failure_is_recorded_without_interrupting_playback() {
-    let mut server = serve(wav(60), true, None, None).await;
+    // 第二个 Range 必须仍在途中：Windows 本机回环可能在 drop(server) 前
+    // 下载完整首歌，这样根本没有触发下载失败，不能用调度时序模拟断网。
+    let mut server = serve(
+        wav(60),
+        true,
+        None,
+        Some((16 * BLOCK_BYTES, Arc::new(tokio::sync::Notify::new()))),
+    )
+    .await;
     let (audio, mut output) = open(&server).await;
     let mut buffer = [0.; 4800];
     for _ in 0..20 {

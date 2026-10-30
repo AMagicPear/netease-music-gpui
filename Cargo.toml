@@ -40,6 +40,7 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 [target.'cfg(target_os = "windows")'.dependencies]
 raw-window-handle = "0.6"
 windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.62.2", features = ["Foundation", "Media", "Storage_Streams", "Win32_System_WinRT"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 raw-window-handle = "0.6"

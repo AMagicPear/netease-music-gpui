@@ -322,7 +322,7 @@ fn window_buttons(window: &Window, colors: ColorTokens) -> [Button; 3] {
             maximize_icon,
             colors,
         )
-        .on_click(|_, window, _| window.zoom_window()),
+        .on_click(|_, window, _| crate::desktop::toggle_maximize(window)),
         hover_icon(
             "header-close-button",
             "关闭",

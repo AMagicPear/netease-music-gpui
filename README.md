@@ -73,11 +73,38 @@ cargo test --locked heart_mode_can_load_real_recommendations -- --ignored
 python3 scripts/package.py
 ```
 
-macOS 生成 `target/bundle/NetEase Music.app`，可执行文件位于 `Contents/MacOS`，图标、图片和字体位于 `Contents/Resources/assets`；Windows 生成 `target/bundle/netease-music-gpui/`，里面包含 `.exe` 和 `assets/`。如果配置了自定义 Cargo target 目录，产物位于该目录的 `bundle/`。请分发完整应用包或目录，不要只复制可执行文件。脚本只构建本机平台，不负责交叉编译、制作安装程序或收集额外的 Windows 运行库。
+macOS 生成 `target/bundle/NetEase Music.app`，可执行文件位于 `Contents/MacOS`，图标、图片和字体位于 `Contents/Resources/assets`。
+
+Windows 使用免安装 ZIP 分发，生成 `target/bundle/netease-music-gpui-0.1.0-x86_64-pc-windows-msvc.zip`（版本和架构跟随当前构建）及同名 `.sha256` 校验文件，同时保留未压缩的 `target/bundle/netease-music-gpui/` 方便检查。ZIP 内有一个完整目录：
+
+```text
+netease-music-gpui/
+  netease-music-gpui.exe
+  assets/                  # 图片、字体、SVG，与 EXE 相邻
+  *.dll                    # 对应架构的 VC release 运行库
+  README.txt
+  build-info.json
+```
+
+用户完整解压后直接双击 EXE；无需 Rust、Python、管理员权限或另装 VC 运行库，release 不弹控制台。资源按 EXE 所在目录定位，与快捷方式的工作目录无关。登录与播放记录仍保存在 `%APPDATA%/NeteaseMusicGpui/`，缓存位于 `%LOCALAPPDATA%/NeteaseMusicGpui/Cache/`，不会放进 ZIP；升级时从托盘退出旧程序，再解压新版到新目录即可。
+
+构建机需要安装 Visual Studio 的 C++ 构建工具和 Windows SDK。脚本从 `VCToolsRedistDir` 或 `vswhere` 找到对应架构的官方 VC release CRT 并将 DLL 放到 EXE 旁；找不到就报错，避免生成缺运行库的包。也可以显式指定官方 CRT 目录：
+
+```powershell
+py -3 scripts/package.py --runtime-dir "C:\path\to\VC\Redist\MSVC\14.xx\x64\Microsoft.VC143.CRT"
+```
+
+如果配置了自定义 Cargo target 目录，产物位于该目录的 `bundle/`。请分发生成的完整 ZIP 或 `.app`，不要只复制可执行文件。脚本只构建本机平台和架构；当前 Windows 方案是免安装目录，不自动注册 `orpheus://` 协议，也不创建开始菜单快捷方式。
 
 所有项目资源都从外部目录读取。单独执行 `cargo build --release` 不会复制资源，应使用上述脚本生成可分发目录。
 
 macOS 包使用本地 ad-hoc 签名，没有 Developer ID 签名和公证。可以双击应用并扫码登录，无需配置环境变量。
+
+打包脚本的本地回归不构建 Rust、不联网、不启动窗口：
+
+```bash
+python -m unittest discover -s scripts -p test_package.py
+```
 
 ## 技术栈
 
