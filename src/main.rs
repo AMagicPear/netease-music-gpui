@@ -49,7 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         theme::load_fonts(cx).expect("failed to load external dolphin fonts");
         gpui_kit::init(cx);
         theme::init(cx);
-        let bounds = Bounds::centered(None, size(px(1060.), px(720.)), cx);
+        let bounds = Bounds::centered(None, main_window_size(cx), cx);
         // Dock 菜单在窗口构建后单独安装，需要拿到播放与音乐库 Entity。
         let mut desktop_handles = None;
         let (window, view) = gpui_kit::open_window(
@@ -139,4 +139,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .detach();
     });
     Ok(())
+}
+
+/// 主窗口的初始尺寸。
+///
+/// 设计尺寸是 1060×720，但不能超过显示器可用区域：gpui 选窗口位置时只检查请求
+/// 区域中心点是否落在显示器内，高 DPI 小屏（例如 1280×800@200%，逻辑只有
+/// 640×400）放不下 1060×720 也照样按原尺寸开窗，于是窗口比屏幕还大。
+/// 结果就是只能看到左上角一块：图片被画到可见区域之外，看起来像错位或不显示。
+fn main_window_size(cx: &App) -> Size<Pixels> {
+    let preferred = size(px(1060.), px(720.));
+    let Some(display) = cx.primary_display() else {
+        return preferred;
+    };
+    // 留出一点余量，窗口不要正好顶满可用区域。
+    let margin = px(16.);
+    let available = display.visible_bounds().size;
+    size(
+        preferred
+            .width
+            .min((available.width - margin * 2.).max(px(320.))),
+        preferred
+            .height
+            .min((available.height - margin * 2.).max(px(240.))),
+    )
 }
