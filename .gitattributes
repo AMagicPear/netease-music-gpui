@@ -1,2 +1,3 @@
 # Unified diff 的空白上下文行需要保留一个前导空格。
-vendor/patches/*.patch whitespace=-blank-at-eol
+# `-text` 让 patch 始终保持 LF，否则 core.autocrlf=true 会把它检出成 CRLF，git apply 匹配不上源码。
+vendor/patches/*.patch whitespace=-blank-at-eol -text

@@ -6,8 +6,12 @@ use tray_icon::{
 };
 
 use crate::api::MusicApi;
+// 只在 macOS 的 Dock 菜单动作里用到（见下面的 dock_actions），Windows 上不需要。
+#[cfg(target_os = "macos")]
 use crate::models::PlayMode;
-use crate::playback::{PlaybackController, PlaybackEvent};
+use crate::playback::PlaybackController;
+#[cfg(target_os = "macos")]
+use crate::playback::PlaybackEvent;
 use crate::state::library::MusicLibrary;
 use crate::ui::shell::MainWindow;
 

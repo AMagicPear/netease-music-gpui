@@ -1,0 +1,12 @@
+--- a/vendor/gpui-pre-windows/src/directx_renderer.rs
++++ b/vendor/gpui-pre-windows/src/directx_renderer.rs
+@@ -384,6 +384,8 @@
+                 PrimitiveBatch::PolychromeSprites { texture_id, range } => {
+                     self.draw_polychrome_sprites(texture_id, range.start, range.len())
+                 }
+                 PrimitiveBatch::Surfaces(range) => self.draw_surfaces(&scene.surfaces[range]),
++                // Backdrop sampling is currently Metal-only.
++                PrimitiveBatch::BackdropBlurs(_blurs) => Ok(())
+             }
+             .with_context(|| {
+                 format!(

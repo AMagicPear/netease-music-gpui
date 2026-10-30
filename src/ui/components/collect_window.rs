@@ -5,6 +5,9 @@ use gpui::*;
 use gpui_kit::base::input::{Input, InputEditorStyle, InputEvent, InputState};
 use gpui_kit::base::{ColorTokens, Root, Scrollbar, ScrollbarMode, Theme};
 
+// hide_traffic_lights 只在 macOS 上存在，这里也必须跟着条件编译，
+// 否则非 macOS 构建会在 import 处报 unresolved import。
+#[cfg(target_os = "macos")]
 use super::hide_traffic_lights;
 use crate::desktop;
 use crate::models::Song;

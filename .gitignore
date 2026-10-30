@@ -4,6 +4,7 @@
 __pycache__/
 /vendor/gpui-pre/
 /vendor/gpui-pre-apple/
+/vendor/gpui-pre-windows/
 /vendor/gpui-pre-wgpu/
 /vendor/.gpui-patch-id
 .workbuddy/
