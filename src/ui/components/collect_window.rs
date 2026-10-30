@@ -59,6 +59,7 @@ pub fn open_collect_window(parent: &Window, songs: Vec<Song>, cx: &mut App) {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         display_id,
         titlebar: Some(TitlebarOptions {
+            title: Some(format!("收藏到歌单 - {}", desktop::APP_NAME).into()),
             appears_transparent: true,
             ..Default::default()
         }),

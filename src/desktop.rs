@@ -15,6 +15,9 @@ use crate::playback::PlaybackEvent;
 use crate::state::library::MusicLibrary;
 use crate::ui::shell::MainWindow;
 
+pub const APP_NAME: &str = "网易云音乐";
+pub const APP_ID: &str = "dev.netease-music-gpui";
+
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 
@@ -491,6 +494,7 @@ pub fn show_window(cx: &mut App) {
         window_bounds: Some(desktop.bounds),
         app_owns_titlebar_drag: true,
         titlebar: Some(TitlebarOptions {
+            title: Some(APP_NAME.into()),
             appears_transparent: true,
             ..Default::default()
         }),

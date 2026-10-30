@@ -50,6 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = open_url_tx.send(urls);
     });
     application.run(move |cx: &mut App| {
+        cx.set_app_identity(desktop::APP_ID, desktop::APP_NAME);
         cx.set_global(api);
         theme::load_fonts(cx).expect("failed to load external dolphin fonts");
         gpui_kit::init(cx);
@@ -62,6 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 app_owns_titlebar_drag: true,
                 titlebar: Some(TitlebarOptions {
+                    title: Some(desktop::APP_NAME.into()),
                     appears_transparent: true,
                     ..Default::default()
                 }),

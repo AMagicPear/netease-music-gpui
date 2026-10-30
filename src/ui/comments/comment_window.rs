@@ -55,6 +55,7 @@ pub(in crate::ui) fn open_comment_window(
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         display_id,
         titlebar: Some(TitlebarOptions {
+            title: Some(format!("发布评论 - {}", desktop::APP_NAME).into()),
             appears_transparent: true,
             ..Default::default()
         }),

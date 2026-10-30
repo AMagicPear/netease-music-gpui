@@ -55,6 +55,7 @@ pub(super) fn open(
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         display_id: parent.display(cx).map(|display| display.id()),
         titlebar: Some(TitlebarOptions {
+            title: Some(format!("登录 - {}", crate::desktop::APP_NAME).into()),
             appears_transparent: true,
             ..Default::default()
         }),

@@ -88,6 +88,8 @@ netease-music-gpui/
 
 用户完整解压后直接双击 EXE；无需 Rust、Python、管理员权限或另装 VC 运行库，release 不弹控制台。资源按 EXE 所在目录定位，与快捷方式的工作目录无关。登录与播放记录仍保存在 `%APPDATA%/NeteaseMusicGpui/`，缓存位于 `%LOCALAPPDATA%/NeteaseMusicGpui/Cache/`，不会放进 ZIP；升级时从托盘退出旧程序，再解压新版到新目录即可。
 
+Windows 的 EXE 图标和文件信息由 `build.rs` 在编译时嵌入，debug / release 均生效；版本跟随 `Cargo.toml`。`packaging/netease-music-gpui.ico` 从现有 macOS 图标 `packaging/163Music.icns` 转换，包含 16–256 像素的多种尺寸。GPUI 从 EXE 的图标资源 1 读取窗口图标，主窗口与弹窗另行设置原生标题；应用启动时设置固定 AppUserModelID，供任务栏识别同一个应用。
+
 构建机需要安装 Visual Studio 的 C++ 构建工具和 Windows SDK。脚本从 `VCToolsRedistDir` 或 `vswhere` 找到对应架构的官方 VC release CRT 并将 DLL 放到 EXE 旁；找不到就报错，避免生成缺运行库的包。也可以显式指定官方 CRT 目录：
 
 ```powershell

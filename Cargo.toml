@@ -51,6 +51,9 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSVi
 [dev-dependencies]
 futures = "0.3"
 
+[build-dependencies]
+embed-resource = "3.0.11"
+
 [profile.dev.package]
 gpui-pre = { opt-level = 3 }
 gpui-component = { opt-level = 3 }

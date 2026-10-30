@@ -1,0 +1,33 @@
+#pragma code_page(65001)
+#include <winver.h>
+
+LANGUAGE 0x04, 0x02
+
+1 ICON "@ICON_PATH@"
+
+1 VERSIONINFO
+FILEVERSION @VERSION_NUMBERS@
+PRODUCTVERSION @VERSION_NUMBERS@
+FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+FILEFLAGS 0x0L
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404B0"
+        BEGIN
+            VALUE "FileDescription", "网易云音乐\0"
+            VALUE "FileVersion", "@VERSION@\0"
+            VALUE "InternalName", "netease-music-gpui\0"
+            VALUE "OriginalFilename", "netease-music-gpui.exe\0"
+            VALUE "ProductName", "网易云音乐 GPUI\0"
+            VALUE "ProductVersion", "@VERSION@\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0804, 1200
+    END
+END
