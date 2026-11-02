@@ -230,12 +230,14 @@ impl CollectWindow {
                 cx.listener(|this, _, window, cx| this.start_creating(window, cx)),
             ));
         }
-        let playlists = library.favorite_playlist().into_iter().chain(
-            library
-                .playlists()
-                .iter()
-                .filter(|playlist| playlist.special_type != 5),
-        );
+        let playlists = library
+            .own_playlists()
+            .filter(|playlist| playlist.special_type == 5)
+            .chain(
+                library
+                    .own_playlists()
+                    .filter(|playlist| playlist.special_type != 5),
+            );
         rows.extend(playlists.map(|playlist| {
             let id = playlist.id;
             playlist_row(

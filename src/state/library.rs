@@ -56,6 +56,11 @@ impl MusicLibrary {
     pub fn playlists(&self) -> &[Playlist] {
         self.playlists.value().map(Vec::as_slice).unwrap_or(&[])
     }
+    pub fn own_playlists(&self) -> impl Iterator<Item = &Playlist> {
+        self.playlists()
+            .iter()
+            .filter(|playlist| self.user_id != 0 && playlist.creator.user_id == self.user_id)
+    }
     pub fn is_liked(&self, id: u64) -> bool {
         self.likes.value().is_some_and(|ids| ids.contains(&id))
     }
