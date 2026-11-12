@@ -104,7 +104,7 @@ Linux 生成包含可执行文件和 `assets/` 的 `tar.gz` 及 SHA-256 校验�
 
 macOS 本地打包默认使用 ad-hoc 签名；设置 `APPLE_SIGNING_IDENTITY` 后使用指定 Apple 证书签名。未配置 Developer ID 公证。
 
-推送任意 Git tag 会触发 GitHub Actions，分别构建 Windows x64、Linux x64 和 macOS Apple Silicon 和 Intel 包；四个构建都成功后才发布 Release，并附带各包的 SHA-256 校验文件。Release 说明列出当前标签相对于其历史中最近的已发布 Release 标签的提交；首次发布列出截至当前标签的提交。建议先更新 `Cargo.toml` 的版本并同步 `Cargo.lock`，再创建和推送标签（如 `v0.1.0`），因为包内版本和文件名来自 Cargo 版本而非标签。macOS Actions 使用仓库 Secrets 中的 `APPLE_CERTIFICATE`（Base64 编码的 p12）、`APPLE_CERTIFICATE_PASSWORD` 和 `APPLE_SIGNING_IDENTITY` 签名；缺少任一项会使构建失败。签名身份的分发范围取决于证书类型，此流程不执行公证。
+推送任意 Git tag 会触发 GitHub Actions，分别构建 Windows x64、Linux x64 和 macOS Apple Silicon 和 Intel 包；四个构建都成功后才发布 Release；macOS 提供 DMG，Windows 提供 ZIP，Linux 提供 tar.gz。Release 说明列出当前标签相对于其历史中最近的已发布 Release 标签的提交；首次发布列出截至当前标签的提交。建议先更新 `Cargo.toml` 的版本并同步 `Cargo.lock`，再创建和推送标签（如 `v0.1.0`），因为包内版本和文件名来自 Cargo 版本而非标签。macOS Actions 使用仓库 Secrets 中的 `APPLE_CERTIFICATE`（Base64 编码的 p12）、`APPLE_CERTIFICATE_PASSWORD` 和 `APPLE_SIGNING_IDENTITY` 签名；缺少任一项会使构建失败。签名身份的分发范围取决于证书类型，此流程不执行公证。
 
 打包脚本的本地回归不构建 Rust、不联网、不启动窗口：
 

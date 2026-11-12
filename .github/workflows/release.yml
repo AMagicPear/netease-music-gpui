@@ -84,7 +84,7 @@ jobs:
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: python3 scripts/package.py --target ${{ matrix.target }}
-      - name: Archive macOS app
+      - name: Create macOS DMG
         if: runner.os == 'macOS'
         shell: bash
         env:
@@ -93,10 +93,12 @@ jobs:
           host="$(rustc -vV | sed -n 's/^host: //p')"
           host="${BUILD_TARGET:-$host}"
           version="$(python3 -c 'import json, subprocess; m=json.loads(subprocess.check_output(["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"])); print(next(p["version"] for p in m["packages"] if p["name"] == "netease-music-gpui"))')"
-          archive="netease-music-gpui-${version}-${host}.zip"
-          cd target/bundle
-          ditto -c -k --sequesterRsrc --keepParent 'NetEase Music.app' "$archive"
-          shasum -a 256 "$archive" > "$archive.sha256"
+          image="netease-music-gpui-${version}-${host}.dmg"
+          staging="$(mktemp -d "$RUNNER_TEMP/netease-dmg.XXXXXX")"
+          trap 'rm -rf "$staging"' EXIT
+          ditto 'target/bundle/NetEase Music.app' "$staging/NetEase Music.app"
+          ln -s /Applications "$staging/Applications"
+          hdiutil create -volname 'NetEase Music' -srcfolder "$staging" -format UDZO "target/bundle/$image"
       - name: Remove macOS signing keychain
         if: always() && runner.os == 'macOS'
         run: security delete-keychain "$RUNNER_TEMP/apple-signing.keychain-db" || true
@@ -104,9 +106,9 @@ jobs:
         with:
           name: package-${{ matrix.id }}
           path: |
+            target/bundle/*.dmg
             target/bundle/*.zip
             target/bundle/*.tar.gz
-            target/bundle/*.sha256
           if-no-files-found: error
 
   release:
