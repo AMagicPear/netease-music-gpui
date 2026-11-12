@@ -60,6 +60,7 @@ pub(super) fn open(
             ..Default::default()
         }),
         app_owns_titlebar_drag: true,
+        window_decorations: crate::desktop::window_decorations(),
         // 允许拖拽缩放：双栏内容弹性自适应，仅设置下限防止拖坏布局。
         is_resizable: true,
         is_minimizable: true,
@@ -597,7 +598,7 @@ impl Render for LoginWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = Theme::global(cx).tokens.colors;
         let busy = self.account.read(cx).loading;
-        div()
+        let content = div()
             .size_full()
             .flex()
             .flex_col()
@@ -638,6 +639,7 @@ impl Render for LoginWindow {
                     .child(self.qr_pane(colors, busy))
                     .child(div().w(px(1.)).flex_none().my(px(24.)).bg(colors.border))
                     .child(self.phone_pane(colors, cx)),
-            )
+            );
+        super::components::window_frame(content)
     }
 }

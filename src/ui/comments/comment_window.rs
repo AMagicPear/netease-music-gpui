@@ -60,6 +60,7 @@ pub(in crate::ui) fn open_comment_window(
             ..Default::default()
         }),
         app_owns_titlebar_drag: true,
+        window_decorations: desktop::window_decorations(),
         is_resizable: false,
         is_minimizable: false,
         ..Default::default()
@@ -173,7 +174,7 @@ impl Render for CommentWindow {
         let can_publish = !publishing && !draft.trim().is_empty();
         let input = self.input.clone();
         let comments = self.comments.clone();
-        div()
+        let content = div()
             .size_full()
             .flex()
             .flex_col()
@@ -271,6 +272,7 @@ impl Render for CommentWindow {
                                 .child(if publishing { "发布中" } else { "发布" }),
                         ),
                     ),
-            )
+            );
+        crate::ui::components::window_frame(content)
     }
 }

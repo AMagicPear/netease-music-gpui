@@ -62,6 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 app_owns_titlebar_drag: true,
+                window_decorations: desktop::window_decorations(),
                 titlebar: Some(TitlebarOptions {
                     title: Some(desktop::APP_NAME.into()),
                     appears_transparent: true,

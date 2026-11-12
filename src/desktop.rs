@@ -18,6 +18,15 @@ use crate::ui::shell::MainWindow;
 pub const APP_NAME: &str = "网易云音乐";
 pub const APP_ID: &str = "dev.netease-music-gpui";
 
+/// Linux 由应用绘制标题栏；其他平台沿用 GPUI 默认的窗口装饰。
+pub fn window_decorations() -> Option<WindowDecorations> {
+    if cfg!(target_os = "linux") {
+        Some(WindowDecorations::Client)
+    } else {
+        None
+    }
+}
+
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 
@@ -493,6 +502,7 @@ pub fn show_window(cx: &mut App) {
     let options = WindowOptions {
         window_bounds: Some(desktop.bounds),
         app_owns_titlebar_drag: true,
+        window_decorations: window_decorations(),
         titlebar: Some(TitlebarOptions {
             title: Some(APP_NAME.into()),
             appears_transparent: true,

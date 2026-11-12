@@ -123,6 +123,20 @@ pub(super) fn hide_traffic_lights(window: &gpui::Window, hide_minimize: bool) {
     }
 }
 
+/// Linux 客户端装饰需要自己提供窗口边缘缩放区域。
+pub(super) fn window_frame(content: impl IntoElement) -> impl IntoElement {
+    #[cfg(target_os = "linux")]
+    {
+        gpui_kit::component::window_border()
+            .shadow_size(px(0.))
+            .child(content)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        content
+    }
+}
+
 /// Windows 使用原生命中区，macOS/Linux 在按下时将拖拽交给系统。
 pub(super) fn window_drag_area(id: &'static str) -> Stateful<Div> {
     div()

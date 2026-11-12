@@ -18,11 +18,10 @@ use crate::models::{Playlist, Song};
 use crate::playback::{PlaybackController, PlaybackEvent};
 use crate::state::library::MusicLibrary;
 
-/// macOS 顶部给系统红绿灯留白；Windows 的窗口按钮画在页头里，也要和窗口上边缘留点空白；
-/// 其余平台由系统标题栏占位。
+/// macOS 为红绿灯留白；Linux 和 Windows 为自绘窗口按钮留白。
 pub(super) const HEADER_TOP_INSET: f32 = if cfg!(target_os = "macos") {
     30.
-} else if cfg!(target_os = "windows") {
+} else if cfg!(any(target_os = "linux", target_os = "windows")) {
     12.
 } else {
     0.
@@ -205,7 +204,7 @@ impl Render for MainWindow {
         let colors = Theme::global(cx).tokens.colors;
         let tint = self.playlist_tint(window, cx);
         let playback = self.playback.clone();
-        div()
+        let content = div()
             .track_focus(&self.focus_handle)
             .id("main-window")
             .on_action(move |action: &PlayNext, _window, cx| {
@@ -270,7 +269,8 @@ impl Render for MainWindow {
             .child(self.player_bar.read(cx).vinyl_overlay())
             .children(self.now_playing_page.read(cx).vinyl_overlays())
             // 提示条排在最后：它是全窗口最上层的那一层。
-            .child(self.toast.clone())
+            .child(self.toast.clone());
+        super::components::window_frame(content)
     }
 }
 
