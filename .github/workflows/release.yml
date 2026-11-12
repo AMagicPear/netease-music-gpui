@@ -148,4 +148,6 @@ jobs:
             printf '## Changes in the first release\n\n' > release-notes.md
             git log --format='- %s (%h)' "$RELEASE_TAG" -- >> release-notes.md
           fi
+          printf "\n" >> release-notes.md
+          python3 scripts/release_badges.py --repository "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" release-assets/* >> release-notes.md
           gh release create "$RELEASE_TAG" release-assets/* --verify-tag --title "$RELEASE_TAG" --notes-file release-notes.md
