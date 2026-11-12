@@ -1,0 +1,117 @@
+name: Build and release
+
+on:
+  push:
+    tags:
+      - '**'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-2022
+          - name: Linux x64
+            os: ubuntu-24.04
+          - name: macOS Apple Silicon
+            os: macos-14
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake pkg-config libasound2-dev libfontconfig1-dev libfreetype6-dev libssl-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libzstd-dev libx11-xcb-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libvulkan-dev libdbus-1-dev
+      - name: Import macOS signing certificate
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$APPLE_CERTIFICATE" || -z "$APPLE_CERTIFICATE_PASSWORD" || -z "$APPLE_SIGNING_IDENTITY" ]]; then
+            echo 'Missing Apple signing secrets' >&2
+            exit 1
+          fi
+          certificate="$RUNNER_TEMP/apple-certificate.p12"
+          keychain="$RUNNER_TEMP/apple-signing.keychain-db"
+          password="$(openssl rand -hex 32)"
+          trap 'rm -f "$certificate"' EXIT
+          printf '%s' "$APPLE_CERTIFICATE" | base64 -D > "$certificate"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$certificate" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain"
+          security list-keychains -d user -s "$keychain"
+      - name: Build and package
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && secrets.APPLE_SIGNING_IDENTITY || '' }}
+        run: python scripts/package.py
+      - name: Archive macOS app
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          version="$(python -c 'import json, subprocess; m=json.loads(subprocess.check_output(["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"])); print(next(p["version"] for p in m["packages"] if p["name"] == "netease-music-gpui"))')"
+          archive="netease-music-gpui-${version}-${host}.zip"
+          cd target/bundle
+          ditto -c -k --sequesterRsrc --keepParent 'NetEase Music.app' "$archive"
+          shasum -a 256 "$archive" > "$archive.sha256"
+      - name: Remove macOS signing keychain
+        if: always() && runner.os == 'macOS'
+        run: security delete-keychain "$RUNNER_TEMP/apple-signing.keychain-db" || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ runner.os }}
+          path: |
+            target/bundle/*.zip
+            target/bundle/*.tar.gz
+            target/bundle/*.sha256
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Create release notes and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          previous=""
+          if git rev-parse --verify "${RELEASE_TAG}^{commit}^" >/dev/null 2>&1; then
+            previous="$(git describe --tags --abbrev=0 "${RELEASE_TAG}^{commit}^" 2>/dev/null || true)"
+          fi
+          if [ -n "$previous" ]; then
+            printf '## Changes since %s\n\n' "$previous" > release-notes.md
+            git log --format='- %s (%h)' "${previous}..${RELEASE_TAG}" -- >> release-notes.md
+          else
+            printf '## Changes in the first release\n\n' > release-notes.md
+            git log --format='- %s (%h)' "$RELEASE_TAG" -- >> release-notes.md
+          fi
+          gh release create "$RELEASE_TAG" release-assets/* --verify-tag --title "$RELEASE_TAG" --notes-file release-notes.md

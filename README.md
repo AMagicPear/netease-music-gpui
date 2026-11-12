@@ -67,7 +67,7 @@ cargo test --locked heart_mode_can_load_real_recommendations -- --ignored
 
 ## 打包
 
-在 macOS 或 Windows 上安装 Python 3.9+，运行以下命令构建当前平台的 release 并复制资源（Windows 也可以使用 `py -3`）：
+在 macOS、Windows 或 Linux 上安装 Python 3.9+，运行以下命令构建当前平台的 release 并复制资源（Windows 也可以使用 `py -3`）：
 
 ```bash
 python3 scripts/package.py
@@ -98,9 +98,13 @@ py -3 scripts/package.py --runtime-dir "C:\path\to\VC\Redist\MSVC\14.xx\x64\Micr
 
 如果配置了自定义 Cargo target 目录，产物位于该目录的 `bundle/`。请分发生成的完整 ZIP 或 `.app`，不要只复制可执行文件。脚本只构建本机平台和架构；当前 Windows 方案是免安装目录，不自动注册 `orpheus://` 协议，也不创建开始菜单快捷方式。
 
+Linux 生成包含可执行文件和 `assets/` 的 `tar.gz` 及 SHA-256 校验文件；解压后运行目录内的 `netease-music-gpui`。这是基于构建机系统库的包，需要兼容的 Linux 运行库、图形会话及 Vulkan 驱动，并非静态或跨发行版通用包。
+
 所有项目资源都从外部目录读取。单独执行 `cargo build --release` 不会复制资源，应使用上述脚本生成可分发目录。
 
-macOS 包使用本地 ad-hoc 签名，没有 Developer ID 签名和公证。可以双击应用并扫码登录，无需配置环境变量。
+macOS 本地打包默认使用 ad-hoc 签名；设置 `APPLE_SIGNING_IDENTITY` 后使用指定 Apple 证书签名。未配置 Developer ID 公证。
+
+推送任意 Git tag 会触发 GitHub Actions，分别构建 Windows x64、Linux x64 和 macOS Apple Silicon 包；三个构建都成功后才发布 Release，并附带各包的 SHA-256 校验文件。Release 说明列出当前标签相对于其历史中最近的上一个标签的提交；首次发布列出截至当前标签的提交。建议先更新 `Cargo.toml` 的版本并同步 `Cargo.lock`，再创建和推送标签（如 `v0.1.0`），因为包内版本和文件名来自 Cargo 版本而非标签。macOS Actions 使用仓库 Secrets 中的 `APPLE_CERTIFICATE`（Base64 编码的 p12）、`APPLE_CERTIFICATE_PASSWORD` 和 `APPLE_SIGNING_IDENTITY` 签名；缺少任一项会使构建失败。签名身份的分发范围取决于证书类型，此流程不执行公证。
 
 打包脚本的本地回归不构建 Rust、不联网、不启动窗口：
 

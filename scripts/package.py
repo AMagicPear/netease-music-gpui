@@ -1,4 +1,4 @@
-"""Build a native app; Windows distributions are self-contained portable ZIPs."""
+"""Build and package the application for the current platform."""
 
 import argparse
 import hashlib
@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tarfile
 import zipfile
 
 
@@ -71,6 +72,15 @@ def archive_windows(folder, archive):
     checksum.write_text(f"{digest}  {archive.name}\n", encoding="utf-8")
 
 
+def archive_linux(folder, archive):
+    with tarfile.open(archive, "w:gz") as output:
+        output.add(folder, arcname=folder.name)
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    archive.with_name(archive.name + ".sha256").write_text(
+        f"{digest}  {archive.name}\n", encoding="utf-8"
+    )
+
+
 def add_windows_distribution(output, host, version, runtime):
     for dll in sorted(runtime.glob("*.dll")):
         shutil.copy2(dll, output / dll.name)
@@ -126,11 +136,11 @@ def assemble(root, executable, output, platform, version):
             localized.mkdir()
             with (localized / "InfoPlist.strings").open("wb") as file:
                 plistlib.dump({"CFBundleName": name, "CFBundleDisplayName": name}, file)
-    elif platform == "win32":
+    elif platform in ("win32", "linux"):
         binary = output / executable.name
         resources = output / "assets"
     else:
-        raise ValueError("Packaging is supported on macOS and Windows only")
+        raise ValueError("Packaging is supported on macOS, Windows and Linux only")
     binary.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(executable, binary)
     shutil.copytree(root / "assets", resources)
@@ -140,8 +150,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime-dir", type=Path, help="Windows official VC release CRT directory")
     args = parser.parse_args()
-    if sys.platform not in ("darwin", "win32"):
-        raise SystemExit("Run this script on macOS or Windows to build for that platform")
+    if sys.platform not in ("darwin", "win32", "linux"):
+        raise SystemExit("Run this script on macOS, Windows or Linux to build for that platform")
     root = Path(__file__).resolve().parents[1]
     subprocess.run([sys.executable, str(root / "scripts/prepare_gpui.py")], cwd=root, check=True)
     metadata = json.loads(subprocess.check_output(
@@ -164,8 +174,10 @@ def main():
         if runtime is not None:
             add_windows_distribution(output, host, package["version"], runtime)
         if sys.platform == "darwin":
-            # 本地 ad-hoc 签名；正式分发时再使用 Developer ID 并公证。
-            subprocess.run(["codesign", "--force", "--sign", "-", str(output)], check=True)
+            # 未指定证书时保留本地 ad-hoc 签名。CI 可通过环境变量指定 Apple 身份。
+            identity = os.environ.get("APPLE_SIGNING_IDENTITY") or "-"
+            subprocess.run(["codesign", "--force", "--sign", identity, str(output)], check=True)
+            subprocess.run(["codesign", "--verify", "--strict", "--verbose=2", str(output)], check=True)
         if destination.exists():
             # Refuse to recursively replace a symlink pointing outside the bundle directory.
             if destination.resolve().parent != destination.parent.resolve():
@@ -176,6 +188,11 @@ def main():
     if sys.platform == "win32":
         archive = destination.parent / f"{package['name']}-{package['version']}-{host}.zip"
         archive_windows(destination, archive)
+        print(archive)
+        print(archive.with_name(archive.name + ".sha256"))
+    elif sys.platform == "linux":
+        archive = destination.parent / f"{package['name']}-{package['version']}-{host}.tar.gz"
+        archive_linux(destination, archive)
         print(archive)
         print(archive.with_name(archive.name + ".sha256"))
 

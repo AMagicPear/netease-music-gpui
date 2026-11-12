@@ -5,10 +5,11 @@ import json
 from pathlib import Path
 import plistlib
 import tempfile
+import tarfile
 import unittest
 import zipfile
 
-from package import add_windows_distribution, archive_windows, assemble, find_windows_runtime
+from package import add_windows_distribution, archive_linux, archive_windows, assemble, find_windows_runtime
 
 
 class PackageTests(unittest.TestCase):
@@ -41,6 +42,24 @@ class PackageTests(unittest.TestCase):
                 info = json.loads(zipped.read("netease-music-gpui/build-info.json"))
                 self.assertEqual(info["target"], "x86_64-pc-windows-msvc")
             self.assertEqual(archive.with_name("music.zip.sha256").read_text().split()[0],
+                             hashlib.sha256(archive.read_bytes()).hexdigest())
+
+    def test_linux_archive_keeps_executable_and_assets_together(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "assets").mkdir()
+            (root / "assets/resource").write_bytes(b"asset")
+            executable = root / "music"
+            executable.write_bytes(b"executable")
+            executable.chmod(0o755)
+            output = root / "bundle/netease-music-gpui"
+            assemble(root, executable, output, "linux", "0.1.0")
+            archive = output.parent / "music.tar.gz"
+            archive_linux(output, archive)
+            with tarfile.open(archive) as packed:
+                self.assertEqual(packed.extractfile("netease-music-gpui/assets/resource").read(), b"asset")
+                self.assertTrue(packed.getmember("netease-music-gpui/music").mode & 0o111)
+            self.assertEqual(archive.with_name("music.tar.gz.sha256").read_text().split()[0],
                              hashlib.sha256(archive.read_bytes()).hexdigest())
 
     def test_incomplete_runtime_fails_instead_of_shipping_a_broken_package(self):
