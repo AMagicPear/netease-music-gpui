@@ -149,6 +149,7 @@ def assemble(root, executable, output, platform, version):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime-dir", type=Path, help="Windows official VC release CRT directory")
+    parser.add_argument("--target", help="Cargo target triple (cross-compilation is only supported on macOS)")
     args = parser.parse_args()
     if sys.platform not in ("darwin", "win32", "linux"):
         raise SystemExit("Run this script on macOS, Windows or Linux to build for that platform")
@@ -161,11 +162,14 @@ def main():
     host = next(line.removeprefix("host: ") for line in subprocess.check_output(
         ["rustc", "-vV"], text=True
     ).splitlines() if line.startswith("host: "))
+    build_target = args.target or host
+    if build_target != host and not (sys.platform == "darwin" and build_target in ("aarch64-apple-darwin", "x86_64-apple-darwin")):
+        raise SystemExit("Cross-compilation is only supported between macOS architectures")
     runtime = find_windows_runtime(host, args.runtime_dir) if sys.platform == "win32" else None
     subprocess.run(["cargo", "build", "--locked", "--release", "--bin", package["name"],
-                    "--target", host], cwd=root, check=True)
+                    "--target", build_target], cwd=root, check=True)
     target = Path(metadata["target_directory"])
-    executable = target / host / "release" / (package["name"] + (".exe" if sys.platform == "win32" else ""))
+    executable = target / build_target / "release" / (package["name"] + (".exe" if sys.platform == "win32" else ""))
     destination = target / "bundle" / ("NetEase Music.app" if sys.platform == "darwin" else package["name"])
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=destination.parent) as temporary:
