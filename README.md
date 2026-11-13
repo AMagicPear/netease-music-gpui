@@ -2,7 +2,7 @@
 
 使用 Rust 和 [GPUI](https://gpui.rs/) 复刻网易云音乐桌面界面的练手项目，逐步接入真实账号、歌单和歌曲播放，学习原生 UI、共享状态与异步音频处理。
 
-项目仍在开发中，主要在 macOS 上开发和验证，其他平台尚未验证。
+项目仍在开发中，主要在 macOS 上开发和验证。已确认在Windows、Linux、macOS上均可成功编译使用。
 
 ![GPUI 原生实现的网易云音乐界面](docs/images/screenshot.png)
 
