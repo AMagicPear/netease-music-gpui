@@ -71,6 +71,7 @@ impl MusicApi {
     pub fn new(cookie: Option<String>) -> Result<Self, Box<dyn std::error::Error>> {
         let runtime = Runtime::new()?;
         let audio_http = reqwest::Client::builder()
+            .no_proxy()
             .use_rustls_tls()
             .connect_timeout(Duration::from_secs(10))
             .read_timeout(Duration::from_secs(20))
@@ -79,7 +80,17 @@ impl MusicApi {
             // GPUI 适配器使用 gpui-pre-reqwest 分支，单独复用图片客户端与 Tokio 运行时。
             // 图片和音频的 HTTP 客户端都不向资源服务器发送账号 COOKIE。
             let _runtime = runtime.enter();
-            Arc::new(reqwest_client::ReqwestClient::new())
+            let image_http = gpui_reqwest::Client::builder()
+                .no_proxy()
+                .use_rustls_tls()
+                .connect_timeout(Duration::from_secs(10))
+                .tcp_keepalive(Duration::from_secs(30))
+                .pool_idle_timeout(Duration::from_secs(30))
+                .http2_keep_alive_interval(Duration::from_secs(15))
+                .http2_keep_alive_timeout(Duration::from_secs(10))
+                .http2_keep_alive_while_idle(true)
+                .build()?;
+            Arc::new(reqwest_client::ReqwestClient::from(image_http))
         };
         Ok(Self {
             client: create_client(cookie.clone()),
@@ -114,14 +125,35 @@ impl MusicApi {
     ) -> Result<ApiResponse, String> {
         let response = tokio::time::timeout(Duration::from_secs(20), request)
             .await
-            .map_err(|_| "API 请求超时".to_string())?
-            .map_err(|_| "API 请求失败，请检查网络及 COOKIE".to_string())?;
-        if response.status != 200 || response.body["code"].as_i64() != Some(200) {
-            return Err(format!(
-                "API 请求失败（状态 {}），请检查 COOKIE",
-                response.status
-            ));
+            .map_err(|_| "网络请求超时，请稍后重试".to_string())?
+            .map_err(Self::request_error_message)?;
+        if !(200..300).contains(&response.status) || response.code() != Some(200) {
+            let message = response.message().unwrap_or("音乐服务未返回错误说明");
+            let code = response
+                .code()
+                .map(|code| format!("，业务码 {code}"))
+                .unwrap_or_default();
+            let message = format!("{message}（HTTP {}{code}）", response.status);
+            log::warn!("API 请求失败：{message}");
+            return Err(message);
         }
         Ok(response)
+    }
+
+    fn request_error_message(error: NcmError) -> String {
+        // 只记录错误及其原因，不输出 Cookie、请求体或完整响应。
+        if let NcmError::Http(error) = error {
+            let error = error.without_url();
+            let mut detail = error.to_string();
+            let mut source = std::error::Error::source(&error);
+            while let Some(cause) = source {
+                detail.push_str(&format!("：{cause}"));
+                source = cause.source();
+            }
+            log::warn!("API 网络请求失败：{detail}");
+            return format!("网络请求失败：{detail}");
+        }
+        log::warn!("API 请求失败：{error}");
+        error.to_string()
     }
 }

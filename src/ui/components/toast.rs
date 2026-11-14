@@ -98,32 +98,31 @@ impl Render for Toast {
         // 一个进度同时驱动透明度和位置：出现时从上方一点淡入正中，
         // 消失时原路退回——同一个式子正着反着都能用。
         let travel = TOAST_TRAVEL * (1. - presence.progress);
-        let height = f32::from(window.viewport_size().height);
+        let width = f32::from(window.viewport_size().width);
         div()
             .absolute()
             .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
             .child(
                 div()
-                    .absolute()
-                    .left_0()
-                    .right_0()
-                    // 落在整窗正中，再按进度往上让一点。
-                    .top(px((height - TOAST_HEIGHT) / 2. - travel))
+                    .relative()
+                    .top(px(-travel))
+                    .max_w(px((width - 40.).max(TOAST_HEIGHT)))
+                    .min_h(px(TOAST_HEIGHT))
+                    .px(px(TOAST_PADDING))
+                    .py(px(12.))
+                    .rounded(px(TOAST_HEIGHT / 2.))
+                    .bg(toast_background())
+                    .text_color(colors.primary_foreground)
+                    .text_size(px(14.))
+                    .text_center()
                     .flex()
+                    .items_center()
                     .justify_center()
-                    .child(
-                        div()
-                            .h(px(TOAST_HEIGHT))
-                            .px(px(TOAST_PADDING))
-                            .rounded_full()
-                            .bg(toast_background())
-                            .text_color(colors.primary_foreground)
-                            .text_size(px(14.))
-                            .flex()
-                            .items_center()
-                            .opacity(presence.progress)
-                            .child(message),
-                    ),
+                    .opacity(presence.progress)
+                    .child(div().min_w_0().child(message)),
             )
             .into_any_element()
     }

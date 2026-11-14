@@ -4692,6 +4692,7 @@ dependencies = [
  "futures",
  "gpui-fast",
  "gpui-kit",
+ "gpui-pre-reqwest",
  "gpui-pre-reqwest-client",
  "log",
  "ncm-api-rs",

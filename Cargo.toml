@@ -6,6 +6,8 @@ edition = "2024"
 [dependencies]
 gpui = { package = "gpui-fast", version = "=0.1.15" }
 reqwest-client = { package = "gpui-pre-reqwest-client", version = "=0.3.12" }
+# 图片适配器使用的 reqwest 分支；显式构造客户端以关闭自动代理发现。
+gpui-reqwest = { package = "gpui-pre-reqwest", version = "=0.12.15", default-features = false, features = ["rustls-tls-native-roots", "http2"] }
 gpui-kit = { version = "=0.9.1", default-features = false, features = [
     "component",
     "gpui-fast",

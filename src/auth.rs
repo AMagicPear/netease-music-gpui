@@ -144,7 +144,7 @@ fn parse_business_code(body: &serde_json::Value, fallback: &str) -> Result<(), S
 }
 
 fn parse_qr_status(response: ApiResponse) -> Result<QrStatus, String> {
-    // SDK 会把 800–803 的 response.status 归一为 200，扫码进度必须读 body.code。
+    // HTTP 状态与业务码独立；800–803 是扫码进度，必须读 body.code。
     match response.body["code"].as_i64() {
         Some(800) => Ok(QrStatus::Expired),
         Some(801) => Ok(QrStatus::Waiting),

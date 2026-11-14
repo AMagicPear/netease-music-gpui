@@ -5,6 +5,257 @@ use crate::models::{CommentResource, CreativeTarget, MessageItem, PLAYLIST_BLOCK
 use futures::AsyncReadExt;
 use gpui::http_client::HttpClient;
 
+/// 本地 HTTP 服务同时覆盖 SDK 透传和三个直连客户端，不依赖外网或真实账号。
+async fn local_api_server(
+    http_status: u16,
+    body: serde_json::Value,
+) -> (String, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let domain = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0; 1024];
+        loop {
+            let count = socket.read(&mut buffer).await.unwrap();
+            assert!(count > 0);
+            request.extend_from_slice(&buffer[..count]);
+            if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&request[..end]).to_lowercase();
+                let length: usize = headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .unwrap_or("0")
+                    .trim()
+                    .parse()
+                    .unwrap();
+                if request.len() >= end + 4 + length {
+                    break;
+                }
+            }
+        }
+        let body = body.to_string();
+        let response = format!(
+            "HTTP/1.1 {http_status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nSet-Cookie: fixture=preserved\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+    (domain, server)
+}
+
+async fn local_api_reply(
+    http_status: u16,
+    body: serde_json::Value,
+) -> Result<ApiResponse, NcmError> {
+    let (domain, server) = local_api_server(http_status, body).await;
+    let result = create_client(None)
+        .request(
+            "/api/song/enhance/player/url/v1",
+            serde_json::json!({"ids": "[1]", "level": "lossless"}),
+            ncm_api_rs::RequestOption {
+                domain: Some(domain),
+                crypto: ncm_api_rs::CryptoType::Api,
+                ..Default::default()
+            },
+        )
+        .await;
+    server.await.unwrap();
+    result
+}
+
+#[tokio::test]
+async fn api_risk_response_preserves_http_status_body_cookie_and_message() {
+    for code in [serde_json::json!(-460), serde_json::json!("-460")] {
+        let body = serde_json::json!({
+            "code": code,
+            "msg": "",
+            "message": "检测到您的网络环境存在风险，请稍后再试"
+        });
+        let response = local_api_reply(200, body.clone()).await.unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, body);
+        assert_eq!(response.code(), Some(-460));
+        assert_eq!(response.cookie, ["fixture=preserved"]);
+        let message = MusicApi::request(std::future::ready(Ok(response)))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            message,
+            "检测到您的网络环境存在风险，请稍后再试（HTTP 200，业务码 -460）"
+        );
+    }
+}
+
+#[tokio::test]
+async fn api_http_errors_and_business_errors_keep_original_messages() {
+    for (http_status, code) in [(200, 301), (429, 503), (502, 502), (403, 200)] {
+        let body = serde_json::json!({"code": code, "msg": "服务端原始说明"});
+        let response = local_api_reply(http_status, body.clone()).await.unwrap();
+        assert_eq!(response.status, i64::from(http_status));
+        assert_eq!(response.body, body);
+        assert_eq!(
+            MusicApi::request(std::future::ready(Ok(response)))
+                .await
+                .unwrap_err(),
+            format!("服务端原始说明（HTTP {http_status}，业务码 {code}）")
+        );
+    }
+    let response = local_api_reply(503, serde_json::json!("Service Unavailable"))
+        .await
+        .unwrap();
+    assert_eq!(
+        MusicApi::request(std::future::ready(Ok(response)))
+            .await
+            .unwrap_err(),
+        "Service Unavailable（HTTP 503）"
+    );
+}
+
+#[tokio::test]
+async fn api_success_and_qr_progress_keep_http_status_separate() {
+    for code in [serde_json::json!(200), serde_json::json!("200")] {
+        let result = local_api_reply(200, serde_json::json!({"code": code, "data": []})).await;
+        assert!(MusicApi::request(std::future::ready(result)).await.is_ok());
+    }
+    for code in [201, 302, 400, 502, 800, 801, 802, 803, -460, 700] {
+        let response = local_api_reply(200, serde_json::json!({"code": code}))
+            .await
+            .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.code(), Some(code));
+    }
+}
+
+#[tokio::test]
+async fn sdk_email_login_does_not_replace_error_body_or_http_status() {
+    let body = serde_json::json!({"code": 502, "message": "原始登录错误", "trace": "preserve"});
+    let (domain, server) = local_api_server(401, body.clone()).await;
+    let response = create_client(None)
+        .login(&Query {
+            domain: Some(domain),
+            ..Query::new()
+        })
+        .await
+        .unwrap();
+    server.await.unwrap();
+    assert_eq!(response.status, 401);
+    assert_eq!(response.body, body);
+}
+
+#[tokio::test]
+async fn sdk_multi_step_requests_return_the_first_business_failure() {
+    for endpoint in 0..5 {
+        let body = serde_json::json!({"code": -460, "message": "保留中途失败的原文"});
+        let (domain, server) = local_api_server(200, body.clone()).await;
+        // 显式本地代理也拦住潜在的后续请求，测试永远不会连接外部上传服务。
+        let client = ApiClient::with_proxy(None, &domain).unwrap();
+        let query = Query {
+            domain: Some(domain),
+            ..Query::new()
+        };
+        let response = match endpoint {
+            0 => client.avatar_upload(&query, Vec::new()).await,
+            1 => {
+                client
+                    .voice_upload(&query, "fixture.wav", Vec::new(), None)
+                    .await
+            }
+            2 => client.playlist_track_all(&query).await,
+            3 => client.song_url_v1_302(&query).await,
+            _ => client.verify_get_qr(&query).await,
+        }
+        .unwrap();
+        server.await.unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, body);
+    }
+}
+
+#[test]
+fn direct_http_clients_ignore_proxy_environment() {
+    const CHILD: &str = "NETEASE_DIRECT_HTTP_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        // 子进程单独设置代理，避免修改并行测试共用的进程环境。
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args([
+            "--exact",
+            "api::tests::direct_http_clients_ignore_proxy_environment",
+            "--nocapture",
+        ]);
+        command.env(CHILD, "1");
+        for name in [
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+        ] {
+            command.env(name, &proxy);
+        }
+        command.env("NO_PROXY", "").env("no_proxy", "");
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let mut api = MusicApi::new(None).unwrap();
+    api.set_session(None);
+    api.runtime.block_on(async {
+        let body = serde_json::json!({"code": 200});
+        let (domain, server) = local_api_server(200, body.clone()).await;
+        // 对照：普通 reqwest 确实受代理环境影响，连不上同一个本地服务。
+        assert!(
+            reqwest::Client::new()
+                .get(&domain)
+                .timeout(Duration::from_secs(2))
+                .send()
+                .await
+                .is_err()
+        );
+        let response = api.audio_http().get(&domain).send().await.unwrap();
+        assert_eq!(response.status(), 200);
+        server.await.unwrap();
+
+        let (domain, server) = local_api_server(200, body.clone()).await;
+        let response = api
+            .http_client()
+            .get(&domain, ().into(), true)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        server.await.unwrap();
+
+        let (domain, server) = local_api_server(200, body.clone()).await;
+        let response = api
+            .client
+            .request(
+                "/api/test",
+                serde_json::json!({}),
+                ncm_api_rs::RequestOption {
+                    domain: Some(domain),
+                    crypto: ncm_api_rs::CryptoType::Api,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, body);
+        server.await.unwrap();
+    });
+}
+
 #[test]
 #[ignore = "需要登录会话和网络连接，且红心歌单非空"]
 fn heart_mode_can_load_real_recommendations() {

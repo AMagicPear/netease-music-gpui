@@ -77,8 +77,23 @@ impl MainWindow {
                 }
             },
         );
-        // 封面预取只跟随歌曲和预加载候选，不处理位置推进。
-        let playback_subscription = cx.subscribe(&playback, |this, _, event, cx| {
+        // 播放错误提示和封面预取共用订阅，不处理位置推进。
+        let mut reported_playback_error = None;
+        let playback_subscription = cx.subscribe(&playback, move |this, playback, event, cx| {
+            if matches!(event, PlaybackEvent::SnapshotChanged) {
+                let snapshot = playback.read(cx).snapshot();
+                let failure = snapshot
+                    .error
+                    .as_ref()
+                    .map(|message| (snapshot.revision, message.clone()));
+                // 每次加载只提示一次；重试同一首歌会有新 revision，仍能再次报错。
+                if failure != reported_playback_error {
+                    if let Some((_, message)) = &failure {
+                        Toast::show(cx, format!("播放失败：{message}"));
+                    }
+                    reported_playback_error = failure;
+                }
+            }
             if matches!(
                 event,
                 PlaybackEvent::SnapshotChanged | PlaybackEvent::PreloadChanged
