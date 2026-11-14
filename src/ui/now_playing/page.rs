@@ -198,8 +198,11 @@ impl NowPlayingPage {
         self.now_playing.read(cx).is_expanded()
     }
 
-    pub(in crate::ui) fn vinyl_overlays(&self) -> [Entity<Vinyl>; 2] {
-        [self.vinyl.clone(), self.summary_vinyl.clone()]
+    pub(in crate::ui) fn vinyl_overlays(&self, cx: &App) -> [AnyElement; 2] {
+        [
+            self.vinyl.read(cx).overlay(),
+            self.summary_vinyl.read(cx).overlay(),
+        ]
     }
 
     /// 展开时的副作用：回到歌词页起点并同步当前歌曲。

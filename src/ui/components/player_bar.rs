@@ -140,8 +140,8 @@ impl PlayerBar {
         }
     }
 
-    pub(in crate::ui) fn vinyl_overlay(&self) -> AnyElement {
-        self.mini_vinyl.clone().into_any_element()
+    pub(in crate::ui) fn vinyl_overlay(&self, cx: &App) -> AnyElement {
+        self.mini_vinyl.read(cx).overlay()
     }
 
     /// 离开事件只清除自己，避免乱序回调清掉相邻命中区的 hover。

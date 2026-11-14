@@ -37,7 +37,7 @@ impl RotationClock {
     }
 }
 
-/// 旋转只通知这个小视图，歌曲信息和页面列表不随它逐帧重建。
+/// 唱片播放状态与时钟；动画绘制层挂在窗口根部，不重建缓存页面。
 pub(in crate::ui) struct Vinyl {
     clock: Rc<Cell<RotationClock>>,
     disc_path: &'static str,
@@ -87,7 +87,7 @@ impl Vinyl {
         self.placement.set(None);
     }
 
-    /// 页面只留下占位；动画视图挂在缓存页面旁边，不会使整页缓存失效。
+    /// 页面只留下占位；动画绘制层挂在缓存页面旁边。
     pub(in crate::ui) fn placeholder(
         &self,
         side: f32,
@@ -134,10 +134,8 @@ impl Vinyl {
         }
         playing_changed || cover_changed
     }
-}
-
-impl Render for Vinyl {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    /// 直接挂到窗口根部，避免独立 Entity 的绘制缓存复用旧的占位坐标。
+    pub(in crate::ui) fn overlay(&self) -> AnyElement {
         let placement = self.placement.clone();
         let clock = self.clock.clone();
         let disc_path = self.disc_path;
@@ -205,5 +203,6 @@ impl Render for Vinyl {
         .absolute()
         .inset_0()
         .size_full()
+        .into_any_element()
     }
 }

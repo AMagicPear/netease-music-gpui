@@ -266,8 +266,8 @@ impl Render for MainWindow {
                         .flex_shrink(0.),
                 ),
             )
-            .child(self.player_bar.read(cx).vinyl_overlay())
-            .children(self.now_playing_page.read(cx).vinyl_overlays())
+            .child(self.player_bar.read(cx).vinyl_overlay(cx))
+            .children(self.now_playing_page.read(cx).vinyl_overlays(cx))
             // 提示条排在最后：它是全窗口最上层的那一层。
             .child(self.toast.clone());
         super::components::window_frame(content)
