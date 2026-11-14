@@ -855,9 +855,10 @@ impl PlaylistPage {
     fn rebuild_display_order(&mut self, cx: &App) {
         let sort = self.sort;
         let keyword: SharedString = self.search_input.read(cx).value().trim().into();
+        let folded_keyword = keyword.to_lowercase();
         let songs = &self.detail.read(cx).songs();
         let matched = (0..songs.len())
-            .filter(|&index| keyword.is_empty() || song_matches(&songs[index], &keyword))
+            .filter(|&index| keyword.is_empty() || song_matches(&songs[index], &folded_keyword))
             .collect();
         self.display_order = match sort {
             Some((column, descending)) => sort_indices(matched, songs, column, descending),

@@ -403,21 +403,18 @@ impl PlaybackController {
     }
 
     /// 与自动续播使用同一游标规则；单曲循环复用当前音源，不另加载一份。
-    fn next_song(&self) -> Option<Song> {
+    fn next_song(&self) -> Option<&Song> {
         if self.state.mode.repeats_current() {
             return None;
         }
         let next = self.queue_cursor? + 1;
-        self.queue
-            .get(next)
-            .or_else(|| {
-                self.state
-                    .mode
-                    .wraps()
-                    .then(|| self.queue.first())
-                    .flatten()
-            })
-            .cloned()
+        self.queue.get(next).or_else(|| {
+            self.state
+                .mode
+                .wraps()
+                .then(|| self.queue.first())
+                .flatten()
+        })
     }
 
     fn cancel_preload(&mut self) {
@@ -485,10 +482,9 @@ impl PlaybackController {
     }
 
     fn maybe_preload(&mut self, cx: &mut Context<Self>) {
-        let next = self.next_song();
+        let next_id = self.next_song().map(|song| song.id);
         if self.preload.as_ref().is_some_and(|preload| {
-            next.as_ref().is_none_or(|song| song.id != preload.song.id)
-                || preload.quality != self.state.quality
+            next_id != Some(preload.song.id) || preload.quality != self.state.quality
         }) {
             self.cancel_preload();
             self.publish(cx, PlaybackEvent::PreloadChanged);
@@ -501,7 +497,7 @@ impl PlaybackController {
         {
             return;
         }
-        let Some(next) = next else {
+        let Some(next) = self.next_song().cloned() else {
             return;
         };
         if self

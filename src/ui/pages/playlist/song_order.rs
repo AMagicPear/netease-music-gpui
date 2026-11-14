@@ -1,7 +1,6 @@
 //! 歌单内的本地搜索匹配与排序。
 
 use crate::models::Song;
-use crate::ui::components::keyword_ranges;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum SongSort {
@@ -51,14 +50,22 @@ pub(super) fn sort_label(
 
 /// 关键词命中：标题、任一歌手、专辑任一包含即算命中。
 ///
-/// 判定直接复用 `keyword_ranges`，所以「过滤」和「高亮」是同一套匹配，
+/// 使用与 `keyword_ranges` 相同的小写化规则，所以「过滤」和「高亮」是同一套匹配，
 /// 不会出现某行搜出来了、高亮却找不到位置的情况。搜的是子串不是前缀，
 /// 所以「周」能命中歌名中间带「周」字的那首。
 ///
 /// `tns`（音译）和 `alia`（别名）也算：它们显示成标题的副标题，
 /// 用户看得到就一定会搜它 —— 用「daoxiang」搜「稻香」应该找得到。
+/// `keyword` 已去除两端空白并转成小写。
 pub(super) fn song_matches(song: &Song, keyword: &str) -> bool {
-    let hit = |text: &str| !keyword_ranges(text, keyword).is_empty();
+    let hit = |text: &str| {
+        !keyword.is_empty()
+            && text
+                .chars()
+                .flat_map(char::to_lowercase)
+                .collect::<String>()
+                .contains(keyword)
+    };
     hit(&song.name)
         || song.tns.iter().any(|t| hit(t))
         || song.alia.iter().any(|a| hit(a))
@@ -189,8 +196,23 @@ mod tests {
         assert!(song_matches(&track, "叶惠美"));
         // 副标题里的命中也算，大小写不敏感。
         assert!(song_matches(&track, "xiang"));
-        assert!(song_matches(&track, "DAO"));
+        assert!(song_matches(&track, "dao"));
         assert!(song_matches(&track, "theme"));
         assert!(!song_matches(&track, "不存在"));
+    }
+
+    #[test]
+    fn filtering_matches_highlight_unicode_rules() {
+        use crate::ui::components::keyword_ranges;
+        for text in ["İstanbul", "ΟΣ", "稻香", "Love LOVE", ""] {
+            let track = song(text, "", None);
+            for keyword in ["i", "σ", "ς", "稻", "LOVE", "不存在", ""] {
+                assert_eq!(
+                    song_matches(&track, &keyword.to_lowercase()),
+                    !keyword_ranges(text, keyword).is_empty(),
+                    "text={text:?}, keyword={keyword:?}"
+                );
+            }
+        }
     }
 }
