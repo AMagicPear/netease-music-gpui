@@ -3,13 +3,16 @@
 以下为 GPUI 补丁的准备及维护说明。
 
 这里只跟踪 `patches/` 下的补丁，不提交完整依赖源码。
-补丁从原 stash 的 GPUI 0.3.7 实验移植到当前使用的 **0.3.8**。
+补丁从 `gpui-pre 0.3.8` 移植到当前使用的 **gpui-fast 0.1.15**。
 
-- `gpui-image-transform-0.3.8.patch`：图片 GPU 旋转。
-- `gpui-windows-image-transform-0.3.8.patch`：为 DirectX 同步图片结构、GPU 旋转、局部圆角裁剪及图集采样边界。
-- `gpui-backdrop-blur-0.3.8.patch`：圆角矩形背景模糊（毛玻璃）。
-- `gpui-svg-app-fonts-0.3.8.patch`：SVG 文本加载 `assets/font/` 中的应用字体，用于推荐页日历等图案。
-- `gpui-text-whitespace-0.3.8.patch`：区分空白折叠与保留换行，维护原文索引。
+- `gpui-image-transform-0.1.15.patch`：图片 GPU 旋转，同步 fast 图层的矩阵、边界、位移和缓存指纹。
+- `gpui-windows-image-transform-0.1.15.patch`：为 DirectX 同步图片结构、GPU 旋转、局部圆角裁剪及图集采样边界。
+- `gpui-backdrop-blur-0.1.15.patch`：圆角矩形背景模糊（毛玻璃），适配 `objc2-metal` 与 fast 绘制路径。
+- `gpui-windows-backdrop-blur-0.1.15.patch`：DirectX 忽略仅由 Metal 实现的背景模糊批次。
+- `gpui-svg-app-fonts-0.1.15.patch`：SVG 文本加载 `assets/font/` 中的应用字体，用于推荐页日历等图案。
+  上游只加载固定的 `fonts/ibm-plex-sans/` 和 `fonts/lilex/`，因此仍需该补丁。
+  项目的 `AssetSource::list("font")` 返回文件名，加载时补回 `font/` 前缀。
+- `gpui-text-whitespace-0.1.15.patch`：区分空白折叠与保留换行，维护原文索引，覆盖 fast 文本测量、截断和测量缓存复用。
 
 首次构建或补丁更新后，在项目根目录运行：
 
@@ -18,11 +21,21 @@ python3 scripts/prepare_gpui.py
 cargo run --locked
 ```
 
-准备脚本从 crates.io 下载固定版本的 `gpui-pre`、`gpui-pre-apple`、`gpui-pre-windows`、`gpui-pre-wgpu`，
+准备脚本从 crates.io 下载固定版本的 `gpui-fast`、`gpui-fast-apple`、`gpui-fast-windows`、`gpui-fast-wgpu`，
 校验 SHA-256，并按文件名顺序使用 `git apply` 应用 `patches/` 下的全部补丁。
 生成的四个源码目录已加入 `.gitignore`；
 根目录 Cargo 的 `[patch.crates-io]` 使用这些本地包，使直接和间接依赖共用相同版本。
 原始发布包中的 Apache-2.0 许可证随源码保留。
+
+对应的 Cargo 路径覆盖：
+
+```toml
+[patch.crates-io]
+gpui-fast = { path = "vendor/gpui-fast" }
+gpui-fast-apple = { path = "vendor/gpui-fast-apple" }
+gpui-fast-windows = { path = "vendor/gpui-fast-windows" }
+gpui-fast-wgpu = { path = "vendor/gpui-fast-wgpu" }
+```
 
 脚本可重复运行；版本与补丁未变时直接跳过。需要修改补丁时，应编辑 patch，
 不要只修改生成的源码，因为下一次准备会替换这些目录。
@@ -37,7 +50,8 @@ img(url).with_transformation(Transformation::rotate(radians(angle)))
 圆角在图片局部坐标中计算，祖先裁剪仍使用窗口坐标。
 图片的线性采样限制在自身图集区域的像素中心范围内，避免旋转时混入相邻图片的颜色。
 补丁同步调整了 Scene 包围盒、Metal/HLSL/WGSL 绘制路径和 WebGL 的记录步长。
-Metal 构建脚本从同级 `gpui-pre` 生成共享结构，避免 Rust 与 shader 布局不一致。
+Metal 构建脚本从同级 `gpui-fast` 生成共享结构，避免 Rust 与 shader 布局不一致；
+准备脚本移除 Apple 发布包内的 `src/fast/release_gpui` 副本。
 DirectX 的 HLSL 结构手动维护，`PolychromeSprite` 必须与 Rust 一样包含末尾的
 `TransformationMatrix`（总共 120 字节）。顶点位置和祖先裁剪使用变换后的窗口坐标，
 圆角使用插值的变换前坐标，避免唱片旋转时圆形遮罩错位；线性采样限制在当前图块内，
@@ -83,12 +97,6 @@ WGPU 后端目前忽略该批次（Windows/Linux 上不绘制模糊）；需要�
 这不是完整的 CSS 排版引擎：转换以单个文本元素为边界，软换行仍使用 GPUI 的规则，
 不实现跨元素空白合并、语言相关的换行转换和 CSS 行边缘空格消除。
 评论正文使用本地 `SelectableText`，复用 gpui-base 的拖选和复制状态，逐行按实际文字宽度绘制高亮。
-
-纯文本转换与偏移边界回归（不启动窗口）：
-
-```bash
-cargo test --locked --test text_whitespace
-```
 
 升级 GPUI 时，更新准备脚本中的版本与发布包 SHA-256，并重新生成、验证 patch。
 如果上游提供同等接口，可删除补丁、准备脚本和 Cargo 中的路径覆盖。

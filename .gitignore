@@ -6,6 +6,10 @@ __pycache__/
 /vendor/gpui-pre-apple/
 /vendor/gpui-pre-windows/
 /vendor/gpui-pre-wgpu/
+/vendor/gpui-fast/
+/vendor/gpui-fast-apple/
+/vendor/gpui-fast-windows/
+/vendor/gpui-fast-wgpu/
 /vendor/.gpui-patch-id
 .workbuddy/
 

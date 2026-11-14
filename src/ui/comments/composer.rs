@@ -183,7 +183,7 @@ fn input_box(
             )
         })
         // Textarea 只有实际滚动文字时才停止冒泡；空框及文字边界都继续滚动页面。
-        .on_scroll_wheel(move |event: &ScrollWheelEvent, _, cx| {
+        .on_scroll(move |event: &ScrollEvent, _, cx| {
             scroll_comments.update(cx, |comments, cx| {
                 comments
                     .scroll_state()

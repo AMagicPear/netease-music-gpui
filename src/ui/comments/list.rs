@@ -367,7 +367,7 @@ impl Render for CommentsView {
                     .debug_selector(|| "album-comments-region".into())
                     .size_full()
                     .overflow_hidden()
-                    .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, _, cx| {
+                    .on_scroll(cx.listener(|this, _: &ScrollEvent, _, cx| {
                         // 原生 list 先执行滚动；未接管时立即撤销，不能等缓存视图重绘。
                         if this.mode != ListMode::Owned {
                             this.list.scroll_to(this.parked_at);

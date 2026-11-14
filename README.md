@@ -1,8 +1,8 @@
 # NetEase-Music-GPUI
 
-使用 Rust 和 [GPUI](https://gpui.rs/) 复刻网易云音乐桌面界面的练手项目，逐步接入真实账号、歌单和歌曲播放，学习原生 UI、共享状态与异步音频处理。
+使用 Rust 和 [GPUI Fast](https://github.com/longbridge/gpui-fast) 复刻网易云音乐桌面界面的练手项目，逐步接入真实账号、歌单和歌曲播放，学习原生 UI、共享状态与异步音频处理。
 
-项目仍在开发中，主要在 macOS 上开发和验证。已确认在Windows、Linux、macOS上均可成功编译使用。
+项目仍在开发中，主要在 macOS 上开发和验证。此分支正在迁移到 GPUI Fast；Windows、Linux 的迁移结果仍需在对应平台验证。
 
 ![GPUI 原生实现的网易云音乐界面](docs/images/screenshot.png)
 
@@ -29,7 +29,7 @@ python3 scripts/prepare_gpui.py
 cargo run --locked
 ```
 
-准备脚本下载固定版本的 GPUI 并应用本地补丁（图片 GPU 旋转、背景模糊、SVG 应用字体）；首次构建和补丁更新后运行即可。
+准备脚本下载固定版本的 GPUI Fast 并应用本地补丁（图片 GPU 旋转、背景模糊、SVG 应用字体、文本空白处理）；首次构建和补丁更新后运行即可。
 仓库只保存补丁，生成的依赖源码不进入 Git。详情见 [GPUI 补丁说明](vendor/README.md)。
 
 启动后使用网易云音乐 App 扫码登录。登录会话保存在本地，请勿分享或提交 `session.cookie`。
@@ -48,7 +48,7 @@ macOS 生成 `.app`，Windows 生成 ZIP，Linux 生成 `tar.gz`。请分发完�
 
 | 依赖 | 用途 |
 | --- | --- |
-| GPUI / gpui-kit | 原生窗口、布局、组件与 Entity 状态管理 |
+| gpui-fast 0.1.15 / gpui-kit 0.9.1 | 原生窗口、布局、组件与 Entity 状态管理 |
 | ncm-api-rs | 网易云账号、歌单、歌曲详情和播放地址接口 |
 | Tokio / reqwest | 异步网络请求与音频下载 |
 | CPAL | 音频设备与直接 PCM 输出 |

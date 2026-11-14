@@ -14,32 +14,6 @@ pub struct SongsCollected {
     pub result: Result<(), String>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn own_playlists_excludes_subscriptions_and_keeps_new_playlists() {
-        let mut library = MusicLibrary {
-            user_id: 1,
-            ..Default::default()
-        };
-        let mut subscribed = Playlist::empty(2, "他人的歌单".into());
-        subscribed.creator.user_id = 2;
-        library.playlists.set(vec![subscribed]);
-        library.insert_playlist(Playlist::empty(1, "新建歌单".into()));
-        assert_eq!(
-            library
-                .own_playlists()
-                .map(|playlist| playlist.id)
-                .collect::<Vec<_>>(),
-            vec![1]
-        );
-        library.user_id = 0;
-        assert_eq!(library.own_playlists().count(), 0);
-    }
-}
-
 impl EventEmitter<SongsCollected> for MusicLibrary {}
 
 impl MusicLibrary {
@@ -227,5 +201,31 @@ impl MusicLibrary {
         } else {
             self.playlists.set(vec![playlist]);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn own_playlists_excludes_subscriptions_and_keeps_new_playlists() {
+        let mut library = MusicLibrary {
+            user_id: 1,
+            ..Default::default()
+        };
+        let mut subscribed = Playlist::empty(2, "他人的歌单".into());
+        subscribed.creator.user_id = 2;
+        library.playlists.set(vec![subscribed]);
+        library.insert_playlist(Playlist::empty(1, "新建歌单".into()));
+        assert_eq!(
+            library
+                .own_playlists()
+                .map(|playlist| playlist.id)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+        library.user_id = 0;
+        assert_eq!(library.own_playlists().count(), 0);
     }
 }

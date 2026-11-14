@@ -1,6 +1,6 @@
---- a/vendor/gpui-pre/src/svg_renderer.rs
-+++ b/vendor/gpui-pre/src/svg_renderer.rs
-@@ -316,7 +316,29 @@
+--- a/vendor/gpui-fast/src/svg_renderer.rs
++++ b/vendor/gpui-fast/src/svg_renderer.rs
+@@ -316,6 +316,28 @@
              Ok(Some(data)) => db.load_font_data(data.into_owned()),
              Ok(None) => log::warn!("Bundled font not found: {path}"),
              Err(error) => log::warn!("Failed to load bundled font {path}: {error}"),
@@ -29,4 +29,3 @@
 +        }
      }
  }
- 

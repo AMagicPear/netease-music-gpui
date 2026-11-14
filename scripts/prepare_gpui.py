@@ -11,12 +11,12 @@ import tempfile
 from urllib.error import URLError
 from urllib.request import urlopen
 
-VERSION = "0.3.8"
+VERSION = "0.1.15"
 CRATES = {
-    "gpui-pre": "d7f0bc3ebba070f8981b3f8e905a12f47d27794a30d029e59cdb9edf7a4b3360",
-    "gpui-pre-apple": "bfdd914311cd12894367c8b9908947bb0c27fd42f8b9a5ff7a0730551a83fa4c",
-    "gpui-pre-windows": "371f9bb13f97e3bea2f8b8e5e81232bb74d735153c244ae67f7400e743925b1c",
-    "gpui-pre-wgpu": "439c5421cafe1a7cf68d0c0ae5cc82b26fad6b0e6345ac98d20acaf1f2463914",
+    "gpui-fast": "a069272b90d908d15152711b38153edabcf67a5dcc490123197af7fd9ad78d9d",
+    "gpui-fast-apple": "94395e1c8cc1e0795d3bac933d8701582eb3e6b274db09919dca24eab379d801",
+    "gpui-fast-windows": "e07b0bad5ff42b905882f91797540299a6747a1a34d07696083e3be3bb580c67",
+    "gpui-fast-wgpu": "9c02b5c6805781c8978d568df0bd62845a728bc9ac176ec8c4337b65a5daf41f",
 }
 
 # Mirrors serve byte-identical crates, so the pinned SHA-256 still applies.
@@ -97,8 +97,8 @@ def main():
                         with source, destination.open("wb") as output:
                             shutil.copyfileobj(source, output)
             # The Metal build script uses the sibling patched GPUI source instead.
-            if name == "gpui-pre-apple":
-                shutil.rmtree(staging / "vendor" / name / "vendor")
+            if name == "gpui-fast-apple":
+                shutil.rmtree(staging / "vendor" / name / "src/fast/release_gpui")
         for patch in patches:
             # `core.autocrlf=true` (the Windows default) checks the patches out with
             # CRLF, but the extracted crate sources use LF, so `git apply` would fail

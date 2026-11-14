@@ -235,6 +235,7 @@ impl PlayerBar {
                         .top_0()
                         .left(px(16.))
                         .px(px(2.))
+                        .whitespace_nowrap()
                         .rounded_full()
                         .bg(colors.surface)
                         .text_color(shown_color)

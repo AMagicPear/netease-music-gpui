@@ -95,21 +95,19 @@ impl Vinyl {
         arm_angle: Option<f32>,
     ) -> Div {
         let placement = self.placement.clone();
-        div().size(px(side)).flex_none().relative().child(
-            canvas(
-                move |bounds, window, _| {
-                    placement.set(Some(Placement {
-                        bounds,
-                        mask: window.content_mask(),
-                        opacity,
-                        arm_angle,
-                    }));
-                },
-                |_, _, _, _| {},
-            )
-            .absolute()
-            .inset_0(),
-        )
+        div()
+            .size(px(side))
+            .flex_none()
+            .child(div().size_full())
+            // 位置依赖每帧 prepaint，不能复用滚动图层中缓存的旧坐标。
+            .on_children_prepainted(move |bounds, window, _| {
+                placement.set(Some(Placement {
+                    bounds: bounds[0],
+                    mask: window.content_mask(),
+                    opacity,
+                    arm_angle,
+                }));
+            })
     }
 
     fn sync(&mut self, playback: &PlaybackController) -> bool {
@@ -206,5 +204,6 @@ impl Render for Vinyl {
         )
         .absolute()
         .inset_0()
+        .size_full()
     }
 }

@@ -4,10 +4,11 @@ version = "0.1.1"
 edition = "2024"
 
 [dependencies]
-gpui = { package = "gpui-pre", version = "=0.3.8" }
-reqwest-client = { package = "gpui-pre-reqwest-client", version = "=0.3.8" }
-gpui-kit = { git = "https://github.com/longbridge/gpui-kit", default-features = false, features = [
+gpui = { package = "gpui-fast", version = "=0.1.15" }
+reqwest-client = { package = "gpui-pre-reqwest-client", version = "=0.3.12" }
+gpui-kit = { version = "=0.9.1", default-features = false, features = [
     "component",
+    "gpui-fast",
 ] }
 # 本地 vendor：fork 仓库 https://github.com/AMagicPear/ncm-api-rs（git submodule）。
 # 分支 fix/captcha-login-and-deps：修了验证码登录 password 字段的 bug（upstream issue #5）
@@ -61,6 +62,9 @@ gpui-kit = { opt-level = 3 }
 gpui-kit-assets = { opt-level = 3 }
 gpui-pre-macros = { opt-level = 3 }
 gpui-pre-platform = { opt-level = 3 }
+gpui-fast = { opt-level = 3 }
+gpui-fast-macros = { opt-level = 3 }
+gpui-fast-platform = { opt-level = 3 }
 rustybuzz = { opt-level = 3 }
 taffy = { opt-level = 3 }
 ttf-parser = { opt-level = 3 }
@@ -70,7 +74,7 @@ lto = "thin"
 codegen-units = 1
 
 [patch.crates-io]
-gpui-pre = { path = "vendor/gpui-pre" }
-gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
-gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
-gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }
+gpui-fast = { path = "vendor/gpui-fast" }
+gpui-fast-apple = { path = "vendor/gpui-fast-apple" }
+gpui-fast-windows = { path = "vendor/gpui-fast-windows" }
+gpui-fast-wgpu = { path = "vendor/gpui-fast-wgpu" }

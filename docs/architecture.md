@@ -88,4 +88,4 @@ UI、动画和鼠标交互手动运行验收。普通测试不启动窗口、不
 回归保留接口解析、请求取消与过期结果、分页合并、播放队列、音频、缓存和持久化，不为每种展示行为写测试。
 真实接口测试默认忽略，凭据优先使用 `COOKIE`，否则读取已保存的登录会话；只运行所需的命名测试，发布评论测试会产生真实写入。
 
-GPUI 与 reqwest 适配器目前均为 0.3.8；CPAL 0.17.3、Symphonia 0.5.5、音频 reqwest 0.12。以 Cargo.lock 和本地解析源码为准，不能只改锁文件来替换不同版本的客户端类型。补丁与打包见 [vendor/README.md](../vendor/README.md) 和 [README.md](../README.md)。
+此分支使用 GPUI Fast 0.1.15 与 gpui-kit 0.9.1（启用 `gpui-fast` feature），reqwest 适配器使用共享 HTTP 接口的 gpui-pre-reqwest-client 0.3.12；CPAL 0.17.3、Symphonia 0.5.5、音频 reqwest 0.12。以 Cargo.lock 和本地解析源码为准，不能只改锁文件来替换不同版本的客户端类型。补丁与打包见 [vendor/README.md](../vendor/README.md) 和 [README.md](../README.md)。

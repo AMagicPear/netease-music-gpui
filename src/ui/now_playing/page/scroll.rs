@@ -165,7 +165,7 @@ pub(super) struct WheelWatch {
 }
 
 impl WheelWatch {
-    pub(super) fn note(&mut self, now: Instant, event: &ScrollWheelEvent, line_height: Pixels) {
+    pub(super) fn note(&mut self, now: Instant, event: &ScrollEvent, line_height: Pixels) {
         let delta = f32::from(event.delta.pixel_delta(line_height).y);
         let carried = if event.touch_phase == TouchPhase::Started {
             0.
@@ -314,7 +314,7 @@ fn settle_target(scrolled: f32, page_height: f32, direction: f32) -> Pixels {
 #[cfg(test)]
 mod tests {
     use super::{SETTLE_QUIET_FINE, ScrollMotion, WheelWatch, settle_target, toggle_target};
-    use gpui::{ScrollDelta, ScrollHandle, ScrollWheelEvent, TouchPhase, point, px};
+    use gpui::{ScrollDelta, ScrollEvent, ScrollHandle, TouchPhase, point, px};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -334,7 +334,7 @@ mod tests {
             let mut watch = WheelWatch::default();
             watch.note(
                 now,
-                &ScrollWheelEvent {
+                &ScrollEvent {
                     delta: ScrollDelta::Pixels(point(px(0.), px(delta))),
                     touch_phase: TouchPhase::Ended,
                     ..Default::default()

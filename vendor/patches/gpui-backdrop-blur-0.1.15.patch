@@ -1,0 +1,718 @@
+diff --git a/vendor/gpui-fast-apple/build.rs b/vendor/gpui-fast-apple/build.rs
+index 5035080..f4a79e3 100644
+--- a/vendor/gpui-fast-apple/build.rs
++++ b/vendor/gpui-fast-apple/build.rs
+@@ -69,6 +69,8 @@ mod apple_build {
+             "SurfaceInputIndex".into(),
+             "SurfaceBounds".into(),
+             "TransformationMatrix".into(),
++            "BackdropBlur".into(),
++            "BackdropBlurInputIndex".into(),
+         ]);
+         config.no_includes = true;
+         config.enumeration.prefix_with_name = true;
+diff --git a/vendor/gpui-fast-apple/src/fast/layers/raster.rs b/vendor/gpui-fast-apple/src/fast/layers/raster.rs
+index 5f30c90..687c17d 100644
+--- a/vendor/gpui-fast-apple/src/fast/layers/raster.rs
++++ b/vendor/gpui-fast-apple/src/fast/layers/raster.rs
+@@ -219,6 +219,7 @@ fn write_instances(scene: &Scene, writer: &mut InstanceBufferWriter) -> Result<InstanceBindings> {
+             bounds: surface.bounds,
+             content_mask: surface.content_mask,
+         }))?,
++        backdrop_blurs: writer.write(&scene.backdrop_blurs)?,
+     })
+ }
+ 
+@@ -271,7 +272,7 @@ fn draw_tile_scene(
+             // The core keeps paths out of layers: a path rasterized into a
+             // tile and moved by an odd number of pixels antialiases
+             // differently. Metal draws no subpixel sprites.
+-            PrimitiveBatch::Paths(range) | PrimitiveBatch::SubpixelSprites { range, .. } => {
++            PrimitiveBatch::Paths(range) | PrimitiveBatch::BackdropBlurs(range) | PrimitiveBatch::SubpixelSprites { range, .. } => {
+                 debug_assert!(
+                     range.is_empty(),
+                     "a layer tile holds a path or subpixel sprite"
+diff --git a/vendor/gpui-fast-apple/src/fast/paths.rs b/vendor/gpui-fast-apple/src/fast/paths.rs
+index 4ef8d01..6b9c6bb 100644
+--- a/vendor/gpui-fast-apple/src/fast/paths.rs
++++ b/vendor/gpui-fast-apple/src/fast/paths.rs
+@@ -199,6 +199,17 @@ pub(crate) fn draw_primitives_to_texture(
+                     return Err(error);
+                 }
+             }
++            PrimitiveBatch::BackdropBlurs(range) => {
++                command_encoder.endEncoding();
++                command_encoder = renderer.draw_backdrop_blurs(
++                    &scene.backdrop_blurs[range.clone()],
++                    &instance_bindings.backdrop_blurs,
++                    range.start,
++                    texture,
++                    viewport_size,
++                    &command_buffer,
++                )?;
++            }
+             PrimitiveBatch::SubpixelSprites { .. } => unreachable!(),
+         }
+     }
+diff --git a/vendor/gpui-fast-apple/src/fast/rounded_clip.rs b/vendor/gpui-fast-apple/src/fast/rounded_clip.rs
+index 91c7eeb..1942938 100644
+--- a/vendor/gpui-fast-apple/src/fast/rounded_clip.rs
++++ b/vendor/gpui-fast-apple/src/fast/rounded_clip.rs
+@@ -283,6 +283,18 @@ fn encode(
+                 &encoder,
+                 surface_textures,
+             )?,
++            PrimitiveBatch::BackdropBlurs(range) => {
++                encoder.endEncoding();
++                encoder = renderer.draw_backdrop_blurs(
++                    &scene.backdrop_blurs[range.clone()],
++                    &bindings.backdrop_blurs,
++                    range.start,
++                    texture,
++                    viewport,
++                    commands,
++                )?;
++                bind(&encoder, clips, &renderer.device);
++            }
+             PrimitiveBatch::SubpixelSprites { .. } => unreachable!("Metal uses grayscale glyphs"),
+         }
+     }
+diff --git a/vendor/gpui-fast-apple/src/metal_renderer.rs b/vendor/gpui-fast-apple/src/metal_renderer.rs
+index d9c84c2..6948e55 100644
+--- a/vendor/gpui-fast-apple/src/metal_renderer.rs
++++ b/vendor/gpui-fast-apple/src/metal_renderer.rs
+@@ -3,7 +3,7 @@ use crate::metal_atlas::MetalAtlas;
+ use anyhow::{Context as _, Result};
+ use block2::RcBlock;
+ use gpui::{
+-    AtlasTextureId, Background, Bounds, ContentMask, DevicePixels, PaintSurface, Path, Point,
++    AtlasTextureId, BackdropBlur, Background, Bounds, ContentMask, DevicePixels, PaintSurface, Path, Point,
+     PrimitiveBatch, ScaledPixels, Scene, Size, point, size,
+ };
+ #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
+@@ -20,15 +20,15 @@ use objc2_foundation::{NSRange, NSString};
+ #[cfg(target_os = "macos")]
+ use objc2_metal::MTLCopyAllDevices;
+ use objc2_metal::{
+-    MTLBlendFactor, MTLBlendOperation, MTLBuffer, MTLClearColor, MTLCommandBuffer,
++    MTLBlitCommandEncoder, MTLBlendFactor, MTLBlendOperation, MTLBuffer, MTLClearColor, MTLCommandBuffer,
+     MTLCommandEncoder, MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLDrawable,
+-    MTLGPUFamily, MTLLibrary, MTLLoadAction, MTLPixelFormat, MTLPrimitiveType,
++    MTLGPUFamily, MTLLibrary, MTLLoadAction, MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLSize,
+     MTLRenderCommandEncoder, MTLRenderPassDescriptor, MTLRenderPipelineDescriptor,
+     MTLRenderPipelineState, MTLResourceOptions, MTLStorageMode, MTLStoreAction, MTLTexture,
+     MTLTextureDescriptor, MTLTextureType, MTLTextureUsage, MTLViewport,
+ };
+ #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
+-use objc2_metal::{MTLBlitCommandEncoder, MTLOrigin, MTLRegion, MTLSize};
++use objc2_metal::MTLRegion;
+ use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
+ use parking_lot::Mutex;
+ 
+@@ -148,12 +148,14 @@ pub struct MetalRenderer {
+     monochrome_sprites_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+     pub(crate) polychrome_sprites_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+     surfaces_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
++    backdrop_blur_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+     pub(crate) unit_vertices: Retained<ProtocolObject<dyn MTLBuffer>>,
+     pub(crate) instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
+     pub(crate) sprite_atlas: Arc<MetalAtlas>,
+     core_video_texture_cache: CFRetained<CVMetalTextureCache>,
+     pub(crate) path_intermediate_texture: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
+     pub(crate) path_intermediate_msaa_texture: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
++    backdrop_capture_texture: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
+     path_sample_count: u32,
+     /// Offscreen render target reused across `render_scene` calls when
+     /// rendering headlessly without reading pixels back.
+@@ -218,10 +220,7 @@ impl MetalRenderer {
+         // https://developer.apple.com/documentation/metal/managing-your-game-window-for-metal-in-macos
+         layer.setOpaque(!transparent);
+         layer.setMaximumDrawableCount(3);
+-        // Allow texture reading for visual tests and UI automation screenshots
+-        // (captures without ScreenCaptureKit). Only debug builds pay the
+-        // presentation cost, even when `test-support` is compiled in.
+-        #[cfg(all(feature = "test-support", debug_assertions))]
++        // Backdrop blur samples the current drawable directly on the GPU.
+         layer.setFramebufferOnly(false);
+         layer.setAllowsNextDrawableTimeout(false);
+         layer.setNeedsDisplayOnBoundsChange(true);
+@@ -400,6 +399,14 @@ impl MetalRenderer {
+             MTLPixelFormat::BGRA8Unorm,
+         )?;
+ 
++        let backdrop_blur_pipeline_state = build_path_sprite_pipeline_state(
++            &device,
++            &library,
++            "backdrop_blur",
++            "backdrop_blur_vertex",
++            "backdrop_blur_fragment",
++            MTLPixelFormat::BGRA8Unorm,
++        )?;
+         let command_queue = crate::fast::dynamic_textures::command_queue(&device)?;
+         let supports_shared_storage = cfg!(target_os = "ios") || is_apple_gpu;
+         #[expect(
+@@ -438,12 +445,14 @@ impl MetalRenderer {
+             monochrome_sprites_pipeline_state,
+             polychrome_sprites_pipeline_state,
+             surfaces_pipeline_state,
++            backdrop_blur_pipeline_state,
+             unit_vertices,
+             instance_buffer_pool,
+             sprite_atlas,
+             core_video_texture_cache,
+             path_intermediate_texture: None,
+             path_intermediate_msaa_texture: None,
++            backdrop_capture_texture: None,
+             path_sample_count: PATH_SAMPLE_COUNT,
+             #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
+             headless_render_target: None,
+@@ -960,6 +969,17 @@ impl MetalRenderer {
+                         return Err(error);
+                     }
+                 }
++                PrimitiveBatch::BackdropBlurs(range) => {
++                    command_encoder.endEncoding();
++                    command_encoder = self.draw_backdrop_blurs(
++                        &scene.backdrop_blurs[range.clone()],
++                        &instance_bindings.backdrop_blurs,
++                        range.start,
++                        texture,
++                        viewport_size,
++                        &command_buffer,
++                    )?;
++                }
+                 PrimitiveBatch::SubpixelSprites { .. } => unreachable!(),
+             }
+         }
+@@ -969,6 +989,69 @@ impl MetalRenderer {
+         Ok(command_buffer)
+     }
+ 
++    pub(crate) fn draw_backdrop_blurs(
++        &mut self,
++        blurs: &[BackdropBlur],
++        binding: &InstanceBinding,
++        start: usize,
++        target: &ProtocolObject<dyn MTLTexture>,
++        viewport_size: Size<DevicePixels>,
++        command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
++    ) -> Result<Retained<ProtocolObject<dyn MTLRenderCommandEncoder>>> {
++        let width = target.width();
++        let height = target.height();
++        if self.backdrop_capture_texture.as_ref().is_none_or(|capture| {
++            capture.width() != width || capture.height() != height
++        }) {
++            self.backdrop_capture_texture =
++                Some(new_backdrop_capture_texture(&self.device, width, height)?);
++        }
++        let capture = self.backdrop_capture_texture.as_ref().unwrap();
++        let blit = command_buffer.blitCommandEncoder().context("creating backdrop blit encoder")?;
++        // SAFETY: Both textures have matching dimensions; the copy covers their base level.
++        unsafe {
++            blit.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin(
++                target,
++                0,
++                0,
++                MTLOrigin { x: 0, y: 0, z: 0 },
++                MTLSize { width, height, depth: 1 },
++                capture,
++                0,
++                0,
++                MTLOrigin { x: 0, y: 0, z: 0 },
++            );
++        }
++        blit.generateMipmapsForTexture(capture);
++        blit.endEncoding();
++
++        let encoder = new_command_encoder_for_texture(command_buffer, target, viewport_size, None)?;
++        encoder.setRenderPipelineState(&self.backdrop_blur_pipeline_state);
++        // SAFETY: Buffers contain six unit vertices and the uploaded blur range;
++        // Metal retains them and copies viewport bytes before this call returns.
++        unsafe {
++            encoder.setVertexBuffer_offset_atIndex(
++                Some(&self.unit_vertices), 0, BackdropBlurInputIndex::Vertices as usize,
++            );
++            encoder.setVertexBuffer_offset_atIndex(
++                Some(&binding.buffer), binding.offset, BackdropBlurInputIndex::Blurs as usize,
++            );
++            encoder.setFragmentBuffer_offset_atIndex(
++                Some(&binding.buffer), binding.offset, BackdropBlurInputIndex::Blurs as usize,
++            );
++            encoder.setVertexBytes_length_atIndex(
++                ptr::NonNull::from(&viewport_size).cast(),
++                mem::size_of_val(&viewport_size),
++                BackdropBlurInputIndex::ViewportSize as usize,
++            );
++            encoder.setFragmentTexture_atIndex(Some(capture), 0);
++            encoder.drawPrimitives_vertexStart_vertexCount_instanceCount_baseInstance(
++                MTLPrimitiveType::Triangle, 0, 6, blurs.len(), start,
++            );
++        }
++        Ok(encoder)
++    }
++
+     pub(crate) fn draw_paths_to_intermediate(
+         &self,
+         paths: &[Path<ScaledPixels>],
+@@ -1587,6 +1667,25 @@ fn read_texture_to_image(texture: &ProtocolObject<dyn MTLTexture>) -> Result<Rgb
+     RgbaImage::from_raw(width, height, pixels).context("creating RGBA image from pixel data")
+ }
+ 
++/// Mipmapped capture keeps widely spaced blur taps from aliasing into a grid.
++fn new_backdrop_capture_texture(
++    device: &ProtocolObject<dyn MTLDevice>,
++    width: usize,
++    height: usize,
++) -> Result<Retained<ProtocolObject<dyn MTLTexture>>> {
++    let descriptor = MTLTextureDescriptor::new();
++    // SAFETY: Dimensions come from the existing target texture and define a complete mip chain.
++    unsafe {
++        descriptor.setWidth(width);
++        descriptor.setHeight(height);
++        descriptor.setMipmapLevelCount(width.max(height).max(1).ilog2() as usize + 1);
++    }
++    descriptor.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
++    descriptor.setStorageMode(MTLStorageMode::Private);
++    descriptor.setUsage(MTLTextureUsage::ShaderRead | MTLTextureUsage::RenderTarget);
++    device.newTextureWithDescriptor(&descriptor).context("allocating backdrop capture texture")
++}
++
+ fn build_pipeline_state(
+     device: &ProtocolObject<dyn MTLDevice>,
+     library: &ProtocolObject<dyn MTLLibrary>,
+@@ -1710,6 +1806,7 @@ pub(crate) struct InstanceBindings {
+     pub(crate) monochrome_sprites: InstanceBinding,
+     pub(crate) polychrome_sprites: InstanceBinding,
+     pub(crate) surfaces: InstanceBinding,
++    pub(crate) backdrop_blurs: InstanceBinding,
+ }
+ 
+ pub(crate) fn write_instances(scene: &Scene, writer: &mut InstanceBufferWriter) -> Result<InstanceBindings> {
+@@ -1723,6 +1820,7 @@ pub(crate) fn write_instances(scene: &Scene, writer: &mut InstanceBufferWriter)
+             bounds: surface.bounds,
+             content_mask: surface.content_mask,
+         }))?,
++        backdrop_blurs: writer.write(&scene.backdrop_blurs)?,
+     })
+ }
+ 
+@@ -1903,6 +2001,13 @@ enum SurfaceInputIndex {
+     CbCrTexture = 5,
+ }
+ 
++#[repr(C)]
++enum BackdropBlurInputIndex {
++    Vertices = 0,
++    Blurs = 1,
++    ViewportSize = 2,
++}
++
+ #[repr(C)]
+ pub(crate) enum PathRasterizationInputIndex {
+     Vertices = 0,
+diff --git a/vendor/gpui-fast-apple/src/shaders.metal b/vendor/gpui-fast-apple/src/shaders.metal
+index ea405e6..26d629c 100644
+--- a/vendor/gpui-fast-apple/src/shaders.metal
++++ b/vendor/gpui-fast-apple/src/shaders.metal
+@@ -732,6 +732,58 @@ fragment float4 polychrome_sprite_fragment(
+   return color;
+ }
+ 
++struct BackdropBlurVertexOutput {
++  float4 position [[position]];
++  float4 clip_distance;
++  uint blur_id [[flat]];
++};
++
++vertex BackdropBlurVertexOutput backdrop_blur_vertex(
++    uint vertex_id [[vertex_id]], uint blur_id [[instance_id]],
++    constant float2 *unit_vertices [[buffer(BackdropBlurInputIndex_Vertices)]],
++    constant BackdropBlur *blurs [[buffer(BackdropBlurInputIndex_Blurs)]],
++    constant Size_DevicePixels *viewport_size [[buffer(BackdropBlurInputIndex_ViewportSize)]]) {
++  float2 unit = unit_vertices[vertex_id];
++  BackdropBlur blur = blurs[blur_id];
++  float4 clip = distance_from_clip_rect(unit, blur.bounds, blur.content_mask.bounds);
++  return {to_device_position(unit, blur.bounds, viewport_size), clip, blur_id};
++}
++
++fragment float4 backdrop_blur_fragment(
++    BackdropBlurVertexOutput input [[stage_in]],
++    constant BackdropBlur *blurs [[buffer(BackdropBlurInputIndex_Blurs)]],
++    texture2d<float> source [[texture(0)]]) {
++  if (any(input.clip_distance < float4(0.0))) return float4(0.0);
++  BackdropBlur blur = blurs[input.blur_id];
++  float distance = quad_sdf(input.position.xy, blur.bounds, blur.corner_radii);
++  if (distance > 0.5) return float4(0.0);
++  // Trilinear sampling is required for the explicit `level()` below to work:
++  // with mip_filter::none the sampler stays "not mipmapped" and every tap reads
++  // level 0, which is what aliases the backdrop into a visible grid.
++  constexpr sampler linear_sampler(mag_filter::linear, min_filter::linear, mip_filter::linear);
++  float2 texel = 1.0 / float2(source.get_width(), source.get_height());
++  float2 uv = input.position.xy * texel;
++  float radius = max(blur.radius, 0.5);
++  // The 17x17 taps sit on a lattice whose spacing grows with the radius. A tap
++  // reaches only one texel at level 0, so once the spacing passes a texel the
++  // lattice starts aliasing the backdrop into a grid. Read the mip level whose
++  // texels are as wide as the spacing instead, so a tap averages a whole cell.
++  float spacing = max(radius * 0.25, 1.0);
++  float lod = clamp(log2(spacing), 0.0, float(source.get_num_mip_levels() - 1));
++  float4 color = float4(0.0);
++  float weight_sum = 0.0;
++  for (int y = -8; y <= 8; ++y) {
++    for (int x = -8; x <= 8; ++x) {
++      float weight = exp(-float(x * x + y * y) / 32.0);
++      color += source.sample(linear_sampler, uv + float2(x, y) * texel * spacing, level(lod)) * weight;
++      weight_sum += weight;
++    }
++  }
++  color /= weight_sum;
++  color *= saturate(0.5 - distance);
++  return color;
++}
++
+ struct PathRasterizationVertexOutput {
+   float4 position [[position]];
+   float2 st_position;
+diff --git a/vendor/gpui-fast-wgpu/src/fast/frame.rs b/vendor/gpui-fast-wgpu/src/fast/frame.rs
+index 2e0927a..f22090e 100644
+--- a/vendor/gpui-fast-wgpu/src/fast/frame.rs
++++ b/vendor/gpui-fast-wgpu/src/fast/frame.rs
+@@ -963,6 +963,7 @@ pub(crate) fn draw_scene(
+             // Surfaces are macOS-only for video playback and are not
+             // implemented by the WGPU renderer.
+             PrimitiveBatch::Surfaces(_surfaces) => {}
++            PrimitiveBatch::BackdropBlurs(_) => {}
+         }
+     }
+     drop(pass);
+diff --git a/vendor/gpui-fast-wgpu/src/wgpu_renderer.rs b/vendor/gpui-fast-wgpu/src/wgpu_renderer.rs
+index 27cbeb7..e59df6d 100644
+--- a/vendor/gpui-fast-wgpu/src/wgpu_renderer.rs
++++ b/vendor/gpui-fast-wgpu/src/wgpu_renderer.rs
+@@ -1641,6 +1641,8 @@ impl WgpuRendererCore {
+                     // Surfaces are macOS-only for video playback and are not
+                     // implemented by the WGPU renderer.
+                     PrimitiveBatch::Surfaces(_surfaces) => {}
++                    // Backdrop sampling is currently Metal-only.
++                    PrimitiveBatch::BackdropBlurs(_blurs) => {}
+                 }
+             }
+         }
+diff --git a/vendor/gpui-fast/src/fast/layers/background.rs b/vendor/gpui-fast/src/fast/layers/background.rs
+index 14e29be..3c552ba 100644
+--- a/vendor/gpui-fast/src/fast/layers/background.rs
++++ b/vendor/gpui-fast/src/fast/layers/background.rs
+@@ -131,5 +131,6 @@ pub(crate) fn draw_order(primitive: &Primitive) -> DrawOrder {
+         Primitive::SubpixelSprite(sprite) => sprite.order,
+         Primitive::PolychromeSprite(sprite) => sprite.order,
+         Primitive::Surface(surface) => surface.order,
++        Primitive::BackdropBlur(blur) => blur.order,
+     }
+ }
+diff --git a/vendor/gpui-fast/src/fast/layers/overlay.rs b/vendor/gpui-fast/src/fast/layers/overlay.rs
+index e91e718..70856e6 100644
+--- a/vendor/gpui-fast/src/fast/layers/overlay.rs
++++ b/vendor/gpui-fast/src/fast/layers/overlay.rs
+@@ -58,6 +58,7 @@ fn rank(primitive: &Primitive) -> u8 {
+         Primitive::SubpixelSprite(_) => 5,
+         Primitive::PolychromeSprite(_) => 6,
+         Primitive::Surface(_) => 7,
++        Primitive::BackdropBlur(_) => 8,
+     }
+ }
+ 
+@@ -70,6 +71,6 @@ pub(crate) fn split(
+     let painted_path = operations
+         .iter()
+-        .any(|operation| matches!(operation, PaintOperation::Primitive(Primitive::Path(_))));
++        .any(|operation| matches!(operation, PaintOperation::Primitive(Primitive::Path(_) | Primitive::BackdropBlur(_))));
+     if !painted_path {
+         return None;
+     }
+@@ -104,7 +105,7 @@ pub(crate) fn split(
+     let mut overlay = Vec::new();
+     for ((_, _, ix), primitive) in sequence {
+         let reach = reach(primitive);
+-        if matches!(primitive, Primitive::Path(_))
++        if matches!(primitive, Primitive::Path(_) | Primitive::BackdropBlur(_))
+             || union.is_some_and(|union| union.intersects(&reach))
+                 && reaches.iter().any(|earlier| earlier.intersects(&reach))
+         {
+diff --git a/vendor/gpui-fast/src/fast/layers/paint.rs b/vendor/gpui-fast/src/fast/layers/paint.rs
+index 510831f..0c46998 100644
+--- a/vendor/gpui-fast/src/fast/layers/paint.rs
++++ b/vendor/gpui-fast/src/fast/layers/paint.rs
+@@ -697,6 +697,7 @@ fn clip_primitive(primitive: &mut Primitive, viewports: Viewports) {
+         Primitive::SubpixelSprite(p) => clip(&mut p.content_mask),
+         Primitive::PolychromeSprite(p) => clip(&mut p.content_mask),
+         Primitive::Surface(p) => clip(&mut p.content_mask),
++        Primitive::BackdropBlur(p) => clip(&mut p.content_mask),
+     }
+ }
+ 
+@@ -754,7 +755,7 @@ fn paint(
+     let has_paths = content
+         .paint_operations
+         .iter()
+-        .any(|operation| matches!(operation, PaintOperation::Primitive(Primitive::Path(_))));
++        .any(|operation| matches!(operation, PaintOperation::Primitive(Primitive::Path(_) | Primitive::BackdropBlur(_))));
+     let mut visible = painting.viewport.scale(scale_factor);
+     visible.origin += to_content;
+     let mut rendered_work = 0;
+diff --git a/vendor/gpui-fast/src/fast/layers/scene.rs b/vendor/gpui-fast/src/fast/layers/scene.rs
+index 9aa6dac..20a8e06 100644
+--- a/vendor/gpui-fast/src/fast/layers/scene.rs
++++ b/vendor/gpui-fast/src/fast/layers/scene.rs
+@@ -359,6 +359,10 @@ pub(crate) fn move_primitive(primitive: &mut Primitive, delta: Point<ScaledPixel
+             mv(&mut surface.bounds);
+             mv(&mut surface.content_mask.bounds);
+         }
++        Primitive::BackdropBlur(blur) => {
++            mv(&mut blur.bounds);
++            mv(&mut blur.content_mask.bounds);
++        }
+     }
+ }
+ 
+diff --git a/vendor/gpui-fast/src/fast/layers/tiles.rs b/vendor/gpui-fast/src/fast/layers/tiles.rs
+index 771c3ae..a1acca4 100644
+--- a/vendor/gpui-fast/src/fast/layers/tiles.rs
++++ b/vendor/gpui-fast/src/fast/layers/tiles.rs
+@@ -295,6 +295,13 @@ fn hash_primitive(primitive: &Primitive, tile: &Bounds<ScaledPixels>, hasher: &m
+             // texture dirties the tiles showing it.
+             hasher.write_u32(sprite.pad);
+         }
++        Primitive::BackdropBlur(blur) => {
++            hasher.write_u8(8);
++            hash_bounds(&blur.bounds, hasher);
++            hash_mask(&blur.content_mask, tile, hasher);
++            hash_corners(&blur.corner_radii, hasher);
++            hash_f32(blur.radius.0, hasher);
++        }
+         Primitive::Surface(surface) => {
+             // A surface's pixels come from outside the scene; layers never
+             // hold one (spec §6.5), so it only needs to hash apart.
+diff --git a/vendor/gpui-fast/src/fast/layers/verify.rs b/vendor/gpui-fast/src/fast/layers/verify.rs
+index 1949c0f..cfc13a6 100644
+--- a/vendor/gpui-fast/src/fast/layers/verify.rs
++++ b/vendor/gpui-fast/src/fast/layers/verify.rs
+@@ -37,6 +37,7 @@ fn drawing_sequence(scene: &Scene) -> Vec<Primitive> {
+     gather!(subpixel_sprites, 5, SubpixelSprite);
+     gather!(polychrome_sprites, 6, PolychromeSprite);
+     gather!(surfaces, 7, Surface);
++    gather!(backdrop_blurs, 8, BackdropBlur);
+     sequence.sort_by_key(|(key, _)| *key);
+     sequence
+         .into_iter()
+@@ -66,6 +67,7 @@ fn clip_to(primitive: &mut Primitive, mask: &Bounds<ScaledPixels>) {
+         Primitive::SubpixelSprite(p) => &mut p.content_mask,
+         Primitive::PolychromeSprite(p) => &mut p.content_mask,
+         Primitive::Surface(p) => &mut p.content_mask,
++        Primitive::BackdropBlur(p) => &mut p.content_mask,
+     };
+     content_mask.bounds = content_mask.bounds.intersect(mask);
+ }
+@@ -226,6 +228,7 @@ fn describe(primitive: &Primitive) -> String {
+             }
+         ),
+         Primitive::Surface(p) => format!("surface {:?} {:?}", p.bounds, p.content_mask),
++        Primitive::BackdropBlur(p) => format!("{:?}", crate::BackdropBlur { order: 0, ..*p }),
+     }
+ }
+ 
+diff --git a/vendor/gpui-fast/src/scene.rs b/vendor/gpui-fast/src/scene.rs
+index 5e1345b..f7060f0 100644
+--- a/vendor/gpui-fast/src/scene.rs
++++ b/vendor/gpui-fast/src/scene.rs
+@@ -51,6 +51,7 @@ pub struct Scene {
+     pub subpixel_sprites: Vec<SubpixelSprite>,
+     pub polychrome_sprites: Vec<PolychromeSprite>,
+     pub surfaces: Vec<PaintSurface>,
++    pub backdrop_blurs: Vec<BackdropBlur>,
+     pub(crate) sort_scratch: crate::fast::scene::SortScratch,
+     pub(crate) fast_rounded_clip: crate::fast::rounded_clip::SceneClips,
+     pub layers: crate::fast::layers::scene::SceneLayers,
+@@ -71,6 +72,7 @@ impl Scene {
+         self.subpixel_sprites.clear();
+         self.polychrome_sprites.clear();
+         self.surfaces.clear();
++        self.backdrop_blurs.clear();
+         crate::fast::layers::scene::SceneLayers::clear(&mut self.layers);
+     }
+ 
+@@ -139,6 +141,10 @@ impl Scene {
+                 surface.order = order;
+                 self.surfaces.push(surface.clone());
+             }
++            Primitive::BackdropBlur(blur) => {
++                blur.order = order;
++                self.backdrop_blurs.push(*blur);
++            }
+         }
+         self.paint_operations
+             .push(PaintOperation::Primitive(primitive));
+@@ -160,6 +166,7 @@ impl Scene {
+ 
+     pub fn finish(&mut self) {
+         crate::fast::scene::sort_in_drawing_order(self);
++        self.backdrop_blurs.sort_by_key(|blur| blur.order);
+     }
+ 
+     #[cfg_attr(
+@@ -187,6 +194,8 @@ impl Scene {
+             polychrome_sprites_iter: self.polychrome_sprites.iter().peekable(),
+             surfaces_start: 0,
+             surfaces_iter: self.surfaces.iter().peekable(),
++            backdrop_blurs_start: 0,
++            backdrop_blurs_iter: self.backdrop_blurs.iter().peekable(),
+         }
+     }
+ }
+@@ -209,6 +218,7 @@ pub(crate) enum PrimitiveKind {
+     SubpixelSprite,
+     PolychromeSprite,
+     Surface,
++    BackdropBlur,
+ }
+ 
+ pub(crate) enum PaintOperation {
+@@ -229,6 +239,7 @@ pub enum Primitive {
+     SubpixelSprite(SubpixelSprite),
+     PolychromeSprite(PolychromeSprite),
+     Surface(PaintSurface),
++    BackdropBlur(BackdropBlur),
+ }
+ 
+ #[expect(missing_docs)]
+@@ -243,6 +254,7 @@ impl Primitive {
+             Primitive::SubpixelSprite(sprite) => &sprite.bounds,
+             Primitive::PolychromeSprite(sprite) => &sprite.bounds,
+             Primitive::Surface(surface) => &surface.bounds,
++            Primitive::BackdropBlur(blur) => &blur.bounds,
+         }
+     }
+ 
+@@ -256,6 +268,7 @@ impl Primitive {
+             Primitive::SubpixelSprite(sprite) => &sprite.content_mask,
+             Primitive::PolychromeSprite(sprite) => &sprite.content_mask,
+             Primitive::Surface(surface) => &surface.content_mask,
++            Primitive::BackdropBlur(blur) => &blur.content_mask,
+         }
+     }
+ }
+@@ -284,6 +297,8 @@ struct BatchIterator<'a> {
+     polychrome_sprites_iter: Peekable<slice::Iter<'a, PolychromeSprite>>,
+     surfaces_start: usize,
+     surfaces_iter: Peekable<slice::Iter<'a, PaintSurface>>,
++    backdrop_blurs_start: usize,
++    backdrop_blurs_iter: Peekable<slice::Iter<'a, BackdropBlur>>,
+ }
+ 
+ impl<'a> Iterator for BatchIterator<'a> {
+@@ -317,6 +332,10 @@ impl<'a> Iterator for BatchIterator<'a> {
+                 self.surfaces_iter.peek().map(|s| s.order),
+                 PrimitiveKind::Surface,
+             ),
++            (
++                self.backdrop_blurs_iter.peek().map(|b| b.order),
++                PrimitiveKind::BackdropBlur,
++            ),
+         ];
+         orders_and_kinds.sort_by_key(|(order, kind)| (order.unwrap_or(u32::MAX), *kind));
+ 
+@@ -462,6 +481,20 @@ impl<'a> Iterator for BatchIterator<'a> {
+                 self.surfaces_start = surfaces_end;
+                 Some(PrimitiveBatch::Surfaces(surfaces_start..surfaces_end))
+             }
++            PrimitiveKind::BackdropBlur => {
++                let start = self.backdrop_blurs_start;
++                let mut end = start + 1;
++                self.backdrop_blurs_iter.next();
++                while self
++                    .backdrop_blurs_iter
++                    .next_if(|blur| (blur.order, batch_kind) < max_order_and_kind)
++                    .is_some()
++                {
++                    end += 1;
++                }
++                self.backdrop_blurs_start = end;
++                Some(PrimitiveBatch::BackdropBlurs(start..end))
++            }
+         }
+     }
+ }
+@@ -494,6 +527,7 @@ pub enum PrimitiveBatch {
+         range: Range<usize>,
+     },
+     Surfaces(Range<usize>),
++    BackdropBlurs(Range<usize>),
+ }
+ 
+ impl PrimitiveBatch {
+@@ -526,10 +560,28 @@ impl PrimitiveBatch {
+                 )
+             }
+             Self::Surfaces(range) => format!("surfaces ({})", range.len()),
++            Self::BackdropBlurs(range) => format!("backdrop blurs ({})", range.len()),
+         }
+     }
+ }
+ 
++#[derive(Debug, Copy, Clone)]
++#[repr(C)]
++#[expect(missing_docs)]
++pub struct BackdropBlur {
++    pub order: DrawOrder,
++    pub bounds: Bounds<ScaledPixels>,
++    pub content_mask: ContentMask<ScaledPixels>,
++    pub corner_radii: Corners<ScaledPixels>,
++    pub radius: ScaledPixels,
++}
++
++impl From<BackdropBlur> for Primitive {
++    fn from(blur: BackdropBlur) -> Self {
++        Self::BackdropBlur(blur)
++    }
++}
++
+ #[derive(Default, Debug, Copy, Clone)]
+ #[repr(C)]
+ #[expect(missing_docs)]
+diff --git a/vendor/gpui-fast/src/window.rs b/vendor/gpui-fast/src/window.rs
+index 960974d..9e650cf 100644
+--- a/vendor/gpui-fast/src/window.rs
++++ b/vendor/gpui-fast/src/window.rs
+@@ -10,7 +10,7 @@ use crate::taffy::TaffyLayoutEngine;
+ use crate::{
+     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
+     AsyncWindowContext, AtlasTile, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow,
+-    Capslock, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
++    BackdropBlur, Capslock, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
+     DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
+     EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs,
+     Hsla, InputHandler, InputPreference, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent,
+@@ -5057,6 +5057,24 @@ impl Window {
+         }
+     }
+ 
++    /// Paints a GPU backdrop blur within the given rounded rectangle.
++    /// Backends without backdrop sampling keep the region transparent.
++    pub fn paint_backdrop_blur(
++        &mut self,
++        bounds: Bounds<Pixels>,
++        radius: Pixels,
++        corner_radii: Corners<Pixels>,
++    ) {
++        self.invalidator.debug_assert_paint();
++        self.next_frame.scene.insert_primitive(BackdropBlur {
++            order: 0,
++            bounds: self.snap_bounds(bounds),
++            content_mask: self.snapped_content_mask(),
++            corner_radii: corner_radii.scale(self.scale_factor()),
++            radius: self.snap_stroke(radius),
++        });
++    }
++
+     /// Paint the given `Path` into the scene for the next frame at the current z-index.
+     ///
+     /// This method should only be called as part of the paint phase of element drawing.

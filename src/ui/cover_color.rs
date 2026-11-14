@@ -247,11 +247,12 @@ pub(super) fn blend_color(from: Hsla, to: Hsla, t: f32) -> Hsla {
 
 /// 在两套色板之间按进度对 RGB 通道插值。展开/收起黑胶页时，播放栏用同一个进度
 /// 从普通主题色过渡到暗色主题色，而不是整条栏瞬间跳变。
-pub(super) fn blend_colors(from: ColorTokens, to: ColorTokens, t: f32) -> ColorTokens {
+pub(super) fn blend_colors(mut from: ColorTokens, to: ColorTokens, t: f32) -> ColorTokens {
     macro_rules! blend {
-        ($($field:ident),+ $(,)?) => {
-            ColorTokens { $($field: blend_color(from.$field, to.$field, t),)+ }
-        };
+        ($($field:ident),+ $(,)?) => {{
+            $(from.$field = blend_color(from.$field, to.$field, t);)+
+            from
+        }};
     }
     blend!(
         background,
@@ -277,7 +278,16 @@ pub(super) fn blend_colors(from: ColorTokens, to: ColorTokens, t: f32) -> ColorT
 
 #[cfg(test)]
 mod tests {
-    use super::cover_color;
+    use super::{blend_colors, cover_color};
+    use gpui_kit::base::ColorTokens;
+
+    #[test]
+    fn palette_blending_preserves_both_endpoints() {
+        let light = ColorTokens::light();
+        let dark = ColorTokens::dark();
+        assert_eq!(blend_colors(light, dark, 0.), light);
+        assert_eq!(blend_colors(light, dark, 1.), dark);
+    }
 
     #[test]
     fn cover_tint_reads_bgra_and_ignores_transparent_pixels() {

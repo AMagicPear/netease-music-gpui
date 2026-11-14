@@ -235,12 +235,10 @@ mod tests {
 
     #[test]
     fn title_segments_split_the_subtitle_around_hits() {
-        let colors = ColorTokens {
-            foreground: rgb(0x283248).into(),
-            muted_foreground: Hsla {
-                a: 0.6,
-                ..Default::default()
-            },
+        let mut colors = ColorTokens::default();
+        colors.foreground = rgb(0x283248).into();
+        colors.muted_foreground = Hsla {
+            a: 0.6,
             ..Default::default()
         };
         let display = SongDisplay::new(&song_with_subtitle("稻香", "daoxiang"));

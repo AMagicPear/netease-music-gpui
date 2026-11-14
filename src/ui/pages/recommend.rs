@@ -340,7 +340,7 @@ fn card_row(
                 // 竖向手势留给外层页面。
                 .restrict_scroll_to_axis()
                 .track_scroll(&row.scroll.handle)
-                .on_scroll_wheel(move |event, window, _| {
+                .on_scroll(move |event, window, _| {
                     if !event.delta.pixel_delta(window.line_height()).x.is_zero() {
                         target.set(None);
                     }

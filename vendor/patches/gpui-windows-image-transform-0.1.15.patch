@@ -1,9 +1,11 @@
---- a/vendor/gpui-pre-windows/src/shaders.hlsl
-+++ b/vendor/gpui-pre-windows/src/shaders.hlsl
-@@ -1219,12 +1219,14 @@
+diff --git a/vendor/gpui-fast-windows/src/shaders.hlsl b/vendor/gpui-fast-windows/src/shaders.hlsl
+index fc03fcd..74585de 100644
+--- a/vendor/gpui-fast-windows/src/shaders.hlsl
++++ b/vendor/gpui-fast-windows/src/shaders.hlsl
+@@ -1220,12 +1220,14 @@ struct PolychromeSprite {
+     Bounds bounds;
      Bounds content_mask;
      Corners corner_radii;
-     AtlasTile tile;
 +    TransformationMatrix transformation;
  };
  
@@ -15,7 +17,7 @@
      float4 clip_distance: SV_ClipDistance;
  };
  
-@@ -1232,6 +1234,7 @@
+@@ -1233,6 +1235,7 @@ struct PolychromeSpriteFragmentInput {
      nointerpolation uint sprite_id: TEXCOORD0;
      float4 position: SV_Position;
      float2 tile_position: POSITION;
@@ -23,7 +25,7 @@
  };
  
  StructuredBuffer<PolychromeSprite> poly_sprites: register(t1);
-@@ -1240,23 +1243,30 @@
+@@ -1241,23 +1244,30 @@ PolychromeSpriteVertexOutput polychrome_sprite_vertex(uint vertex_id: SV_VertexI
      float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
      uint sprite_id = batch_start_index + instance_id;
      PolychromeSprite sprite = poly_sprites[sprite_id];
